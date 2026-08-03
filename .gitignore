@@ -1,3 +1,6 @@
+
+# Local workspace used by development agents
+/AGENT/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
