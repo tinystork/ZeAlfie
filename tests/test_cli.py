@@ -31,7 +31,8 @@ ABSENT_ZESOLVER = ComponentStatus(
     display_name="ZeSolver",
     installed=False,
     version=None,
-    launchable=False,
+    launch_contract_available=False,
+    matched_entry_point=None,
     reason_code=ReasonCode.DISTRIBUTION_NOT_INSTALLED,
     reason='distribution "ZeSolver" is not installed',
 )
@@ -41,9 +42,21 @@ PRESENT_ZESOLVER = ComponentStatus(
     display_name="ZeSolver",
     installed=True,
     version="1.0.0",
-    launchable=False,
+    launch_contract_available=False,
+    matched_entry_point=None,
     reason_code=ReasonCode.PUBLIC_ENTRY_POINT_NOT_FOUND,
-    reason="no supported public launch entry point",
+    reason='expected public entry point "gui_scripts:zesolver" was not found',
+)
+
+AVAILABLE_WITNESS = ComponentStatus(
+    component_id="witness",
+    display_name="ZeWitness",
+    installed=True,
+    version="0.0.1",
+    launch_contract_available=True,
+    matched_entry_point=None,
+    reason_code=None,
+    reason=None,
 )
 
 
@@ -75,7 +88,7 @@ def test_status_command_outputs_absent_component(monkeypatch) -> None:
     assert "ZeSolver" in output
     assert "Installed: no" in output
     assert "Version: unavailable" in output
-    assert "Launchable: no" in output
+    assert "Launch contract: unavailable" in output
     assert 'Reason: distribution "ZeSolver" is not installed' in output
 
 
@@ -90,8 +103,23 @@ def test_status_command_outputs_present_component(monkeypatch) -> None:
     assert "ZeSolver" in output
     assert "Installed: yes" in output
     assert "Version: 1.0.0" in output
-    assert "Launchable: no" in output
-    assert "Reason: no supported public launch entry point" in output
+    assert "Launch contract: unavailable" in output
+    assert 'Reason: expected public entry point "gui_scripts:zesolver" was not found' in output
+
+
+def test_status_command_outputs_available_contract(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "default_registry", lambda: FakeRegistry(AVAILABLE_WITNESS))
+    stdout = StringIO()
+
+    code = run(["status"], stdout=stdout)
+    output = stdout.getvalue()
+
+    assert code == 0
+    assert "ZeWitness" in output
+    assert "Installed: yes" in output
+    assert "Version: 0.0.1" in output
+    assert "Launch contract: available" in output
+    assert "Reason: none" in output
 
 
 def test_unknown_command_returns_error_code() -> None:
@@ -132,6 +160,6 @@ def test_status_specific_zesolver_displays_reason(monkeypatch) -> None:
     assert "ZeSolver" in output
     assert "Installed: yes" in output
     assert "Version: 1.0.0" in output
-    assert "Launchable: no" in output
-    assert "Reason: no supported public launch entry point" in output
+    assert "Launch contract: unavailable" in output
+    assert 'Reason: expected public entry point "gui_scripts:zesolver" was not found' in output
     assert ReasonCode.PUBLIC_ENTRY_POINT_NOT_FOUND.value not in output

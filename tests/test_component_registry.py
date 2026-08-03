@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from zealfie.components import ComponentDefinition, ComponentStatus, ReasonCode
+from zealfie.components import ComponentDefinition, ComponentStatus, EntryPointContract, ReasonCode
 from zealfie.components.registry import ComponentRegistry, UnknownComponentError, default_registry
 
 
@@ -11,6 +11,21 @@ def test_default_registry_lists_zesolver() -> None:
 
     assert registry.available_ids() == ("zesolver",)
     assert registry.get("zesolver").display_name == "ZeSolver"
+    assert registry.get("zesolver").launch_entry_points == (
+        EntryPointContract("gui_scripts", "zesolver"),
+    )
+
+
+def test_registry_can_be_built_from_injected_definitions() -> None:
+    definition = ComponentDefinition(
+        "witness",
+        "ZeWitness",
+        "zealfie-witness",
+        (EntryPointContract("console_scripts", "zewitness"),),
+    )
+    registry = ComponentRegistry((definition,))
+
+    assert registry.available_ids() == ("witness",)
 
 
 def test_registry_unknown_component_raises_clear_error() -> None:
@@ -21,7 +36,7 @@ def test_registry_unknown_component_raises_clear_error() -> None:
 
 
 def test_registry_rejects_duplicate_ids() -> None:
-    definition = ComponentDefinition("one", "One", "One", ("one",))
+    definition = ComponentDefinition("one", "One", "One", (EntryPointContract("gui_scripts", "one"),))
 
     with pytest.raises(ValueError, match="duplicate component id: one"):
         ComponentRegistry((definition, definition))
@@ -36,7 +51,8 @@ def test_registry_inspects_all_components_with_injected_inspector() -> None:
             display_name=definition.display_name,
             installed=False,
             version=None,
-            launchable=False,
+            launch_contract_available=False,
+            matched_entry_point=None,
             reason_code=ReasonCode.DISTRIBUTION_NOT_INSTALLED,
             reason="not installed",
         )

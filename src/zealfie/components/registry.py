@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from .definitions import KNOWN_COMPONENTS
+from .manifest import load_default_component_definitions
 from .metadata import inspect_component
 from .model import ComponentDefinition, ComponentStatus
 
@@ -52,4 +52,4 @@ class ComponentRegistry:
 
 
 def default_registry() -> ComponentRegistry:
-    return ComponentRegistry(KNOWN_COMPONENTS)
+    return ComponentRegistry(load_default_component_definitions())

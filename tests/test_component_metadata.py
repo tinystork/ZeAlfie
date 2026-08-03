@@ -4,7 +4,7 @@ import importlib.metadata
 from dataclasses import dataclass
 
 from zealfie.components.metadata import inspect_component
-from zealfie.components.model import ComponentDefinition, ReasonCode
+from zealfie.components.model import ComponentDefinition, EntryPointContract, ReasonCode
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +51,12 @@ class FakeProvider:
         return self.result
 
 
-ZESOLVER = ComponentDefinition("zesolver", "ZeSolver", "ZeSolver", ("zesolver",))
+ZESOLVER = ComponentDefinition(
+    "zesolver",
+    "ZeSolver",
+    "ZeSolver",
+    (EntryPointContract("gui_scripts", "zesolver"),),
+)
 
 
 def test_distribution_absent_returns_not_installed_status() -> None:
@@ -62,7 +67,8 @@ def test_distribution_absent_returns_not_installed_status() -> None:
 
     assert status.installed is False
     assert status.version is None
-    assert status.launchable is False
+    assert status.launch_contract_available is False
+    assert status.matched_entry_point is None
     assert status.reason_code is ReasonCode.DISTRIBUTION_NOT_INSTALLED
 
 
@@ -93,26 +99,82 @@ def test_zesolver_scripts_are_not_gui_launch_contract() -> None:
 
     assert status.installed is True
     assert status.version == "1.0.0"
-    assert status.launchable is False
+    assert status.launch_contract_available is False
     assert status.reason_code is ReasonCode.PUBLIC_ENTRY_POINT_NOT_FOUND
 
 
-def test_fictitious_distribution_with_supported_entry_point_is_launchable() -> None:
-    definition = ComponentDefinition("fake", "Fake App", "FakeApp", ("fake-app",))
+def test_entry_point_wrong_group_is_not_a_launch_contract() -> None:
+    status = inspect_component(
+        ZESOLVER,
+        metadata_provider=FakeProvider(
+            FakeDistribution(
+                version="1.0.0",
+                entry_points=(FakeEntryPoint("zesolver", "console_scripts"),),
+            )
+        ),
+    )
+
+    assert status.launch_contract_available is False
+    assert status.matched_entry_point is None
+    assert status.reason_code is ReasonCode.PUBLIC_ENTRY_POINT_NOT_FOUND
+
+
+def test_entry_point_wrong_name_is_not_a_launch_contract() -> None:
+    status = inspect_component(
+        ZESOLVER,
+        metadata_provider=FakeProvider(
+            FakeDistribution(
+                version="1.0.0",
+                entry_points=(FakeEntryPoint("zeblindsolver", "gui_scripts"),),
+            )
+        ),
+    )
+
+    assert status.launch_contract_available is False
+    assert status.matched_entry_point is None
+    assert status.reason_code is ReasonCode.PUBLIC_ENTRY_POINT_NOT_FOUND
+
+
+def test_malformed_observed_entry_point_is_ignored() -> None:
+    status = inspect_component(
+        ZESOLVER,
+        metadata_provider=FakeProvider(
+            FakeDistribution(
+                version="1.0.0",
+                entry_points=(FakeEntryPoint("", ""),),
+            )
+        ),
+    )
+
+    assert status.launch_contract_available is False
+    assert status.matched_entry_point is None
+    assert status.reason_code is ReasonCode.PUBLIC_ENTRY_POINT_NOT_FOUND
+
+
+def test_fictitious_distribution_with_supported_entry_point_has_launch_contract() -> None:
+    definition = ComponentDefinition(
+        "witness",
+        "ZeWitness",
+        "zealfie-witness",
+        (EntryPointContract("console_scripts", "zewitness"),),
+    )
 
     status = inspect_component(
         definition,
         metadata_provider=FakeProvider(
             FakeDistribution(
                 version="0.0.1",
-                entry_points=(FakeEntryPoint("fake-app", "gui_scripts"),),
+                entry_points=(FakeEntryPoint("zewitness", "console_scripts"),),
             )
         ),
     )
 
     assert status.installed is True
     assert status.version == "0.0.1"
-    assert status.launchable is True
+    assert status.launch_contract_available is True
+    assert status.matched_entry_point is not None
+    assert status.matched_entry_point.group == "console_scripts"
+    assert status.matched_entry_point.name == "zewitness"
     assert status.reason_code is None
     assert status.reason is None
 
@@ -124,7 +186,7 @@ def test_metadata_distribution_error_returns_explicit_status() -> None:
     )
 
     assert status.installed is False
-    assert status.launchable is False
+    assert status.launch_contract_available is False
     assert status.reason_code is ReasonCode.DISTRIBUTION_METADATA_ERROR
 
 
@@ -138,7 +200,7 @@ def test_metadata_entry_points_error_returns_explicit_status() -> None:
 
     assert status.installed is True
     assert status.version == "1.0.0"
-    assert status.launchable is False
+    assert status.launch_contract_available is False
     assert status.reason_code is ReasonCode.DISTRIBUTION_METADATA_ERROR
 
 
@@ -152,5 +214,5 @@ def test_metadata_version_error_returns_explicit_status() -> None:
 
     assert status.installed is True
     assert status.version is None
-    assert status.launchable is False
+    assert status.launch_contract_available is False
     assert status.reason_code is ReasonCode.VERSION_UNAVAILABLE

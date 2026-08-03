@@ -47,7 +47,7 @@ ZeAlfie should coordinate these applications through stable and documented publi
 
 The first milestone exposes only a minimal command-line interface.
 
-At this stage, ZeAlfie can inspect known component distributions installed in the active Python environment.
+At this stage, ZeAlfie can load known component definitions from a packaged local TOML manifest and inspect matching distributions installed in the active Python environment.
 
 It does not yet:
 
@@ -58,7 +58,7 @@ It does not yet:
 * manage astronomical catalogues;
 * provide a graphical interface.
 
-The current implementation validates only the package structure, application startup, CLI entry points, version reporting, basic system status reporting, and local component metadata inspection.
+The current implementation validates only the package structure, application startup, CLI entry points, version reporting, basic system status reporting, local component manifest loading, and local component metadata inspection.
 
 ## Component Model
 
@@ -69,20 +69,67 @@ A component definition records:
 * stable component id;
 * display name;
 * Python distribution name;
-* supported public entry point names.
+* expected public launch entry point contracts.
+
+Each launch entry point contract records both:
+
+* entry point group;
+* entry point name.
+
+The group and name are compared exactly. For example, `console_scripts:zesolver` and `gui_scripts:zesolver` are different contracts.
 
 A component status records:
 
 * whether the distribution is installed in the active Python environment;
 * the installed version when available;
-* whether a supported public launch entry point is declared;
-* a stable reason code and user-facing reason when the component is absent or not launchable.
+* whether an expected public launch contract is declared by the installed distribution;
+* the matched entry point metadata when a contract is available;
+* a stable reason code and user-facing reason when the component is absent or its launch contract is unavailable.
 
 Missing components are normal status results, not exceptions at the application layer.
 
+`Launch contract: available` means only that compatible entry point metadata exists. It does not mean ZeAlfie has launched the process, imported the entry point, validated GUI dependencies, checked catalogues, tested GPU capability, or confirmed runtime health.
+
+## Local Component Manifest
+
+Version 0.0.3 ships a local TOML manifest as a package resource:
+
+```text
+zealfie/manifests/components.toml
+```
+
+The manifest currently uses:
+
+```toml
+schema_version = 1
+
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+```
+
+The manifest is loaded with `importlib.resources`, so production code does not depend on the current working directory, a source checkout root, a neighbouring repository, or a Git clone.
+
+Manifest validation rejects:
+
+* missing or unsupported schema versions;
+* missing or incorrectly typed component lists;
+* empty component identifiers, display names, or distribution names;
+* duplicate component identifiers;
+* malformed launch tables;
+* empty or incorrectly typed entry point groups and names;
+* duplicate entry point contracts.
+
+There is no remote manifest, download URL, release channel, hash, signature, installation path, or command field yet.
+
 ## Local Registry
 
-Version 0.0.2 uses a small built-in registry containing ZeSolver.
+Version 0.0.3 builds the local registry from the packaged manifest.
 
 The registry can:
 
@@ -108,6 +155,13 @@ ZeAlfie does not detect components by:
 
 This is intentional because the future shared runtime should be validated through installed distributions, not accidental local source trees.
 
+Distribution absence and metadata errors are distinct:
+
+* `DISTRIBUTION_NOT_INSTALLED` means the distribution is absent from the active environment metadata.
+* `DISTRIBUTION_METADATA_ERROR` means a distribution lookup or metadata result existed but could not be inspected correctly.
+
+The CLI and future GUI must use these reason codes instead of parsing free text.
+
 ## Component Boundary
 
 ZeAlfie must not import internal GUI classes or implementation details from managed applications.
@@ -132,7 +186,7 @@ For ZeSolver, the preferred integration direction is:
 
 Direct imports from ZeSolver GUI modules are not part of the target architecture.
 
-For M0-2, `zeblindsolver`, `zeblindsolve`, and `zebuildindex` are not accepted as ZeSolver application launch contracts. They are solver/index utility scripts, not the public ZeSolver GUI entry point.
+For M0-3, `zeblindsolver`, `zeblindsolve`, and `zebuildindex` are not accepted as ZeSolver application launch contracts. They are solver/index utility scripts, not the public ZeSolver GUI entry point declared in the local manifest.
 
 ## Shared Python Environment
 
@@ -174,10 +228,24 @@ ZeAlfie/
 │       ├── __init__.py
 │       ├── __main__.py
 │       ├── app.py
-│       └── cli.py
+│       ├── cli.py
+│       ├── components/
+│       │   ├── __init__.py
+│       │   ├── manifest.py
+│       │   ├── metadata.py
+│       │   ├── model.py
+│       │   └── registry.py
+│       └── manifests/
+│           └── components.toml
 └── tests/
     ├── test_cli.py
-    └── test_startup.py
+    ├── test_component_manifest.py
+    ├── test_component_metadata.py
+    ├── test_component_model.py
+    ├── test_component_registry.py
+    ├── test_startup.py
+    └── fixtures/
+        └── witness_component/
 ```
 
 ## Provisional Target Structure

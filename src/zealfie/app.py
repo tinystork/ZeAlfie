@@ -68,10 +68,14 @@ def _format_component_status(component: ComponentStatus) -> list[str]:
         f" {component.display_name}",
         f" Installed: {_yes_no(component.installed)}",
         f" Version: {component.version or 'unavailable'}",
-        f" Launchable: {_yes_no(component.launchable)}",
+        f" Launch contract: {_available_unavailable(component.launch_contract_available)}",
         f" Reason: {component.reason or 'none'}",
     ]
 
 
 def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
+
+
+def _available_unavailable(value: bool) -> str:
+    return "available" if value else "unavailable"
