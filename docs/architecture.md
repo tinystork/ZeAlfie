@@ -47,9 +47,10 @@ ZeAlfie should coordinate these applications through stable and documented publi
 
 The first milestone exposes only a minimal command-line interface.
 
-At this stage, ZeAlfie does not yet:
+At this stage, ZeAlfie can inspect known component distributions installed in the active Python environment.
 
-* detect external components;
+It does not yet:
+
 * configure external components;
 * install external components;
 * update external components;
@@ -57,7 +58,55 @@ At this stage, ZeAlfie does not yet:
 * manage astronomical catalogues;
 * provide a graphical interface.
 
-The current implementation validates only the package structure, application startup, CLI entry points, version reporting, and basic system status reporting.
+The current implementation validates only the package structure, application startup, CLI entry points, version reporting, basic system status reporting, and local component metadata inspection.
+
+## Component Model
+
+ZeAlfie separates static component definitions from detected component status.
+
+A component definition records:
+
+* stable component id;
+* display name;
+* Python distribution name;
+* supported public entry point names.
+
+A component status records:
+
+* whether the distribution is installed in the active Python environment;
+* the installed version when available;
+* whether a supported public launch entry point is declared;
+* a stable reason code and user-facing reason when the component is absent or not launchable.
+
+Missing components are normal status results, not exceptions at the application layer.
+
+## Local Registry
+
+Version 0.0.2 uses a small built-in registry containing ZeSolver.
+
+The registry can:
+
+* enumerate known components;
+* return a definition by id;
+* inspect all known components;
+* report unknown ids without a traceback.
+
+There is no plugin system, remote manifest, or dynamic component loading yet.
+
+## Metadata Inspection
+
+Component installation and version detection use `importlib.metadata` against the active Python environment.
+
+ZeAlfie does not detect components by:
+
+* scanning neighbouring repositories;
+* reading personal workspace paths;
+* importing component packages;
+* importing GUI modules;
+* checking Git branches;
+* reconstructing commands from source checkout paths.
+
+This is intentional because the future shared runtime should be validated through installed distributions, not accidental local source trees.
 
 ## Component Boundary
 
@@ -82,6 +131,8 @@ For ZeSolver, the preferred integration direction is:
 5. report clearly when the component is installed but no supported launch contract is available.
 
 Direct imports from ZeSolver GUI modules are not part of the target architecture.
+
+For M0-2, `zeblindsolver`, `zeblindsolve`, and `zebuildindex` are not accepted as ZeSolver application launch contracts. They are solver/index utility scripts, not the public ZeSolver GUI entry point.
 
 ## Shared Python Environment
 

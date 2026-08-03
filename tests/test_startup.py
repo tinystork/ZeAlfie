@@ -14,4 +14,4 @@ def test_startup_message_does_not_require_components() -> None:
 
     assert "Hello, I'm ZeAlfie." in message
     assert "Astronomy Launcher For Imaging Engines" in message
-    assert "ZeSolver" not in message
+    assert "Components:" not in message

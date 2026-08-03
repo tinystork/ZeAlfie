@@ -1,4 +1,4 @@
-"""Small application services for the first ZeAlfie milestone."""
+"""Small application services for ZeAlfie."""
 
 from __future__ import annotations
 
@@ -6,20 +6,20 @@ import platform
 from dataclasses import dataclass
 
 from . import get_version
+from .components import ComponentRegistry, ComponentStatus, default_registry
 
 
 FULL_NAME = "Astronomy Launcher For Imaging Engines"
-COMPONENT_STATUS = "not yet configured"
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeStatus:
-    """Runtime facts that can be reported without probing external components."""
+    """Runtime facts and known component statuses."""
 
     version: str
     platform_name: str
     python_version: str
-    components: str
+    components: tuple[ComponentStatus, ...]
 
 
 def startup_message() -> str:
@@ -33,23 +33,45 @@ def startup_message() -> str:
     )
 
 
-def collect_status() -> RuntimeStatus:
+def collect_status(registry: ComponentRegistry | None = None) -> RuntimeStatus:
     """Collect real local status without requiring any ZeSoftware component."""
+    active_registry = registry or default_registry()
     return RuntimeStatus(
         version=get_version(),
         platform_name=platform.system() or platform.platform(),
         python_version=platform.python_version(),
-        components=COMPONENT_STATUS,
+        components=active_registry.inspect_all(),
     )
 
 
 def format_status(status: RuntimeStatus) -> str:
     """Format status for CLI output."""
-    return "\n".join(
-        (
-            f"ZeAlfie {status.version}",
-            f"Platform: {status.platform_name}",
-            f"Python: {status.python_version}",
-            f"Components: {status.components}",
-        )
-    )
+    lines = [
+        f"ZeAlfie {status.version}",
+        f"Platform: {status.platform_name}",
+        f"Python: {status.python_version}",
+        "",
+        "Components:",
+    ]
+    for component in status.components:
+        lines.extend(_format_component_status(component))
+    return "\n".join(lines)
+
+
+def format_component_status(component: ComponentStatus) -> str:
+    """Format a single component status for CLI output."""
+    return "\n".join(_format_component_status(component))
+
+
+def _format_component_status(component: ComponentStatus) -> list[str]:
+    return [
+        f" {component.display_name}",
+        f" Installed: {_yes_no(component.installed)}",
+        f" Version: {component.version or 'unavailable'}",
+        f" Launchable: {_yes_no(component.launchable)}",
+        f" Reason: {component.reason or 'none'}",
+    ]
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"

@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from typing import TextIO
 
 from . import get_version
-from .app import collect_status, format_status, startup_message
+from .app import collect_status, format_component_status, format_status, startup_message
+from .components import UnknownComponentError, default_registry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,7 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="show the ZeAlfie version and exit",
     )
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("status", help="show current ZeAlfie runtime status")
+    status_parser = subparsers.add_parser("status", help="show current ZeAlfie runtime status")
+    status_parser.add_argument("component_id", nargs="?", help="optional component id to inspect")
     return parser
 
 
@@ -35,7 +37,19 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
         return 0
 
     if args.command == "status":
-        print(format_status(collect_status()), file=stdout)
+        registry = default_registry()
+        if args.component_id:
+            try:
+                print(format_component_status(registry.inspect(args.component_id)), file=stdout)
+            except UnknownComponentError:
+                available = ", ".join(registry.available_ids()) or "none"
+                print(
+                    f"Unknown component: {args.component_id}. Available components: {available}",
+                    file=stdout,
+                )
+                return 2
+        else:
+            print(format_status(collect_status(registry)), file=stdout)
         return 0
 
     print(startup_message(), file=stdout)
