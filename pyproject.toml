@@ -1,0 +1,31 @@
+# ZeAlfie version 0 configuration.
+# This file is intentionally minimal and may evolve as the project architecture stabilises.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zealfie"
+version = "0.0.1"
+description = "Astronomy Launcher For Imaging Engines"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
+[project.urls]
+Homepage = "https://github.com/tinystork/ZeAlfie"
+Repository = "https://github.com/tinystork/ZeAlfie"
+Issues = "https://github.com/tinystork/ZeAlfie/issues"
+
+[project.scripts]
+zealfie = "zealfie.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["zealfie*"]

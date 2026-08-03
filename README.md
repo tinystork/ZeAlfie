@@ -1,5 +1,35 @@
 # ZeAlfie
-**.A.** stronomy **.L.** auncher **.F.** or **.I.** maging **.E.** ngines, AKA: **.A.** stronomical **.L.** ittle **.F.** ellow **.I.** ntegrating **.E.** verything  
 
-Alfie is the little fellow taking care of all the astro thingies, 
-from there you'll be able to launch Zemosaic, ZeSolver, ZeSeestarStacker or ZeAnalyser without worring of the last version
+ZeAlfie means **Astronomy Launcher For Imaging Engines**.
+
+It is also the **Astronomical Little Fellow Integrating Everything**.
+
+## Version 0 status
+
+ZeAlfie is experimental. Version 0.0.1 only provides an installable package, a minimal command-line entry point, a version option, and a basic local status command.
+
+No ZeSoftware component is installed, detected, configured, updated, or launched by ZeAlfie yet.
+
+## Development install
+
+Use the repository virtual environment:
+
+```bash
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+```
+
+## Commands
+
+```bash
+python -m zealfie
+zealfie
+```
+
+```bash
+zealfie --version
+```
+
+```bash
+zealfie status
+```
