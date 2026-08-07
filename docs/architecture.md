@@ -331,7 +331,35 @@ Future management and verification of shared astronomical resources such as ASTA
 
 ### `runtime/`
 
-Future management of the shared Python runtime and controlled virtual environment.
+Management of the persistent shared Python runtime.
+
+``RuntimeLayout`` defines centralised paths: ``root``, ``current``, and
+``staging`` (reserved).  The production location is derived from
+platform-appropriate directories (XDG on Linux, Application Support on
+macOS, LocalAppData on Windows) and can be overridden via
+``ZEALFIE_RUNTIME_ROOT`` or an explicit *root* parameter.
+
+``RuntimeState`` captures the coarse lifecycle: ``ABSENT``, ``READY``,
+``BROKEN``.  ``RuntimeStatus`` is an immutable snapshot with the resolved
+Python path, version, and a stable ``RuntimeReasonCode``.
+
+``SharedRuntime`` is the top-level manager: ``status()`` inspects the
+runtime, ``create()`` builds a venv idempotently (refusing to destroy a
+broken runtime), and ``install_local_wheel()`` inspects the wheel,
+installs offline, and post-validates via an external probe.
+
+Install outcomes are structured: ``INSTALLED``, ``ALREADY_INSTALLED``,
+``VERSION_MISMATCH``, ``FAILED``.
+
+``probe_runtime_distribution()`` runs a small standard-library-only
+script inside the runtime's Python and returns structured JSON.
+No application code is imported during probing.
+
+The persistent runtime is distinct from both the development ``.venv``
+and the test-only ``TemporaryVenv``.
+
+A future ``current/staging`` switch mechanism is architecturally
+planned but not yet implemented.
 
 ### `updates/`
 

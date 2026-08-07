@@ -67,9 +67,9 @@ def test_zealfie_wheel_contains_dist_info(zealfie_wheel: Path) -> None:
     assert "zealfie" in info.dist_info_dir
 
 
-def test_zealfie_wheel_version_is_0_0_4(zealfie_wheel: Path) -> None:
+def test_zealfie_wheel_version_is_0_0_5(zealfie_wheel: Path) -> None:
     info = inspect_wheel(zealfie_wheel)
-    assert info.version == "0.0.4"
+    assert info.version == "0.0.5"
 
 
 def test_zealfie_wheel_has_cli_entry_point(zealfie_wheel: Path) -> None:

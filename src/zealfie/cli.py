@@ -5,11 +5,19 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TextIO
 
 from . import get_version
 from .app import collect_status, format_component_status, format_status, startup_message
 from .components import UnknownComponentError, default_registry
+from .runtime import (
+    RuntimeReasonCode,
+    RuntimeState,
+    SharedRuntime,
+    SharedRuntimeError,
+    default_runtime_layout,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     status_parser = subparsers.add_parser("status", help="show current ZeAlfie runtime status")
     status_parser.add_argument("component_id", nargs="?", help="optional component id to inspect")
+
+    # -- runtime subcommand --------------------------------------------------
+    runtime_parser = subparsers.add_parser("runtime", help="manage the shared runtime")
+    runtime_subs = runtime_parser.add_subparsers(dest="runtime_command")
+    runtime_status = runtime_subs.add_parser("status", help="show shared runtime status")
+    runtime_create = runtime_subs.add_parser("create", help="create the shared runtime")
     return parser
 
 
@@ -52,8 +66,47 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
             print(format_status(collect_status(registry)), file=stdout)
         return 0
 
+    if args.command == "runtime":
+        layout = default_runtime_layout()
+        rt = SharedRuntime(layout=layout)
+
+        if args.runtime_command == "status":
+            print(_format_runtime_status(rt.status()), file=stdout)
+            return 0
+
+        if args.runtime_command == "create":
+            try:
+                st = rt.create()
+                print(_format_runtime_status(st), file=stdout)
+                return 0
+            except SharedRuntimeError as exc:
+                print(f"Cannot create shared runtime: {exc}", file=sys.stderr)
+                return 3
+
+        # No runtime subcommand given → show help.
+        runtime_parser.print_help(file=stdout)
+        return 0
+
     print(startup_message(), file=stdout)
     return 0
+
+
+def _format_runtime_status(st: "RuntimeStatus") -> str:
+    lines = [
+        f"Shared runtime:",
+        f" State: {st.state.value}",
+        f" Runtime root: {st.runtime_root}",
+        f" Active (current): {st.current}",
+    ]
+    if st.python_executable is not None:
+        lines.append(f" Python: {st.python_executable}")
+    if st.python_version:
+        lines.append(f" Python version: {st.python_version}")
+    if st.reason:
+        lines.append(f" Reason: {st.reason}")
+    if st.reason_code is not None:
+        lines.append(f" Reason code: {st.reason_code.value}")
+    return "\n".join(lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

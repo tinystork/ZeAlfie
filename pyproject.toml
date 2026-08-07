@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zealfie"
-version = "0.0.4"
+version = "0.0.5"
 description = "Astronomy Launcher For Imaging Engines"
 readme = "README.md"
 requires-python = ">=3.11"

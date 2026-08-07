@@ -6,19 +6,27 @@ It is also the **Astronomical Little Fellow Integrating Everything**.
 
 ## Version 0 status
 
-ZeAlfie is experimental. Version 0.0.4 provides an installable package, a minimal command-line entry point, a version option, local inspection of known Python component distributions, a packaged local manifest describing expected components, and a validated local witness cycle:
+ZeAlfie is experimental. Version 0.0.5 provides an installable package, a minimal CLI, local component inspection, a packaged manifest, and a validated local witness cycle.
+
+Key capabilities:
 
 * building wheels from local sources;
-* inspecting wheel archives without executing their code;
-* creating temporary isolated virtual environments;
-* installing wheels offline from local paths only;
-* detecting installed components through real Python metadata;
-* preparing structured launch plans (no shell strings);
-* executing a controlled witness subprocess;
-* capturing stdout, stderr, return code, and timeout;
-* cleaning up temporary environments after validation.
+* inspecting wheel archives without executing code;
+* **persistent shared runtime** with platform-appropriate user location;
+* runtime states: ``ABSENT``, ``READY``, ``BROKEN``;
+* idempotent runtime creation (create twice = no-op);
+* offline local wheel installation with pre- and post-validation;
+* external Python metadata probe (no application code imported);
+* temporary isolated environments for hermetic testing;
+* structured launch plans and controlled subprocess execution.
 
-ZeAlfie does not install, download, update, or launch real ZeSoftware components yet. The witness cycle proves the pipeline but uses only a controlled local test fixture.
+Concepts kept distinct by design:
+
+* **dev venv** (``.venv``) — for development only;
+* **shared runtime** — persistent, managed by ZeAlfie;
+* **temporary venv** — test-only, cleaned up after use.
+
+ZeAlfie does not install, download, update, or launch real ZeSoftware components yet. The witness cycle proves the entire pipeline but uses only a controlled local test fixture.
 
 ## Development install
 
@@ -50,9 +58,21 @@ zealfie status
 
 `Launch contract` means the installed distribution declares a public entry point whose group and name exactly match the contract ZeAlfie knows how to handle. It does not mean the application has been launched or that its runtime dependencies, GUI, catalogues, GPU, or resources have been validated.
 
-ZeSolver may be detected as installed but with `Launch contract: unavailable` until it publishes a compatible public GUI entry point.
+### Shared runtime commands
 
-ZeAlfie still performs no network access, managed installation, update, configuration, or real component launch.
+```bash
+zealfie runtime status
+```
+
+Reports the state (``ABSENT``, ``READY``, ``BROKEN``), location, Python path, and reason code of the persistent shared runtime.
+
+```bash
+zealfie runtime create
+```
+
+Creates the shared runtime at its platform-appropriate location if absent. Idempotent: running it again on a ``READY`` runtime does nothing.
+
+For M0-5 the runtime hosts only the controlled witness fixture. No real ZeSoftware components are installed.
 
 You can also inspect a known component directly:
 
