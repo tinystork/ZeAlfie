@@ -6,9 +6,19 @@ It is also the **Astronomical Little Fellow Integrating Everything**.
 
 ## Version 0 status
 
-ZeAlfie is experimental. Version 0.0.3 provides an installable package, a minimal command-line entry point, a version option, local inspection of known Python component distributions, and a packaged local manifest describing expected components.
+ZeAlfie is experimental. Version 0.0.4 provides an installable package, a minimal command-line entry point, a version option, local inspection of known Python component distributions, a packaged local manifest describing expected components, and a validated local witness cycle:
 
-ZeAlfie does not install, download, update, configure, or launch ZeSoftware components yet.
+* building wheels from local sources;
+* inspecting wheel archives without executing their code;
+* creating temporary isolated virtual environments;
+* installing wheels offline from local paths only;
+* detecting installed components through real Python metadata;
+* preparing structured launch plans (no shell strings);
+* executing a controlled witness subprocess;
+* capturing stdout, stderr, return code, and timeout;
+* cleaning up temporary environments after validation.
+
+ZeAlfie does not install, download, update, or launch real ZeSoftware components yet. The witness cycle proves the pipeline but uses only a controlled local test fixture.
 
 ## Development install
 

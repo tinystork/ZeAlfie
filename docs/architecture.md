@@ -296,7 +296,30 @@ It must not become tied exclusively to either presentation layer.
 
 ### `components/`
 
-Future discovery, status, version, capability, and launching logic for managed ZeSoftware applications.
+Discovery, status, version, capability, and launching logic for managed ZeSoftware applications.
+
+### `building/`
+
+Local wheel construction and inspection.  ``build_wheel`` produces a wheel
+from a source directory using ``python -m build --wheel``.  ``inspect_wheel``
+opens the wheel as a ZIP archive and reports packages, metadata, version,
+and entry points without loading or executing any code from the wheel.
+
+### `environment/`
+
+``TemporaryVenv`` creates an isolated temporary virtual environment,
+installs wheels offline, and runs Python commands inside it.  The
+environment is cleaned up when the context manager exits, even on errors.
+
+### `launching/`
+
+Controlled subprocess execution.  ``LaunchPlan`` is an immutable structured
+command (never a shell string).  ``LaunchResult`` captures return code,
+stdout, stderr, and timeout status.  ``execute_launch_plan`` runs a plan
+with ``shell=False``, captures output as UTF-8 text, and kills the process
+on timeout.  ``resolve_script`` locates a named entry-point script inside
+a venv scripts directory, accounting for platform suffixes (``.exe`` on
+Windows).
 
 ### `diagnostics/`
 
@@ -393,6 +416,9 @@ ZeAlfie is intended to support:
 Platform-specific implementation is acceptable, but platform assumptions should be isolated and documented.
 
 A feature should not be considered fully validated merely because it works on one development machine.
+
+M0-4 adds platform-aware venv path handling (``bin`` vs ``Scripts``, ``.exe``
+suffixes) but physical validation on Windows and macOS has not been performed.
 
 ## Evolution
 
