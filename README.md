@@ -6,7 +6,8 @@ It is also the **Astronomical Little Fellow Integrating Everything**.
 
 ## Version 0 status
 
-ZeAlfie is experimental. Version 0.0.5 provides an installable package, a minimal CLI, local component inspection, a packaged manifest, and a validated local witness cycle.
+ZeAlfie is experimental. Version 0.0.6 introduces a slot-based runtime
+architecture with staged transactions and rollback.
 
 Key capabilities:
 

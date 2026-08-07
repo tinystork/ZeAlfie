@@ -107,7 +107,7 @@ def test_full_witness_cycle(
         ])
         assert r3.returncode == 0, f"importlib.metadata check failed:\n{r3.stderr}"
         lines = r3.stdout.strip().splitlines()
-        assert lines == ["0.0.1", "0.0.5"], f"Unexpected versions: {lines}"
+        assert lines == ["0.0.1", "0.0.6"], f"Unexpected versions: {lines}"
 
         # 4. Verify entry points via real importlib.metadata
         r4 = venv.run_python([

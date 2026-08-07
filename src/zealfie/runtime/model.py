@@ -1,33 +1,36 @@
-"""Structured models for the ZeAlfie shared runtime."""
+"""Structured models for the ZeAlfie shared runtime (M0-6 slot architecture)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
 
 class RuntimeState(StrEnum):
-    """Coarse-grained lifecycle state of the shared runtime."""
-
     ABSENT = "ABSENT"
     READY = "READY"
     BROKEN = "BROKEN"
 
 
 class RuntimeReasonCode(StrEnum):
-    """Stable reason codes produced by runtime status checks."""
-
     RUNTIME_NOT_FOUND = "RUNTIME_NOT_FOUND"
     RUNTIME_PYTHON_NOT_FOUND = "RUNTIME_PYTHON_NOT_FOUND"
     RUNTIME_PYTHON_UNUSABLE = "RUNTIME_PYTHON_UNUSABLE"
     RUNTIME_METADATA_CHECK_FAILED = "RUNTIME_METADATA_CHECK_FAILED"
     RUNTIME_READY = "RUNTIME_READY"
+    # M0-6 additions
+    RUNTIME_STATE_FILE_INVALID = "RUNTIME_STATE_FILE_INVALID"
+    ACTIVE_SLOT_NOT_FOUND = "ACTIVE_SLOT_NOT_FOUND"
+    ACTIVE_SLOT_BROKEN = "ACTIVE_SLOT_BROKEN"
+    CANDIDATE_VALIDATION_FAILED = "CANDIDATE_VALIDATION_FAILED"
+    ACTIVATION_FAILED = "ACTIVATION_FAILED"
+    ROLLBACK_TARGET_NOT_FOUND = "ROLLBACK_TARGET_NOT_FOUND"
+    STALE_TRANSACTION = "STALE_TRANSACTION"
+    SLOT_DISCARD_REFUSED = "SLOT_DISCARD_REFUSED"
 
 
 class InstallOutcome(StrEnum):
-    """Result of attempting to install a local wheel into the runtime."""
-
     INSTALLED = "INSTALLED"
     ALREADY_INSTALLED = "ALREADY_INSTALLED"
     VERSION_MISMATCH = "VERSION_MISMATCH"
@@ -35,28 +38,67 @@ class InstallOutcome(StrEnum):
     FAILED = "FAILED"
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeStatus:
-    """Immutable snapshot of the shared runtime state.
+class CandidateState(StrEnum):
+    PREPARED = "PREPARED"
+    VALID = "VALID"
+    INVALID = "INVALID"
 
-    ``runtime_root`` is the top-level runtime directory (e.g.
-    ``~/.local/share/zealfie/runtime``).  ``current`` is the active
-    venv directory inside it (``runtime_root/current``).
+
+# ---------------------------------------------------------------------------
+# Runtime slot
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSlot:
+    """A named runtime slot with a stable, immutable path."""
+
+    slot_id: str
+    path: Path
+
+
+# ---------------------------------------------------------------------------
+# Active pointer state (persisted as JSON)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveRuntimeState:
+    """The serialisable active/previous slot pointers.
+
+    ``schema_version`` is always ``1`` for M0-6.
     """
 
+    schema_version: int = 1
+    active_slot: str | None = None
+    previous_slot: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Runtime status (evolved)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStatus:
     state: RuntimeState
     runtime_root: Path
-    current: Path
+    active_slot_id: str | None = None
+    active_path: Path | None = None
+    previous_slot_id: str | None = None
     python_executable: Path | None = None
     python_version: str | None = None
     reason_code: RuntimeReasonCode | None = None
     reason: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Install result
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True, slots=True)
 class InstallResult:
-    """Result of a local wheel installation operation."""
-
     outcome: InstallOutcome
     distribution_name: str
     version: str | None = None

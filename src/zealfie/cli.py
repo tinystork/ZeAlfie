@@ -96,8 +96,13 @@ def _format_runtime_status(st: "RuntimeStatus") -> str:
         f"Shared runtime:",
         f" State: {st.state.value}",
         f" Runtime root: {st.runtime_root}",
-        f" Active (current): {st.current}",
     ]
+    if st.active_slot_id:
+        lines.append(f" Active slot: {st.active_slot_id}")
+        if st.active_path:
+            lines.append(f" Active path: {st.active_path}")
+    if st.previous_slot_id:
+        lines.append(f" Previous slot: {st.previous_slot_id}")
     if st.python_executable is not None:
         lines.append(f" Python: {st.python_executable}")
     if st.python_version:
