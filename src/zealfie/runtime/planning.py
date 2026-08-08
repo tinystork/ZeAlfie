@@ -535,8 +535,9 @@ def _validate_probe_payload(probe: dict[str, Any], component_id: str) -> str | N
 
     * ``installed`` must be exactly ``bool``.
     * If ``installed is False``:
-        * ``version`` must be ``None`` or ``str``.
-        * ``entry_points`` must be ``None`` or ``list``.
+        * ``version`` must be present and exactly ``None``.
+        * ``entry_points`` must be present, must be a ``list``, and
+          must be empty.
     * If ``installed is True``:
         * ``version`` must be a non-empty ``str``.
         * ``entry_points`` must be a ``list``.
@@ -554,23 +555,42 @@ def _validate_probe_payload(probe: dict[str, Any], component_id: str) -> str | N
 
     # --- installed False ------------------------------------------------
     if installed is False:
-        version = probe.get("version")
-        if version is not None and not isinstance(version, str):
+        # version must exist and be exactly None.
+        if "version" not in probe:
             return (
                 f"probe payload for {component_id!r}: "
-                f"version must be None or str when installed=False, "
-                f"got {type(version).__name__}"
+                f"missing 'version' key when installed=False"
             )
-        entry_points = probe.get("entry_points")
-        if entry_points is not None and not isinstance(entry_points, list):
+        version = probe["version"]
+        if version is not None:
             return (
                 f"probe payload for {component_id!r}: "
-                f"entry_points must be None or list when installed=False, "
+                f"version must be None when installed=False, "
+                f"got {type(version).__name__}={version!r}"
+            )
+        # entry_points must exist, be a list, and be empty.
+        if "entry_points" not in probe:
+            return (
+                f"probe payload for {component_id!r}: "
+                f"missing 'entry_points' key when installed=False"
+            )
+        entry_points = probe["entry_points"]
+        if not isinstance(entry_points, list):
+            return (
+                f"probe payload for {component_id!r}: "
+                f"entry_points must be a list when installed=False, "
                 f"got {type(entry_points).__name__}"
             )
+        if len(entry_points) != 0:
+            return (
+                f"probe payload for {component_id!r}: "
+                f"entry_points must be empty when installed=False, "
+                f"got {type(entry_points).__name__} "
+                f"with {len(entry_points)} item(s)"
+            )
         return None
-
     # --- installed True -------------------------------------------------
+
     version = probe.get("version")
     if not isinstance(version, str) or not version:
         return (

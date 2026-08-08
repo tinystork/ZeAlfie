@@ -603,6 +603,148 @@ def test_entry_points_non_string_group_name_blocks() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 10-B) M0-8A external closure — absent-distribution payload hardening
+# ---------------------------------------------------------------------------
+
+
+def test_installed_false_non_none_version_blocks() -> None:
+    """installed=False with version='1.0' must block, not INSTALL."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {"python_version": "3.13.5", "installed": False,
+                "version": "1.0", "entry_points": []}
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "version must be None" in (plan.steps[0].reason or "")
+
+
+def test_installed_false_entry_points_none_blocks() -> None:
+    """installed=False with entry_points=None must block, not INSTALL."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {"python_version": "3.13.5", "installed": False,
+                "version": None, "entry_points": None}
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "entry_points must be a list" in (plan.steps[0].reason or "")
+
+
+def test_installed_false_entry_points_non_list_blocks() -> None:
+    """installed=False with entry_points='not-a-list' must block."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {"python_version": "3.13.5", "installed": False,
+                "version": None, "entry_points": "not-a-list"}
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "entry_points must be a list" in (plan.steps[0].reason or "")
+
+
+def test_installed_false_entry_points_non_empty_blocks() -> None:
+    """installed=False with non-empty entry_points must block."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {"python_version": "3.13.5", "installed": False,
+                "version": None,
+                "entry_points": [
+                    {"group": "console_scripts", "name": "zesolver", "value": "..."},
+                ]}
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "entry_points must be empty" in (plan.steps[0].reason or "")
+
+
+def test_installed_false_missing_version_key_blocks() -> None:
+    """installed=False with missing 'version' key must block."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {"python_version": "3.13.5", "installed": False,
+                "entry_points": []}
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "missing 'version' key" in (plan.steps[0].reason or "")
+
+
+def test_installed_false_missing_entry_points_key_blocks() -> None:
+    """installed=False with missing 'entry_points' key must block."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {"python_version": "3.13.5", "installed": False,
+                "version": None}
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "missing 'entry_points' key" in (plan.steps[0].reason or "")
+
+
+def test_installed_false_exact_reproduced_payload_blocks() -> None:
+    """Exact reproduced payload: {installed:False, version:'1.0', entry_points:[123]}."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {"python_version": "3.13.5", "installed": False,
+                "version": "1.0", "entry_points": [123]}
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    # The first validation failure is version must be None, so that's
+    # what the error message should contain.
+    assert "version must be None" in (plan.steps[0].reason or "")
+
+
 # 11) Default probe — READY without explicit probe_distribution
 # ---------------------------------------------------------------------------
 
