@@ -1748,3 +1748,235 @@ def test_host_target_whitespace_only_rejected():
     """HostTarget with whitespace-only field → ValueError."""
     with pytest.raises(ValueError, match="HostTarget.python_tag must be a non-empty string"):
         HostTarget(python_tag="   ", abi_tag="cp312", platform_tag="linux_x86_64")
+
+# ===================================================================
+# M0-7C Final Hardening — untagged artifact filename compatibility
+# ===================================================================
+
+
+def test_untagged_win_artifact_rejected_on_linux(
+    tmp_path, witness_wheel, witness_registry
+):
+    """Untagged py3-none-win_amd64 wheel must not resolve on Linux.
+
+    A fully-untagged manifest entry with a Windows-specific filename
+    must derive tags from the filename and be rejected for a Linux host.
+    """
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-win_amd64.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="no artifact compatible"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
+def test_untagged_linux_artifact_rejected_on_windows(
+    tmp_path, witness_wheel, witness_registry
+):
+    """Untagged py3-none-linux_x86_64 wheel must not resolve on Windows.
+
+    A fully-untagged manifest entry with a Linux-specific filename
+    must derive tags and be rejected for a Windows host.
+    """
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-linux_x86_64.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="no artifact compatible"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "win_amd64"),
+        )
+
+
+def test_untagged_linux_artifact_rejected_on_macos(
+    tmp_path, witness_wheel, witness_registry
+):
+    """Untagged py3-none-linux_x86_64 wheel must not resolve on macOS.
+
+    A fully-untagged manifest entry with a Linux-specific filename
+    must derive tags and be rejected for a macOS host.
+    """
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-linux_x86_64.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="no artifact compatible"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "macosx_14_0_arm64"),
+        )
+
+
+def test_untagged_py3_none_any_resolves_on_linux(
+    tmp_path, witness_wheel, witness_registry
+):
+    """Historical M0-7A-style untagged py3-none-any resolves on Linux.
+
+    A fully-untagged manifest entry with a pure-Python wheel filename
+    must still resolve on a Linux host (backward compat).
+    """
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-any.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+    """))
+
+    verified = resolve_local_release(
+        manifest,
+        registry=witness_registry,
+        artifact_root=root,
+        host=HostTarget("py312", "cp312", "linux_x86_64"),
+    )
+    assert verified.path == artifact
+
+
+def test_untagged_py3_none_any_resolves_on_windows(
+    tmp_path, witness_wheel, witness_registry
+):
+    """Historical M0-7A-style untagged py3-none-any resolves on Windows.
+
+    A fully-untagged manifest entry with a pure-Python wheel filename
+    must also resolve on a non-Linux host (cross-platform compat).
+    """
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-any.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+    """))
+
+    verified = resolve_local_release(
+        manifest,
+        registry=witness_registry,
+        artifact_root=root,
+        host=HostTarget("py312", "cp312", "win_amd64"),
+    )
+    assert verified.path == artifact
+
+
+def test_untagged_partial_tags_fail_closed_through_resolver(
+    tmp_path, witness_wheel, witness_registry
+):
+    """Partially-tagged entries fail closed in the resolver (not just selector).
+
+    An artifact with only a platform_tag but missing python_tag/abi_tag
+    must be rejected by the resolver (normalization step).
+    """
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-any.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+        platform_tag = "any"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="partial compatibility tags"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
+def test_untagged_declared_tags_still_must_match_filename(
+    tmp_path, witness_wheel, witness_registry
+):
+    """Declared tags matching wrong filename platform still rejected.
+
+    A manifest that declares win_amd64 for a wheel whose filename
+    says linux_x86_64 must be rejected (tag validation is preserved).
+    """
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-linux_x86_64.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "win_amd64"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="platform_tag mismatch"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )

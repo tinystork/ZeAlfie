@@ -54,8 +54,10 @@ def resolve_local_release(
 
     _validate_manifest_declared_tags_match_wheel_filenames(manifest)
 
+    effective_manifest = _normalize_manifest_tags(manifest)
+
     try:
-        artifact_index = select_artifact(manifest, host)
+        artifact_index = select_artifact(effective_manifest, host)
     except ArtifactSelectionError as exc:
         raise ReleaseResolutionError(str(exc)) from exc
 
@@ -113,6 +115,54 @@ def _validate_declared_tags_match_wheel_filename(entry: ArtifactEntry) -> None:
             f"platform_tag mismatch for {entry.filename!r}: manifest declares "
             f"{entry.platform_tag!r}, filename declares {expected_platform!r}"
         )
+
+
+def _normalize_manifest_tags(manifest: ReleaseManifest) -> ReleaseManifest:
+    """Derive effective compatibility tags for fully-untagged artifact entries.
+
+    For entries where all three tags are ``None`` (historical M0-7A style),
+    derive ``(python_tag, abi_tag, platform_tag)`` from the wheel filename
+    suffix.  This ensures that a platform-specific wheel with no manifest tags
+    (e.g. ``py3-none-win_amd64``) is not treated as universally compatible.
+
+    Partially-tagged entries (some tags present, some ``None``) are rejected
+    fail-closed.
+
+    Fully-tagged entries are left unchanged.
+
+    Returns a new ``ReleaseManifest``; the original is not mutated.
+    """
+    normalized: list[ArtifactEntry] = []
+
+    for entry in manifest.artifacts:
+        declared = (entry.python_tag, entry.abi_tag, entry.platform_tag)
+
+        if declared == (None, None, None):
+            parsed = _parse_simple_wheel_filename_tags(entry.filename)
+            normalized.append(
+                ArtifactEntry(
+                    filename=entry.filename,
+                    size=entry.size,
+                    sha256=entry.sha256,
+                    python_tag=parsed[0],
+                    abi_tag=parsed[1],
+                    platform_tag=parsed[2],
+                )
+            )
+        elif any(tag is None for tag in declared):
+            raise ReleaseResolutionError(
+                f"partial compatibility tags are not resolvable in the safe resolver for "
+                f"{entry.filename!r}"
+            )
+        else:
+            normalized.append(entry)
+
+    return ReleaseManifest(
+        schema_version=manifest.schema_version,
+        component_id=manifest.component_id,
+        version=manifest.version,
+        artifacts=tuple(normalized),
+    )
 
 
 def _parse_simple_wheel_filename_tags(filename: str) -> tuple[str, str, str]:
