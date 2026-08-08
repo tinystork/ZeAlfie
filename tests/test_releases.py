@@ -712,8 +712,8 @@ def test_exact_tag_match_selected():
     assert manifest.artifacts[idx].filename == "f-win.whl"
 
 
-def test_python_prefix_match():
-    """py3 tag on artifact matches py312 host (prefix)."""
+def test_python_generic_major_match():
+    """py3 tag on artifact matches py312 host (generic major)."""
     toml_text = textwrap.dedent("""\
         schema_version = 1
         component_id = "x"
@@ -729,6 +729,56 @@ def test_python_prefix_match():
     """)
     manifest = parse_release_manifest(toml_text)
     host = HostTarget("py312", "cp312", "linux_x86_64")
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+
+
+@pytest.mark.parametrize(
+    ("artifact_python_tag", "host_python_tag"),
+    [
+        ("py31", "py313"),
+        ("py312", "py313"),
+        ("cp31", "cp313"),
+    ],
+)
+def test_python_tag_long_prefixes_do_not_match(artifact_python_tag, host_python_tag):
+    """Only exact python_tag or generic py-major matching is allowed."""
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "{artifact_python_tag}"
+        abi_tag = "none"
+        platform_tag = "any"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget(host_python_tag, "cp313", "linux_x86_64")
+    with pytest.raises(ArtifactSelectionError, match="no artifact compatible"):
+        select_artifact(manifest, host)
+
+
+def test_python_tag_py313_exact_match_selected():
+    """py313 remains compatible with py313 by exact match."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py313"
+        abi_tag = "none"
+        platform_tag = "any"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py313", "cp313", "linux_x86_64")
     idx = select_artifact(manifest, host)
     assert idx == 0
 

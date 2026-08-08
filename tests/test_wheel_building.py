@@ -404,3 +404,25 @@ def test_build_wheel_with_relative_source_from_repo_root(tmp_path, monkeypatch):
     )
 
     assert result.is_file()
+
+
+def test_build_wheel_with_relative_output_dir_from_repo_root(tmp_path, monkeypatch):
+    """Relative output_dir is resolved once, so build does not nest out/out."""
+    import shutil
+
+    fixture_src = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    fixture_dst = tmp_path / "tests" / "fixtures" / "witness_component"
+    fixture_dst.parent.mkdir(parents=True)
+    shutil.copytree(fixture_src, fixture_dst)
+
+    monkeypatch.chdir(tmp_path)
+    output = Path("relative-output")
+    assert not output.exists()
+
+    wheel = build_wheel("tests/fixtures/witness_component", output_dir=output)
+
+    expected_output = tmp_path / "relative-output"
+    assert wheel.is_file()
+    assert wheel.parent == expected_output
+    assert not (expected_output / "relative-output").exists()
+    assert len(list(expected_output.glob("*.whl"))) == 1

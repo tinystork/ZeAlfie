@@ -64,7 +64,11 @@ def build_wheel(
     source = source.resolve(strict=True)
 
     tmp_own = output_dir is None
-    out = Path(output_dir) if output_dir is not None else Path(tempfile.mkdtemp(prefix="zealfie-build-"))
+    if output_dir is None:
+        out = Path(tempfile.mkdtemp(prefix="zealfie-build-")).resolve(strict=True)
+    else:
+        out = Path(output_dir).resolve(strict=False)
+        out.mkdir(parents=True, exist_ok=True)
     try:
         build_env = {
             "PIP_NO_INDEX": "1",

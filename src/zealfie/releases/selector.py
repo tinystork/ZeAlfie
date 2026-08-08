@@ -18,8 +18,9 @@ Rules (documented, testable, fail-closed):
 
 3. Tag matching rules:
 
-   * *python_tag*: exact match, or the artifact tag is a **prefix**
-     of the host tag (e.g. ``py3`` matches ``py312``).
+   * *python_tag*: exact match, or a generic ``py`` major tag only
+     (e.g. ``py3`` matches ``py312``). Longer prefixes such as
+     ``py31`` do not match ``py313``.
 
    * *abi_tag*: exact match, **or** the artifact tag is ``"none"``
      (pure-Python wheel — compatible with any host ABI).
@@ -128,13 +129,33 @@ def _artifact_compatible(
 
 
 def _python_tag_compatible(artifact_tag: str, host_tag: str) -> bool:
-    """Python tag: exact match or artifact is a prefix of host.
+    """Python tag: exact match or generic py-major match.
 
-    ``py3``  matches ``py312`` (prefix).
+    ``py3``  matches ``py312`` (generic Python 3).
     ``py312`` matches ``py312`` (exact).
-    ``py312`` does **not** match ``py311``.
+    ``py31`` does **not** match ``py313``.
+    ``cp31`` does **not** match ``cp313``.
     """
-    return host_tag == artifact_tag or host_tag.startswith(artifact_tag)
+    if host_tag == artifact_tag:
+        return True
+
+    # M0-7B intentionally implements only one generic form: py<major>.
+    # All other python tags are exact-match only rather than broad prefixes.
+    if not _is_generic_py_major_tag(artifact_tag):
+        return False
+    if not host_tag.startswith("py"):
+        return False
+
+    host_version = host_tag[2:]
+    return (
+        bool(host_version)
+        and host_version.isdigit()
+        and host_version[0] == artifact_tag[2]
+    )
+
+
+def _is_generic_py_major_tag(tag: str) -> bool:
+    return len(tag) == 3 and tag.startswith("py") and tag[2].isdigit()
 
 
 def _abi_tag_compatible(artifact_tag: str, host_tag: str) -> bool:
