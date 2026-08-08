@@ -415,33 +415,64 @@ Future management and verification of shared astronomical resources such as ASTA
 
 Management of the persistent shared Python runtime.
 
-``RuntimeLayout`` defines centralised paths: ``root``, ``current``, and
-``staging`` (reserved).  The production location is derived from
-platform-appropriate directories (XDG on Linux, Application Support on
-macOS, LocalAppData on Windows) and can be overridden via
-``ZEALFIE_RUNTIME_ROOT`` or an explicit *root* parameter.
+M0-6 replaced the earlier single-directory ``current``/``staging`` idea
+with an immutable slot architecture:
+
+```text
+<runtime-root>/
+├── slots/
+│   └── <slot-id>/
+│       └── ... virtual environment ...
+└── state/
+    └── active.json
+```
+
+``RuntimeLayout`` defines centralised paths for ``root``, ``slots`` and
+``state/active.json``.  Slot ids are strictly validated so they cannot be
+absolute paths, parent-directory traversals, or path fragments.  The
+production root is derived from platform-appropriate directories (XDG on
+Linux, Application Support on macOS, LocalAppData on Windows) and can be
+overridden via ``ZEALFIE_RUNTIME_ROOT`` or an explicit *root* parameter.
+
+Slots are created at their final path and are not renamed during activation.
+Activation changes only the atomic ``state/active.json`` pointer.  This
+keeps the active runtime boundary explicit and avoids in-place mutation of
+the currently active virtual environment.
 
 ``RuntimeState`` captures the coarse lifecycle: ``ABSENT``, ``READY``,
-``BROKEN``.  ``RuntimeStatus`` is an immutable snapshot with the resolved
-Python path, version, and a stable ``RuntimeReasonCode``.
+``BROKEN``.  ``RuntimeStatus`` is an immutable snapshot with the active
+slot id/path, previous slot id when known, resolved Python path, version,
+and a stable ``RuntimeReasonCode``.
 
-``SharedRuntime`` is the top-level manager: ``status()`` inspects the
-runtime, ``create()`` builds a venv idempotently (refusing to destroy a
-broken runtime), and ``install_local_wheel()`` inspects the wheel,
-installs offline, and post-validates via an external probe.
+``SharedRuntime`` is the top-level manager:
+
+* ``status()`` inspects the active pointer and validates the active slot;
+* ``create()`` creates the first runtime through the same transaction path
+  and refuses implicit repair of a ``BROKEN`` runtime;
+* ``begin_transaction()`` records the current active pointer as the base
+  state for stale-transaction checks;
+* ``install_local_wheel()`` inspects a local wheel, installs it offline into
+  a chosen slot, and post-validates through an external metadata probe;
+* ``validate_candidate()`` marks a candidate valid only after checking the
+  slot Python and, when component definitions are supplied, each expected
+  distribution and launch contract;
+* ``activate()`` revalidates immediately before switching the pointer and
+  refuses stale transactions if the active slot changed;
+* ``rollback()`` switches the active pointer back to the recorded previous
+  slot when that slot is still usable;
+* ``discard()`` is for prepared, non-active candidates and must never remove
+  the active slot.
 
 Install outcomes are structured: ``INSTALLED``, ``ALREADY_INSTALLED``,
-``VERSION_MISMATCH``, ``FAILED``.
+``VERSION_MISMATCH``, ``CONTRACT_MISMATCH``, ``FAILED``.
 
-``probe_runtime_distribution()`` runs a small standard-library-only
-script inside the runtime's Python and returns structured JSON.
-No application code is imported during probing.
+``probe_runtime_distribution()`` runs a small standard-library-only script
+inside the runtime's Python and returns structured JSON.  No application
+code is imported during probing.
 
-The persistent runtime is distinct from both the development ``.venv``
-and the test-only ``TemporaryVenv``.
-
-A future ``current/staging`` switch mechanism is architecturally
-planned but not yet implemented.
+The persistent runtime is distinct from both the development ``.venv`` and
+the test-only ``TemporaryVenv``.  Temporary test environments and scratch
+virtual environments are operational artefacts, not product runtime state.
 
 ### `updates/`
 
@@ -646,7 +677,99 @@ M0-8A uses ``stdlib`` only.  It does not call:
 
 ### Relationship to M0-8B
 
-M0-8A produces a plan.  M0-8B will apply the plan, revalidating each
-``VerifiedArtifact`` immediately before installation into candidate
-slots.  The separation keeps planning deterministic, testable, and
-fail-closed independent of the transaction engine.
+M0-8A produces the plan.  M0-8B applies that plan, revalidating each
+``VerifiedArtifact`` immediately before installation into candidate slots.
+The separation keeps planning deterministic, testable, and fail-closed
+independent of the transaction engine.
+
+## M0-8B — Transactional Offline Deployment
+
+M0-8B adds the runtime-side application of a complete ``DeploymentPlan``.
+It intentionally remains a reusable runtime service; this closure does not
+add a CLI or GUI surface for applying plans.
+
+``apply_deployment_plan(plan, registry, runtime)`` is the single
+transactional entry point.  Its job is to transform a pure desired-state
+plan into a validated candidate slot and then atomically activate that slot.
+It does not fetch remote data, resolve dependencies, or mutate the active
+runtime in place.
+
+### Apply Preflight
+
+Before candidate creation or any pip operation, apply fails closed when:
+
+* the plan is blocked;
+* the current runtime is ``BROKEN``;
+* the active slot differs from the slot recorded when the plan was built
+  (stale plan);
+* the desired component ids no longer exactly match the current registry;
+* the current registry/desired-state combination has shared-runtime
+  conflicts, including duplicate normalized distribution names or duplicate
+  launch entry-point ``group:name`` contracts.
+
+The apply-time conflict recheck is deliberate redundancy: planning may have
+used a coherent registry, while the registry definitions may have changed
+before application even if component ids stayed identical.
+
+### Candidate Creation and Full-State Materialization
+
+A deployment creates a fresh candidate virtual environment directly under
+``slots/<candidate-slot-id>``.  The candidate path is explicitly checked for
+collision before creation, and M0-8B candidate creation does not use
+``clear=True`` because an immutable slot must not be silently cleared.
+
+The candidate is materialized from the complete desired state, not from a
+partial delta.  Every desired component is installed in deterministic
+``component_id`` order, including components whose plan action was ``KEEP``.
+This preserves the product invariant that a new active slot represents the
+whole trusted runtime state, not only the components changed by an update.
+
+Immediately before pip handoff, each ``VerifiedArtifact`` is revalidated
+against the trusted registry.  The original verification remains a
+point-in-time fact; it is not treated as a permanent trust cache.
+Installation is offline and local-wheel based through the runtime install
+path (``--no-index`` / ``--no-deps``), so M0-8B does not perform network
+access or dependency resolution.
+
+### Candidate Validation and Activation
+
+After installation, M0-8B validates the candidate as a multi-component
+runtime.  Each expected distribution and launch contract must be present.
+The versions observed in the candidate are then compared explicitly against
+``DesiredRuntimeState`` before activation.  A candidate that contains the
+wrong version is rejected even if installation reported success.
+
+Activation performs one more TOCTOU revalidation immediately before writing
+``state/active.json``.  If a candidate is corrupted between validation and
+activation, activation fails and the active pointer is left unchanged.  On
+success, only the pointer changes: the candidate slot becomes active and the
+previous active slot is recorded as ``previous_slot_id``.
+
+### Failed-Candidate Policy
+
+On failure, M0-8B preserves the active slot and does not promote the
+candidate.  Failed candidate slots may be left on disk for diagnostics.
+They must not be treated as trusted runtime state, and no caller should infer
+that a failed candidate is usable merely because a venv directory exists.
+
+Automatic garbage collection of failed candidates is deferred.  Manual
+cleanup or a future retention policy may remove non-active failed candidates,
+but M0-8B does not auto-delete them during failure handling because deletion
+would discard useful diagnostics and would introduce another destructive path
+inside the transaction engine.
+
+### Deferred Risks and Non-Goals
+
+The following risks are acknowledged and intentionally deferred beyond this
+closure pass:
+
+* no remote update channel or network retrieval path;
+* no shared dependency resolver or cross-component dependency solver;
+* no automatic garbage collection/retention policy for failed candidates;
+* no CLI or GUI apply surface in M0-8B;
+* physical cross-platform validation remains incomplete beyond the current
+  development host;
+* concurrency hardening is limited to stale active-pointer checks, so future
+  file locking or process coordination may be needed;
+* rollback uses the current previous-slot pointer and is not yet a complete
+  multi-generation retention or disaster-recovery policy.
