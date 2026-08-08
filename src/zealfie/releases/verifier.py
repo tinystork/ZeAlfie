@@ -1,4 +1,8 @@
-"""Artifact verifier — integrity, identity, and contract checks for M0-7A."""
+"""Artifact verifier — integrity, identity, and contract checks for M0-7A/M0-7B.
+
+M0-7B adds *artifact_index* support so the verifier operates on the
+correct entry from a multi-artifact release manifest.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,8 @@ from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.components.registry import ComponentRegistry
 
 from .manifest import ReleaseManifest
-from .model import VerifiedArtifact
+from .model import ArtifactEntry, HostTarget, VerifiedArtifact
+from .selector import select_artifact
 
 
 class ArtifactRejectionError(ValueError):
@@ -86,11 +91,6 @@ def _compute_sha256(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Wheel identity from METADATA
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Entry-point contract from wheel
 # ---------------------------------------------------------------------------
 
@@ -119,11 +119,17 @@ def verify_artifact(
     *,
     registry: ComponentRegistry,
     artifact_root: Path,
+    artifact_index: int = 0,
 ) -> VerifiedArtifact:
     """Run the complete verification chain against *manifest*.
 
     The manifest's ``component_id`` is resolved against *registry*.
     A mismatch between the requested and resolved component is rejected.
+
+    *artifact_index* selects which artifact entry to verify (default 0
+    for single-artifact M0-7A manifests).  The caller is responsible
+    for host-compatibility selection via :func:`select_artifact` before
+    calling this function.
     """
     from zealfie.components import UnknownComponentError
 
@@ -140,21 +146,31 @@ def verify_artifact(
             f"registry returned {definition.component_id!r}"
         )
 
+    # Validate artifact index.
+    if artifact_index < 0 or artifact_index >= len(manifest.artifacts):
+        raise ArtifactRejectionError(
+            f"artifact_index {artifact_index} out of range "
+            f"(manifest has {len(manifest.artifacts)} artifact(s))"
+        )
+    artifact_entry = manifest.artifacts[artifact_index]
+
     # 1. Path
-    artifact_path = _resolve_safe_artifact_path(artifact_root, manifest.filename)
+    artifact_path = _resolve_safe_artifact_path(
+        artifact_root, artifact_entry.filename
+    )
 
     # 2. Size
     actual_size = artifact_path.stat().st_size
-    if actual_size != manifest.size:
+    if actual_size != artifact_entry.size:
         raise ArtifactRejectionError(
-            f"size mismatch: expected {manifest.size}, got {actual_size}"
+            f"size mismatch: expected {artifact_entry.size}, got {actual_size}"
         )
 
     # 3. SHA256
     actual_hash = _compute_sha256(artifact_path)
-    if actual_hash != manifest.sha256:
+    if actual_hash != artifact_entry.sha256:
         raise ArtifactRejectionError(
-            f"SHA256 mismatch: expected {manifest.sha256}, got {actual_hash}"
+            f"SHA256 mismatch: expected {artifact_entry.sha256}, got {actual_hash}"
         )
 
     # 4. Wheel identity from METADATA (canonical inspect_wheel).

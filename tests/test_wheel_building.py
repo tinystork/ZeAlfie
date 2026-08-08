@@ -278,3 +278,66 @@ def test_build_multiple_wheels_raises(monkeypatch, tmp_path: Path) -> None:
     witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
     with pytest.raises(RuntimeError, match="ambiguous build"):
         build_wheel(witness_dir, output_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Hardening: CWD shadowing (local build/ directory must not mask PyPA build)
+# ---------------------------------------------------------------------------
+
+
+def test_build_wheel_uses_neutral_cwd(monkeypatch, tmp_path: Path) -> None:
+    """build_wheel sets cwd to the output directory, not the repo root."""
+    import subprocess as sp_mod
+
+    capture: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        capture["cwd"] = kwargs.get("cwd")
+        capture["cmd"] = cmd
+        (tmp_path / "fake-0.0.1-py3-none-any.whl").write_text("")
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+
+    witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    build_wheel(witness_dir, output_dir=tmp_path)
+
+    # The cwd must be the output directory, not left as the repo CWD.
+    assert capture["cwd"] == str(tmp_path), (
+        f"expected cwd={tmp_path}, got cwd={capture.get('cwd')}; "
+        f"a repo-local build/ directory would mask PyPA build"
+    )
+
+
+def test_build_wheel_tempdir_uses_neutral_cwd(monkeypatch, tmp_path: Path) -> None:
+    """When no output_dir is given, cwd is set to the temp directory."""
+    import subprocess as sp_mod
+    import tempfile
+
+    capture: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        capture["cwd"] = kwargs.get("cwd")
+        # Produce a wheel in the temp cwd.
+        cwd = Path(capture["cwd"])
+        (cwd / "fake-0.0.1-py3-none-any.whl").write_text("")
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        )
+
+    # Prevent mkdtemp from creating real dirs; we just want to check cwd.
+    fake_tmp = tmp_path / "zealfie-build-faketmp"
+    fake_tmp.mkdir()
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda prefix: str(fake_tmp))
+
+    witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    build_wheel(witness_dir)
+
+    assert capture["cwd"] == str(fake_tmp), (
+        f"expected cwd={fake_tmp}, got cwd={capture.get('cwd')}; "
+        f"a repo-local build/ directory would mask PyPA build"
+    )

@@ -311,6 +311,58 @@ and entry points without loading or executing any code from the wheel.
 installs wheels offline, and runs Python commands inside it.  The
 environment is cleaned up when the context manager exits, even on errors.
 
+### `releases/`
+
+Trusted local release manifest parsing, host-compatible artifact
+selection, and artifact verification (integrity, identity, contract).
+
+**Release manifest** (``manifest.py``, ``model.py``):
+
+A local TOML file describes one or more wheel artifacts for a component
+release.  Each artifact declares a *filename*, *size*, *sha256*, and
+optional host compatibility tags (*python_tag*, *abi_tag*, *platform_tag*).
+The parser is strict: unknown keys, duplicate filenames, and malformed
+fields are rejected.  The manifest does not define component identity
+or launch contracts — those remain in ``components.toml``.
+
+**Host compatibility** (``model.py``, ``selector.py``):
+
+``HostTarget`` is an immutable value object capturing the target host's
+Python version, ABI, and platform using wheel-tag convention (e.g.
+``py312``, ``cp312``, ``linux_x86_64``).  ``HostTarget.from_current_host()``
+detects the running interpreter via ``sysconfig`` and ``sys``; all other
+compatibility logic operates on synthetic targets, making policy testable
+without the real OS.
+
+``select_artifact(manifest, host)`` returns the index of the single
+compatible artifact or raises ``ArtifactSelectionError``:
+
+* A universal artifact (all tags ``None``) matches any host.
+* A tagged artifact uses strict matching: ``python_tag`` must be an exact
+  or prefix match (``py3`` matches ``py312``), ``abi_tag`` ``"none"``
+  matches any host ABI, ``platform_tag`` ``"any"`` matches any platform.
+* A partially-tagged artifact is incompatible (fail-closed).
+* Zero compatible artifacts → error.
+* Multiple indistinguishable compatible artifacts → error (ambiguity;
+  TOML order is not a tiebreaker).
+
+**Verification** (``verifier.py``):
+
+``verify_artifact(manifest, artifact_index=0)`` runs the full M0-7A chain
+against the selected artifact: path confinement (no symlinks, no escapes),
+size, SHA-256, wheel structural inspection, distribution name/version
+match, and entry-point contract check.  The result is a ``VerifiedArtifact``
+with TOCTOU semantics (valid at a point in time, not a permanent trust
+cache).
+
+**CWD-shadow hardening** (``building/__init__.py``):
+
+``build_wheel()`` sets ``cwd`` to the output directory so that a local
+``build/`` folder in the repository checkout cannot mask the PyPA
+``build`` package via Python's CWD-first ``sys.path`` behaviour.
+
+
+
 ### `launching/`
 
 Controlled subprocess execution.  ``LaunchPlan`` is an immutable structured
@@ -417,6 +469,21 @@ A later milestone should:
 3. preserve the shared runtime boundary;
 4. report startup failures clearly;
 5. avoid embedding ZeSolver code inside ZeAlfie.
+
+### M0-7B — Host Compatibility + Deterministic Artifact Selection
+
+The release manifest now supports multiple wheel artifacts per release, each
+with optional host compatibility tags.  A deterministic selector matches the
+current host to exactly one compatible artifact:
+
+1. ``HostTarget`` captures Python tag, ABI tag, and platform tag from the
+   running interpreter (detection layer isolated in ``from_current_host()``).
+2. ``select_artifact()`` returns a single compatible index or rejects clearly.
+3. ``verify_artifact()`` accepts an *artifact_index* to verify the correct
+   entry after selection.
+4. All matching is fail-closed: absent/ambiguous/unknown metadata → rejection.
+5. Offline-only: no network, no remote manifests, wheel-only.
+
 
 ## Explicit Non-Goals for Version 0
 

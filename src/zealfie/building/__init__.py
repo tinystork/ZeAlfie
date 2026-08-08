@@ -38,7 +38,13 @@ def build_wheel(
     *,
     output_dir: str | Path | None = None,
 ) -> Path:
-    """Build a wheel from a source directory.
+    """Build a wheel from a source directory, safe from CWD shadowing.
+
+    The subprocess runs from the output directory (or a temporary
+    directory) so that a local ``build/`` folder in the repo checkout
+    cannot mask the PyPA ``build`` package.  Python prepends the CWD
+    to ``sys.path``, and ``python -m build`` would otherwise find the
+    local directory instead of the installed ``build`` module.
 
     Uses ``python -m build --wheel`` in a temporary directory when
     *output_dir* is not supplied, so the repository working tree is
@@ -68,6 +74,7 @@ def build_wheel(
                 "--outdir",
                 str(out),
             ],
+            cwd=str(out),  # Avoid CWD masking of the PyPA build package.
             capture_output=True,
             text=True,
             timeout=120,

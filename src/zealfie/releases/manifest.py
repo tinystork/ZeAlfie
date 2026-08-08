@@ -1,11 +1,15 @@
-"""Strict TOML release manifest parser for M0-7A."""
+"""Strict TOML release manifest parser for M0-7B.
+
+M0-7B extends the parser to handle multiple ``[[artifacts]]`` entries,
+each with optional host compatibility tags.
+"""
 
 from __future__ import annotations
 
 import tomllib
 from pathlib import Path
 
-from .model import ReleaseManifest
+from .model import ArtifactEntry, ReleaseManifest
 
 SUPPORTED_SCHEMA_VERSION = 1
 
@@ -17,7 +21,10 @@ class ReleaseManifestError(ValueError):
 def parse_release_manifest(text: str) -> ReleaseManifest:
     """Parse and strictly validate a release manifest from TOML text.
 
-    Unknown top-level keys are rejected.
+    Unknown top-level keys are rejected.  Each artifact entry must
+    declare at least *filename*, *size*, and *sha256*.  Optional host
+    compatibility tags (*python_tag*, *abi_tag*, *platform_tag*) are
+    accepted; unknown per-artifact keys are rejected.
     """
     try:
         payload = tomllib.loads(text)
@@ -42,41 +49,63 @@ def parse_release_manifest(text: str) -> ReleaseManifest:
     version = _required_string(payload, "version")
 
     # --- artifacts list ---
-    artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list):
+    artifacts_raw = payload.get("artifacts")
+    if not isinstance(artifacts_raw, list):
         raise ReleaseManifestError("artifacts must be a list")
-    if len(artifacts) != 1:
-        raise ReleaseManifestError(
-            f"artifacts must contain exactly one entry, got {len(artifacts)}"
-        )
+    if len(artifacts_raw) == 0:
+        raise ReleaseManifestError("artifacts must contain at least one entry")
 
-    artifact = artifacts[0]
-    if not isinstance(artifact, dict):
-        raise ReleaseManifestError("artifacts[0] must be a table")
+    artifacts: list[ArtifactEntry] = []
+    for i, entry in enumerate(artifacts_raw):
+        if not isinstance(entry, dict):
+            raise ReleaseManifestError(
+                f"artifacts[{i}] must be a table"
+            )
 
-    filename = _required_string(artifact, "filename")
-    size = _required_int(artifact, "size")
-    sha256 = _required_sha256(artifact, "sha256")
+        filename = _required_string(entry, "filename")
+        size = _required_int(entry, "size")
+        sha256 = _required_sha256(entry, "sha256")
 
-    # --- reject unknown keys ---
+        # --- optional host compatibility tags ---
+        python_tag = _optional_tag(entry, "python_tag")
+        abi_tag = _optional_tag(entry, "abi_tag")
+        platform_tag = _optional_tag(entry, "platform_tag")
+
+        # --- reject unknown keys ---
+        artifact_known = {"filename", "size", "sha256",
+                          "python_tag", "abi_tag", "platform_tag"}
+        _reject_unknown_keys(entry, artifact_known, f"artifacts[{i}]")
+
+        artifacts.append(ArtifactEntry(
+            filename=filename,
+            size=size,
+            sha256=sha256,
+            python_tag=python_tag,
+            abi_tag=abi_tag,
+            platform_tag=platform_tag,
+        ))
+
+    # --- reject duplicate filenames (ambiguity guard) ---
+    seen_filenames: set[str] = set()
+    for ae in artifacts:
+        if ae.filename in seen_filenames:
+            raise ReleaseManifestError(
+                f"duplicate artifact filename: {ae.filename!r}"
+            )
+        seen_filenames.add(ae.filename)
+
+    # --- reject unknown top-level keys ---
     _reject_unknown_keys(
         payload,
         {"schema_version", "component_id", "version", "artifacts"},
         "release manifest",
-    )
-    _reject_unknown_keys(
-        artifact,
-        {"filename", "size", "sha256"},
-        "artifact entry",
     )
 
     return ReleaseManifest(
         schema_version=schema,
         component_id=component_id,
         version=version,
-        filename=filename,
-        size=size,
-        sha256=sha256,
+        artifacts=tuple(artifacts),
     )
 
 
@@ -123,6 +152,23 @@ def _required_sha256(payload: dict, key: str) -> str:
         int(stripped, 16)
     except ValueError:
         raise ReleaseManifestError(f"{key} must be valid hexadecimal")
+    return stripped
+
+
+def _optional_tag(payload: dict, key: str) -> str | None:
+    """Parse an optional host compatibility tag.
+
+    When present it must be a non-empty string.  ``None`` means the
+    tag was not declared (absent metadata).
+    """
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ReleaseManifestError(f"{key} must be a string if present")
+    stripped = value.strip()
+    if not stripped:
+        raise ReleaseManifestError(f"{key} must not be empty if present")
     return stripped
 
 

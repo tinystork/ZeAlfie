@@ -1,4 +1,4 @@
-"""M0-7A hardened: release manifest, artifact verification, adversarial tests."""
+"""M0-7B: release manifest, artifact verification, host compatibility + selection."""
 
 from __future__ import annotations
 
@@ -14,11 +14,15 @@ from zealfie.common import normalise_distribution_name
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.components.registry import ComponentRegistry
 from zealfie.releases import (
+    ArtifactEntry,
     ArtifactRejectionError,
+    ArtifactSelectionError,
+    HostTarget,
     ReleaseManifest,
     ReleaseManifestError,
     VerifiedArtifact,
     parse_release_manifest,
+    select_artifact,
     verify_artifact,
 )
 from zealfie.runtime import (
@@ -37,7 +41,8 @@ OTHER_DEF = ComponentDefinition(
     (EntryPointContract("console_scripts", "other"),),
 )
 
-_WITNESS_TOML = """\
+# M0-7B: support optional host-compatibility tags in the TOML template.
+_WITNESS_TOML_SINGLE = """\
 schema_version = 1
 component_id = "zewitness"
 version = "0.0.1"
@@ -48,11 +53,38 @@ size = {size}
 sha256 = "{sha256}"
 """
 
+_WITNESS_TOML_MULTI = """\
+schema_version = 1
+component_id = "zewitness"
+version = "0.0.1"
+
+[[artifacts]]
+filename = "{filename}"
+size = {size}
+sha256 = "{sha256}"
+python_tag = "{python_tag}"
+abi_tag = "none"
+platform_tag = "any"
+
+[[artifacts]]
+filename = "{filename2}"
+size = {size2}
+sha256 = "{sha2562}"
+python_tag = "{python_tag2}"
+abi_tag = "{abi_tag2}"
+platform_tag = "{platform_tag2}"
+"""
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def witness_wheel(tmp_path_factory) -> Path:
     d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
-    t = tmp_path_factory.mktemp("7a2-wheel")
+    t = tmp_path_factory.mktemp("7b-wheel")
     return build_wheel(d, output_dir=t)
 
 
@@ -61,21 +93,35 @@ def witness_registry() -> ComponentRegistry:
     return ComponentRegistry([WITNESS_DEF])
 
 
-def _make_manifest(wheel_path: Path, **overrides) -> tuple[ReleaseManifest, str]:
-    sha = _sha256(wheel_path)
-    size = wheel_path.stat().st_size
-    params = {"filename": wheel_path.name, "size": str(size), "sha256": sha, **overrides}
-    toml_text = _WITNESS_TOML.format(**params)
-    manifest = parse_release_manifest(toml_text)
-    return manifest, toml_text
-
-
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _make_manifest(wheel_path: Path, **overrides) -> ReleaseManifest:
+    """Build a single-artifact manifest, optionally overriding fields."""
+    sha = overrides.get("sha256", _sha256(wheel_path))
+    size = overrides.get("size", wheel_path.stat().st_size)
+    filename = overrides.get("filename", wheel_path.name)
+
+    params = {
+        "filename": filename,
+        "size": str(size),
+        "sha256": sha,
+    }
+    toml_text = _WITNESS_TOML_SINGLE.format(**params)
+    manifest = parse_release_manifest(toml_text)
+
+    # Apply field overrides for component_id/version (still direct fields).
+    if "component_id" in overrides:
+        object.__setattr__(manifest, "component_id", overrides["component_id"])
+    if "version" in overrides:
+        object.__setattr__(manifest, "version", overrides["version"])
+
+    return manifest
 
 
 def _synthetic_wheel(tmp_path: Path, name: str, version: str, extras: dict | None = None) -> Path:
@@ -224,9 +270,18 @@ def test_duplicate_entry_point_contract_rejected(tmp_path):
 
 
 def test_non_whl_artifact_rejected(witness_wheel, witness_registry):
-    """Artifact filename not ending in .whl → ArtifactRejectionError."""
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "filename", "artifact.zip")
+    """Artifact filename not ending in .whl → ArtifactRejectionError (via TOML)."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "artifact.zip"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    """)
+    manifest = parse_release_manifest(toml_text)
     with pytest.raises(ArtifactRejectionError, match="must end with .whl"):
         verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
 
@@ -251,15 +306,14 @@ def test_schema_version_bool_rejected():
 
 
 def test_unknown_component_rejected(witness_wheel, witness_registry):
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "component_id", "unknown")
+    manifest = _make_manifest(witness_wheel, component_id="unknown")
     with pytest.raises(ArtifactRejectionError, match="unknown"):
         verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
 
 
 def test_component_mismatch_rejected(witness_wheel):
     registry = ComponentRegistry([OTHER_DEF])
-    manifest, _ = _make_manifest(witness_wheel)
+    manifest = _make_manifest(witness_wheel)
     with pytest.raises(ArtifactRejectionError, match="unknown"):
         verify_artifact(manifest, registry=registry, artifact_root=witness_wheel.parent)
 
@@ -277,8 +331,19 @@ def test_symlink_inside_root_rejected(tmp_path, witness_wheel):
     real.write_bytes(witness_wheel.read_bytes())
     sym = root / witness_wheel.name
     sym.symlink_to("real.whl")
-    manifest, _ = _make_manifest(real)
-    object.__setattr__(manifest, "filename", witness_wheel.name)
+    sha = _sha256(real)
+    size = real.stat().st_size
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{witness_wheel.name}"
+        size = {size}
+        sha256 = "{sha}"
+    """)
+    manifest = parse_release_manifest(toml_text)
     with pytest.raises(ArtifactRejectionError, match="symlink"):
         verify_artifact(manifest, registry=ComponentRegistry([WITNESS_DEF]), artifact_root=root)
 
@@ -293,30 +358,67 @@ def test_symlink_outside_root_rejected(tmp_path, witness_wheel):
         sym.symlink_to(outside)
     except OSError:
         pytest.skip("symlink not allowed")
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "filename", witness_wheel.name)
+    sha = _sha256(witness_wheel)
+    size = witness_wheel.stat().st_size
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{witness_wheel.name}"
+        size = {size}
+        sha256 = "{sha}"
+    """)
+    manifest = parse_release_manifest(toml_text)
     with pytest.raises(ArtifactRejectionError, match="symlink"):
         verify_artifact(manifest, registry=ComponentRegistry([WITNESS_DEF]), artifact_root=root)
 
 
 def test_backslash_filename_rejected(witness_wheel, witness_registry):
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "filename", "foo\\bar")
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "foo\\\\bar"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    """)
+    manifest = parse_release_manifest(toml_text)
     with pytest.raises(ArtifactRejectionError, match="path separators"):
         verify_artifact(manifest, registry=witness_registry, artifact_root=Path("/tmp"))
 
 
 def test_windows_drive_filename_rejected(witness_wheel, witness_registry):
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "filename", "C:\\foo.whl")
-    # Backslash triggers "path separators", drive letter is also rejected.
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "C:\\\\foo.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    """)
+    manifest = parse_release_manifest(toml_text)
     with pytest.raises(ArtifactRejectionError):
         verify_artifact(manifest, registry=witness_registry, artifact_root=Path("/tmp"))
 
 
 def test_missing_artifact_rejected(witness_wheel, witness_registry):
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "filename", "nonexistent.whl")
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "nonexistent.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    """)
+    manifest = parse_release_manifest(toml_text)
     with pytest.raises(ArtifactRejectionError, match="not found"):
         verify_artifact(manifest, registry=witness_registry, artifact_root=Path("/tmp"))
 
@@ -327,8 +429,7 @@ def test_missing_artifact_rejected(witness_wheel, witness_registry):
 
 
 def test_version_mismatch_rejected(witness_wheel, witness_registry):
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "version", "9.9.9")
+    manifest = _make_manifest(witness_wheel, version="9.9.9")
     with pytest.raises(ArtifactRejectionError, match="version mismatch"):
         verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
 
@@ -393,6 +494,497 @@ def test_missing_sha256_rejected():
 
 
 # ===================================================================
+# M0-7B: Multi-artifact manifest parsing
+# ===================================================================
+
+
+def test_manifest_with_two_artifacts_parsed():
+    """A manifest with two distinct artifacts parses correctly."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "zewitness-0.0.1-py3-none-any.whl"
+        size = 1000
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+
+        [[artifacts]]
+        filename = "zewitness-0.0.1-py3-none-win_amd64.whl"
+        size = 2000
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "win_amd64"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    assert len(manifest.artifacts) == 2
+    assert manifest.artifacts[0].filename == "zewitness-0.0.1-py3-none-any.whl"
+    assert manifest.artifacts[0].python_tag == "py3"
+    assert manifest.artifacts[1].platform_tag == "win_amd64"
+
+    # Backward-compat accessors raise on multi-artifact.
+    with pytest.raises(AttributeError):
+        _ = manifest.filename
+
+
+def test_manifest_with_optional_tags_parsed():
+    """Tags are optional; missing tags produce None."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    ae = manifest.artifacts[0]
+    assert ae.python_tag is None
+    assert ae.abi_tag is None
+    assert ae.platform_tag is None
+
+
+def test_manifest_zero_artifacts_rejected():
+    with pytest.raises(ReleaseManifestError, match="at least one"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+            artifacts = []
+        """))
+
+
+def test_duplicate_artifact_filename_rejected():
+    with pytest.raises(ReleaseManifestError, match="duplicate artifact filename"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+
+            [[artifacts]]
+            filename = "same.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            [[artifacts]]
+            filename = "same.whl"
+            size = 0
+            sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        """))
+
+
+def test_unknown_release_manifest_key_rejected():
+    with pytest.raises(ReleaseManifestError, match="unknown key.*release manifest"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+            remote_url = "https://example.com"
+
+            [[artifacts]]
+            filename = "f.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        """))
+
+
+def test_invalid_tag_type_rejected():
+    """Tags must be strings if present."""
+    with pytest.raises(ReleaseManifestError, match="python_tag must be a string"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+
+            [[artifacts]]
+            filename = "f.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            python_tag = 3
+        """))
+
+
+def test_empty_tag_rejected():
+    """Tags must not be empty if present."""
+    with pytest.raises(ReleaseManifestError, match="abi_tag must not be empty"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+
+            [[artifacts]]
+            filename = "f.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            abi_tag = ""
+        """))
+
+
+# ===================================================================
+# M0-7B: HostTarget
+# ===================================================================
+
+
+def test_host_target_from_current_host():
+    """from_current_host() returns a valid HostTarget."""
+    host = HostTarget.from_current_host()
+    assert host.python_tag.startswith("py")
+    assert host.abi_tag.startswith("cp")
+    assert host.platform_tag  # non-empty
+
+
+def test_host_target_synthetic():
+    """Synthetic HostTarget works for testing without real platform."""
+    host = HostTarget(python_tag="py312", abi_tag="cp312", platform_tag="linux_x86_64")
+    assert host.python_tag == "py312"
+    assert host.abi_tag == "cp312"
+    assert host.platform_tag == "linux_x86_64"
+
+
+def test_host_target_is_immutable():
+    host = HostTarget(python_tag="py312", abi_tag="cp312", platform_tag="linux_x86_64")
+    with pytest.raises(Exception):
+        host.python_tag = "py311"  # type: ignore[misc]
+
+
+# ===================================================================
+# M0-7B: Artifact selection — success
+# ===================================================================
+
+
+def test_single_universal_artifact_selected():
+    """A single artifact without tags (universal) matches any host."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+
+
+def test_exact_tag_match_selected():
+    """Exact tag match selects the matching artifact."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-linux.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "linux_x86_64"
+
+        [[artifacts]]
+        filename = "f-win.whl"
+        size = 0
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "win_amd64"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host_linux = HostTarget("py312", "cp312", "linux_x86_64")
+    idx = select_artifact(manifest, host_linux)
+    assert idx == 0
+    assert manifest.artifacts[idx].filename == "f-linux.whl"
+
+    host_win = HostTarget("py312", "cp312", "win_amd64")
+    idx = select_artifact(manifest, host_win)
+    assert idx == 1
+    assert manifest.artifacts[idx].filename == "f-win.whl"
+
+
+def test_python_prefix_match():
+    """py3 tag on artifact matches py312 host (prefix)."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+
+
+def test_none_abi_matches_any_host():
+    """artifact abi_tag='none' matches any host ABI."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "none"
+        platform_tag = "linux_x86_64"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+
+
+def test_any_platform_matches_any_host():
+    """artifact platform_tag='any' matches any host platform."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "any"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "win_amd64")
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+
+
+# ===================================================================
+# M0-7B: Artifact selection — failures (fail-closed)
+# ===================================================================
+
+
+def test_zero_compatible_raises():
+    """No compatible artifact → ArtifactSelectionError."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "win_amd64"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    with pytest.raises(ArtifactSelectionError, match="no artifact compatible"):
+        select_artifact(manifest, host)
+
+
+def test_multiple_compatible_ambiguous():
+    """Two indistinguishable compatible artifacts → ArtifactSelectionError."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-a.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+
+        [[artifacts]]
+        filename = "f-b.whl"
+        size = 0
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    with pytest.raises(ArtifactSelectionError, match="ambiguous selection"):
+        select_artifact(manifest, host)
+
+
+def test_partial_tags_fail_closed_missing_python():
+    """Partially-tagged artifact with missing python_tag is incompatible."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        abi_tag = "none"
+        platform_tag = "any"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    with pytest.raises(ArtifactSelectionError, match="no artifact compatible"):
+        select_artifact(manifest, host)
+
+
+def test_partial_tags_fail_closed_missing_abi():
+    """Partially-tagged artifact with missing abi_tag is incompatible."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        platform_tag = "any"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    with pytest.raises(ArtifactSelectionError, match="no artifact compatible"):
+        select_artifact(manifest, host)
+
+
+def test_partial_tags_fail_closed_missing_platform():
+    """Partially-tagged artifact with missing platform_tag is incompatible."""
+    toml_text = textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+    with pytest.raises(ArtifactSelectionError, match="no artifact compatible"):
+        select_artifact(manifest, host)
+
+
+def test_artifact_index_out_of_range_rejected(witness_wheel, witness_registry):
+    manifest = _make_manifest(witness_wheel)
+    with pytest.raises(ArtifactRejectionError, match="out of range"):
+        verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent, artifact_index=99)
+
+
+def test_negative_artifact_index_rejected(witness_wheel, witness_registry):
+    manifest = _make_manifest(witness_wheel)
+    with pytest.raises(ArtifactRejectionError, match="out of range"):
+        verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent, artifact_index=-1)
+
+
+# ===================================================================
+# M0-7B: Selection → verification integration
+# ===================================================================
+
+
+def test_select_then_verify_with_multi_artifact(witness_wheel, witness_registry):
+    """Select the correct artifact, then verify it via artifact_index."""
+    sha = _sha256(witness_wheel)
+    size = witness_wheel.stat().st_size
+    fn = witness_wheel.name
+
+    # One compatible (correct tags) + one incompatible (wrong platform).
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{fn}"
+        size = {size}
+        sha256 = "{sha}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+
+        [[artifacts]]
+        filename = "nonexistent.whl"
+        size = 0
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "win_amd64"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    host = HostTarget.from_current_host()
+
+    # Select
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+
+    # Verify
+    va = verify_artifact(
+        manifest,
+        registry=witness_registry,
+        artifact_root=witness_wheel.parent,
+        artifact_index=idx,
+    )
+    assert va.component_id == "zewitness"
+    assert va.version == "0.0.1"
+
+
+def test_verify_correct_artifact_index_multi(witness_wheel, witness_registry):
+    """verify_artifact with artifact_index=0 works on multi-artifact manifest."""
+    sha = _sha256(witness_wheel)
+    size = witness_wheel.stat().st_size
+    fn = witness_wheel.name
+
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{fn}"
+        size = {size}
+        sha256 = "{sha}"
+
+        [[artifacts]]
+        filename = "distractor-wheel.whl"
+        size = {size}
+        sha256 = "{sha}"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    va = verify_artifact(
+        manifest,
+        registry=witness_registry,
+        artifact_root=witness_wheel.parent,
+        artifact_index=0,
+    )
+    assert va.component_id == "zewitness"
+
+
+# ===================================================================
 # Contract failure preserves active runtime
 # ===================================================================
 
@@ -403,8 +995,7 @@ def test_contract_failure_preserves_runtime(tmp_path, witness_wheel, witness_reg
     rt.create()
     pointer_before = layout.active_pointer.read_bytes()
 
-    manifest, _ = _make_manifest(witness_wheel)
-    object.__setattr__(manifest, "component_id", "zewitness")
+    manifest = _make_manifest(witness_wheel, component_id="zewitness")
 
     # Use a registry with a definition that has a wrong contract.
     wrong_def = ComponentDefinition(
@@ -433,7 +1024,7 @@ def test_release_to_transaction_with_candidate_slot(tmp_path, witness_wheel, wit
     rt.create()
 
     # Verify release.
-    manifest, _ = _make_manifest(witness_wheel)
+    manifest = _make_manifest(witness_wheel)
     va = verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
 
     # Begin transaction for a candidate.
