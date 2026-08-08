@@ -339,12 +339,33 @@ compatible artifact or raises ``ArtifactSelectionError``:
 
 * A universal artifact (all tags ``None``) matches any host.
 * A tagged artifact uses strict matching: ``python_tag`` must be an exact
-  or prefix match (``py3`` matches ``py312``), ``abi_tag`` ``"none"``
-  matches any host ABI, ``platform_tag`` ``"any"`` matches any platform.
+  match or the generic ``py<major>`` form (``py3`` matches ``py312``),
+  ``abi_tag`` ``"none"`` matches any host ABI, and ``platform_tag`` ``"any"``
+  matches any platform.
 * A partially-tagged artifact is incompatible (fail-closed).
 * Zero compatible artifacts → error.
 * Multiple indistinguishable compatible artifacts → error (ambiguity;
   TOML order is not a tiebreaker).
+
+**Safe local release resolution** (``resolver.py``):
+
+``resolve_local_release(manifest, registry, artifact_root, host)`` is the
+preferred M0-7C API for trusted local releases.  It resolves the manifest's
+component id through the trusted ``ComponentRegistry``, calls
+``select_artifact()`` internally, validates that any declared artifact tags
+match the simple wheel filename suffix
+``-{python_tag}-{abi_tag}-{platform_tag}.whl``, and then calls
+``verify_artifact()`` with that exact selected index.  Callers never pass an
+``artifact_index`` to this high-level API, which removes the easy misuse
+``select artifact A`` followed by ``verify artifact B``.
+
+The filename tag check is intentionally narrow and dependency-free: filenames
+must end in ``.whl`` and the final three ``-``-separated stem segments are
+treated as the wheel's Python, ABI, and platform tags.  Untagged historical
+manifests remain valid and are handled by the universal compatibility rule.
+When any tag is declared, mismatches such as manifest
+``platform_tag="linux_x86_64"`` with filename ``...-py3-none-any.whl`` are
+rejected fail-closed.
 
 **Verification** (``verifier.py``):
 
@@ -483,6 +504,23 @@ current host to exactly one compatible artifact:
    entry after selection.
 4. All matching is fail-closed: absent/ambiguous/unknown metadata → rejection.
 5. Offline-only: no network, no remote manifests, wheel-only.
+
+### M0-7C — Safe Local Release Resolution
+
+The release layer now exposes ``resolve_local_release()`` as the normal local
+release handoff.  The operation is a single fail-closed API call:
+
+```text
+ReleaseManifest + HostTarget + trusted ComponentRegistry + artifact_root
+    -> VerifiedArtifact
+```
+
+It resolves component identity, selects exactly one host-compatible artifact,
+checks declared manifest tags against the simple wheel filename tag suffix,
+and verifies that same selected artifact.  The lower-level
+``select_artifact()`` and ``verify_artifact()`` primitives remain available
+for focused tests and internal uses, but callers of the normal release path do
+not provide an artifact index.
 
 
 ## Explicit Non-Goals for Version 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import textwrap
 import zipfile
 from pathlib import Path
@@ -20,8 +21,10 @@ from zealfie.releases import (
     HostTarget,
     ReleaseManifest,
     ReleaseManifestError,
+    ReleaseResolutionError,
     VerifiedArtifact,
     parse_release_manifest,
+    resolve_local_release,
     select_artifact,
     verify_artifact,
 )
@@ -99,6 +102,13 @@ def _sha256(path: Path) -> str:
         while chunk := f.read(1 << 20):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _copy_wheel_as(wheel_path: Path, root: Path, filename: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    copied = root / filename
+    shutil.copy2(wheel_path, copied)
+    return copied
 
 
 def _make_manifest(wheel_path: Path, **overrides) -> ReleaseManifest:
@@ -1216,6 +1226,341 @@ def test_adversarial_artifact0_wrong_host_bypassed_default(witness_wheel, witnes
         artifact_root=witness_wheel.parent, artifact_index=idx,
     )
     assert va.component_id == "zewitness"
+
+
+# ===================================================================
+# M0-7C: Safe local release resolution
+# ===================================================================
+
+
+def test_resolve_local_release_single_untagged_witness(tmp_path, witness_wheel, witness_registry):
+    """M0-7A-style untagged single artifact resolves to a VerifiedArtifact."""
+    root = tmp_path / "release"
+    artifact = _copy_wheel_as(witness_wheel, root, witness_wheel.name)
+    manifest = _make_manifest(artifact)
+    host = HostTarget("py312", "cp312", "linux_x86_64")
+
+    verified = resolve_local_release(
+        manifest,
+        registry=witness_registry,
+        artifact_root=root,
+        host=host,
+    )
+
+    assert isinstance(verified, VerifiedArtifact)
+    assert verified.path == artifact
+    assert verified.component_id == "zewitness"
+
+
+def test_resolve_local_release_tagged_witness_matches_filename(tmp_path, witness_wheel, witness_registry):
+    """Declared py3/none/any tags matching the wheel filename resolve."""
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-any.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+    sha = _sha256(artifact)
+    size = artifact.stat().st_size
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {size}
+        sha256 = "{sha}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+
+    verified = resolve_local_release(
+        manifest,
+        registry=witness_registry,
+        artifact_root=root,
+        host=HostTarget("py312", "cp312", "linux_x86_64"),
+    )
+
+    assert verified.path == artifact
+
+
+def test_resolve_local_release_multi_artifact_verifies_selected_entry(tmp_path, witness_wheel, witness_registry):
+    """One incompatible + one compatible artifact resolves and verifies the compatible file."""
+    root = tmp_path / "release"
+    win_name = "zealfie_witness-0.0.1-py3-none-win_amd64.whl"
+    any_name = "zealfie_witness-0.0.1-py3-none-any.whl"
+    win_artifact = _copy_wheel_as(witness_wheel, root, win_name)
+    any_artifact = _copy_wheel_as(witness_wheel, root, any_name)
+    sha_win = _sha256(win_artifact)
+    sha_any = _sha256(any_artifact)
+    size_win = win_artifact.stat().st_size
+    size_any = any_artifact.stat().st_size
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{win_name}"
+        size = {size_win}
+        sha256 = "{sha_win}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "win_amd64"
+
+        [[artifacts]]
+        filename = "{any_name}"
+        size = {size_any}
+        sha256 = "{sha_any}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+
+    verified = resolve_local_release(
+        manifest,
+        registry=witness_registry,
+        artifact_root=root,
+        host=HostTarget("py312", "cp312", "linux_x86_64"),
+    )
+
+    assert verified.path == any_artifact
+    assert verified.sha256 == sha_any
+
+
+def test_resolve_local_release_tampered_selected_artifact_rejected(tmp_path, witness_wheel, witness_registry):
+    """Selected artifact with sha/size borrowed from another file is rejected."""
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-any.whl"
+    _copy_wheel_as(witness_wheel, root, filename)
+    wrong_wheel = _synthetic_wheel(tmp_path, "other", "0.0.1")
+    wrong_sha = _sha256(wrong_wheel)
+    wrong_size = wrong_wheel.stat().st_size
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {wrong_size}
+        sha256 = "{wrong_sha}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="size mismatch|SHA256 mismatch"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
+def test_resolve_local_release_select_a_verify_b_bypass_impossible(tmp_path, witness_wheel, witness_registry):
+    """Resolver cannot select artifact 1 but accidentally verify artifact 0."""
+    root = tmp_path / "release"
+    valid_incompatible_name = "zealfie_witness-0.0.1-py3-none-win_amd64.whl"
+    compatible_name = "zealfie_witness-0.0.1-py3-none-manylinux_x86_64.whl"
+    valid_incompatible = _copy_wheel_as(witness_wheel, root, valid_incompatible_name)
+    compatible = _copy_wheel_as(witness_wheel, root, compatible_name)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{valid_incompatible_name}"
+        size = {valid_incompatible.stat().st_size}
+        sha256 = "{_sha256(valid_incompatible)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "win_amd64"
+
+        [[artifacts]]
+        filename = "{compatible_name}"
+        size = {compatible.stat().st_size}
+        sha256 = "{_sha256(compatible)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "manylinux_x86_64"
+    """))
+
+    verified = resolve_local_release(
+        manifest,
+        registry=witness_registry,
+        artifact_root=root,
+        host=HostTarget("py312", "cp312", "manylinux_x86_64"),
+    )
+
+    assert verified.path == compatible
+    assert verified.path.name != valid_incompatible_name
+
+
+def test_resolve_local_release_platform_tag_must_match_filename(tmp_path, witness_wheel, witness_registry):
+    """Manifest platform_tag linux_x86_64 with filename py3-none-any is rejected."""
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-any.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "linux_x86_64"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="platform_tag mismatch"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
+def test_resolve_local_release_python_tag_must_match_filename(tmp_path, witness_wheel, witness_registry):
+    """Manifest python_tag py313 with filename py3-none-any is rejected."""
+    root = tmp_path / "release"
+    filename = "zealfie_witness-0.0.1-py3-none-any.whl"
+    artifact = _copy_wheel_as(witness_wheel, root, filename)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+        python_tag = "py313"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="python_tag mismatch"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py313", "cp313", "linux_x86_64"),
+        )
+
+
+def test_resolve_local_release_ambiguous_compatible_artifacts_rejected(tmp_path, witness_wheel, witness_registry):
+    """Two compatible artifacts remain ambiguous through the resolver."""
+    root = tmp_path / "release"
+    first = _copy_wheel_as(witness_wheel, root, "zewitness-0.0.1-1-py3-none-any.whl")
+    second = _copy_wheel_as(witness_wheel, root, "zewitness-0.0.1-2-py3-none-any.whl")
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{first.name}"
+        size = {first.stat().st_size}
+        sha256 = "{_sha256(first)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+
+        [[artifacts]]
+        filename = "{second.name}"
+        size = {second.stat().st_size}
+        sha256 = "{_sha256(second)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="ambiguous selection"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
+def test_resolve_local_release_unknown_component_rejected(tmp_path, witness_wheel, witness_registry):
+    """Unknown component ids fail before artifact verification."""
+    root = tmp_path / "release"
+    artifact = _copy_wheel_as(witness_wheel, root, witness_wheel.name)
+    manifest = _make_manifest(artifact, component_id="unknown")
+
+    with pytest.raises(ReleaseResolutionError, match="unknown component"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
+def test_resolve_local_release_wrong_wheel_distribution_rejected(tmp_path, witness_registry):
+    """Wheel distribution identity is still enforced through the resolver."""
+    root = tmp_path / "release"
+    raw = _synthetic_wheel(tmp_path, "other-dist", "0.0.1")
+    artifact = _copy_wheel_as(raw, root, "other_dist-0.0.1-py3-none-any.whl")
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{artifact.name}"
+        size = {artifact.stat().st_size}
+        sha256 = "{_sha256(artifact)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="distribution mismatch"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
+def test_resolve_local_release_wrong_entry_point_contract_rejected(tmp_path, witness_wheel):
+    """Entry-point contract mismatch is still enforced through the resolver."""
+    root = tmp_path / "release"
+    artifact = _copy_wheel_as(witness_wheel, root, witness_wheel.name)
+    manifest = _make_manifest(artifact)
+    wrong_registry = ComponentRegistry([
+        ComponentDefinition(
+            "zewitness",
+            "ZeWitness",
+            "zealfie-witness",
+            (EntryPointContract("gui_scripts", "zesolver"),),
+        )
+    ])
+
+    with pytest.raises(ReleaseResolutionError, match="launch contract"):
+        resolve_local_release(
+            manifest,
+            registry=wrong_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
 
 
 # ===================================================================
