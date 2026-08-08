@@ -1,0 +1,512 @@
+"""Deployment planning layer (M0-8A) — pure, read-only.
+
+Accepts a complete desired runtime state and current runtime observation,
+then returns a structured :class:`DeploymentPlan`.  No installation, no
+slot creation, no activation, no filesystem mutation.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, Callable, Sequence
+
+from zealfie.common import normalise_distribution_name
+from zealfie.components.model import ComponentDefinition
+from zealfie.components.registry import ComponentRegistry
+from zealfie.releases.model import VerifiedArtifact
+
+from .model import RuntimeState, RuntimeStatus
+
+# ---------------------------------------------------------------------------
+# Public enums
+# ---------------------------------------------------------------------------
+
+
+class DeploymentAction(StrEnum):
+    """A single planned action for one component."""
+
+    KEEP = "KEEP"
+    """The installed distribution already satisfies the desired contract."""
+
+    INSTALL = "INSTALL"
+    """The component must be installed (absent, version mismatch, or contract repair)."""
+
+    BLOCKED = "BLOCKED"
+    """The plan cannot proceed for this component (broken runtime, probe failure)."""
+
+
+class DeploymentReasonCode(StrEnum):
+    """Stable reason codes carried by each :class:`DeploymentStep`."""
+
+    # -- ABSENT runtime -------------------------------------------------------
+    RUNTIME_ABSENT = "RUNTIME_ABSENT"
+    """The shared runtime does not exist yet."""
+
+    # -- BROKEN runtime -------------------------------------------------------
+    RUNTIME_BROKEN = "RUNTIME_BROKEN"
+    """The shared runtime is in a broken state."""
+
+    # -- READY runtime outcomes -----------------------------------------------
+    DISTRIBUTION_MISSING = "DISTRIBUTION_MISSING"
+    """The desired distribution is not installed in the active runtime."""
+
+    VERSION_MISMATCH = "VERSION_MISMATCH"
+    """Installed version differs from the desired version."""
+
+    LAUNCH_CONTRACT_MISMATCH = "LAUNCH_CONTRACT_MISMATCH"
+    """Installed distribution does not declare the expected launch entry point(s)."""
+
+    PROBE_FAILED = "PROBE_FAILED"
+    """The runtime probe raised an exception or returned malformed data."""
+
+    ALREADY_SATISFIED = "ALREADY_SATISFIED"
+    """Installed version and launch contract match the desired state."""
+
+    # -- Validation failures --------------------------------------------------
+    DESIRED_STATE_INVALID = "DESIRED_STATE_INVALID"
+    """The desired runtime state failed structural or registry validation."""
+
+
+# ---------------------------------------------------------------------------
+# Desired runtime state
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DesiredComponent:
+    """A single component that must be present and correct in the runtime.
+
+    The *artifact* field carries a :class:`VerifiedArtifact` as a
+    point-in-time proof; a future application step must revalidate it.
+    """
+
+    component_id: str
+    version: str
+    artifact: VerifiedArtifact
+
+    def __post_init__(self) -> None:
+        if not self.component_id or not self.component_id.strip():
+            raise ValueError("component_id must be non-empty")
+        if not self.version or not self.version.strip():
+            raise ValueError("version must be non-empty")
+        if self.component_id != self.artifact.component_id:
+            raise ValueError(
+                f"component_id {self.component_id!r} does not match "
+                f"artifact.component_id {self.artifact.component_id!r}"
+            )
+        if self.version != self.artifact.version:
+            raise ValueError(
+                f"version {self.version!r} does not match "
+                f"artifact.version {self.artifact.version!r}"
+            )
+        if self.version != self.artifact.wheel_version:
+            raise ValueError(
+                f"version {self.version!r} does not match "
+                f"artifact.wheel_version {self.artifact.wheel_version!r}"
+            )
+
+
+@dataclass(frozen=True)
+class DesiredRuntimeState:
+    """The complete, authoritative desired state for the trusted component registry.
+
+    Immutable, deterministic (sorted by *component_id*), and validated:
+
+    * Non-empty.
+    * No duplicate *component_id* values.
+    * Every :class:`DesiredComponent` self-validates on construction.
+
+    The completeness guard (exact match with ``registry.available_ids()``)
+    is enforced at plan-build time, not at construction time, so that a
+    :class:`DesiredRuntimeState` can be built independently of a registry
+    for testing purposes.
+    """
+
+    components: tuple[DesiredComponent, ...]
+
+    def __post_init__(self) -> None:
+        if not self.components:
+            raise ValueError("DesiredRuntimeState must contain at least one component")
+        ids = [dc.component_id for dc in self.components]
+        if len(ids) != len(set(ids)):
+            raise ValueError("DesiredRuntimeState must not contain duplicate component ids")
+        # Deterministic ordering.
+        object.__setattr__(self, "components", tuple(sorted(self.components, key=lambda dc: dc.component_id)))
+
+    def __iter__(self):
+        return iter(self.components)
+
+    def __len__(self) -> int:
+        return len(self.components)
+
+    def __contains__(self, component_id: str) -> bool:
+        return any(dc.component_id == component_id for dc in self.components)
+
+
+# ---------------------------------------------------------------------------
+# Deployment step
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentStep:
+    """One atomic step in the deployment plan.
+
+    Every step carries the :class:`VerifiedArtifact` so a future
+    full-state application can materialize the entire desired runtime
+    from the plan alone, not only from deltas.
+    """
+
+    component_id: str
+    desired_version: str
+    artifact: VerifiedArtifact
+    action: DeploymentAction
+    current_version: str | None = None
+    reason_code: DeploymentReasonCode | None = None
+    reason: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Deployment plan
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeploymentPlan:
+    """The complete result of plan-building.
+
+    Immutable.  Steps are in deterministic order by *component_id*.
+    """
+
+    desired_state: DesiredRuntimeState
+    runtime_state: RuntimeState
+    steps: tuple[DeploymentStep, ...]
+    blocked: bool = False
+    blocked_reason: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Planning error
+# ---------------------------------------------------------------------------
+
+
+class PlanningError(ValueError):
+    """Raised when the desired state fails validation at plan-build time."""
+
+
+# ---------------------------------------------------------------------------
+# Plan builder
+# ---------------------------------------------------------------------------
+
+# Default probe callable type.
+_ProbeFn = Callable[[str, str], dict[str, Any]]
+
+
+def build_deployment_plan(
+    desired_state: DesiredRuntimeState,
+    registry: ComponentRegistry,
+    runtime_status: RuntimeStatus,
+    *,
+    probe_distribution: _ProbeFn | None = None,
+) -> DeploymentPlan:
+    """Build a pure, read-only deployment plan.
+
+    Parameters
+    ----------
+    desired_state:
+        Complete desired runtime state.  Every component id must match
+        exactly ``registry.available_ids()`` — no missing or extra ids.
+    registry:
+        The trusted local component registry.
+    runtime_status:
+        Current global runtime observation from :meth:`SharedRuntime.status`.
+    probe_distribution:
+        Callable with the same signature and semantics as
+        :func:`probe_runtime_distribution`.  Passed as a dependency so
+        tests can supply synthetic probes.  Required when the runtime is
+        ``READY``; unused for ``ABSENT`` / ``BROKEN``.
+
+    Returns
+    -------
+    DeploymentPlan
+        A complete, deterministic plan that describes every component.
+
+    Raises
+    ------
+    PlanningError
+        If the desired state is structurally invalid or does not exactly
+        match the trusted registry.
+    """
+    # ------------------------------------------------------------------
+    # 1) Complete desired state guard.
+    # ------------------------------------------------------------------
+    desired_ids = frozenset(dc.component_id for dc in desired_state.components)
+    registry_ids = frozenset(registry.available_ids())
+
+    if desired_ids != registry_ids:
+        only_desired = desired_ids - registry_ids
+        only_registry = registry_ids - desired_ids
+        parts: list[str] = []
+        if only_desired:
+            parts.append(f"unknown component ids: {sorted(only_desired)}")
+        if only_registry:
+            parts.append(f"missing component ids: {sorted(only_registry)}")
+        raise PlanningError("; ".join(parts))
+
+    # ------------------------------------------------------------------
+    # 2) Validate desired components against registry definitions.
+    # ------------------------------------------------------------------
+    for dc in desired_state.components:
+        try:
+            definition = registry.get(dc.component_id)
+        except KeyError as exc:
+            # Should not happen given the set-equality check above,
+            # but guard nonetheless.
+            raise PlanningError(
+                f"component {dc.component_id!r} not found in registry"
+            ) from exc
+
+        _validate_component_definition_match(dc, definition)
+
+    # ------------------------------------------------------------------
+    # 3) Route by runtime state.
+    # ------------------------------------------------------------------
+    if runtime_status.state == RuntimeState.BROKEN:
+        return _build_blocked_plan(
+            desired_state,
+            runtime_status,
+            reason_code=DeploymentReasonCode.RUNTIME_BROKEN,
+            reason=runtime_status.reason or "shared runtime is BROKEN",
+        )
+
+    if runtime_status.state == RuntimeState.ABSENT:
+        return _build_absent_plan(desired_state, runtime_status)
+
+    # ------------------------------------------------------------------
+    # 4) READY runtime — probe each desired component.
+    # ------------------------------------------------------------------
+    if runtime_status.python_executable is None:
+        raise PlanningError(
+            "RuntimeStatus.state is READY but python_executable is None; "
+            "cannot probe the runtime"
+        )
+
+    if probe_distribution is None:
+        raise PlanningError(
+            "probe_distribution callable is required for READY runtime planning"
+        )
+
+    runtime_python = str(runtime_status.python_executable)
+    steps: list[DeploymentStep] = []
+
+    for dc in desired_state.components:
+        definition = registry.get(dc.component_id)
+        try:
+            probe = probe_distribution(runtime_python, definition.distribution_name)
+        except Exception as exc:
+            return _build_blocked_plan(
+                desired_state,
+                runtime_status,
+                reason_code=DeploymentReasonCode.PROBE_FAILED,
+                reason=f"probe failed for {dc.component_id!r}: {exc}",
+            )
+
+        # Validate probe payload structure.
+        if not isinstance(probe, dict):
+            return _build_blocked_plan(
+                desired_state,
+                runtime_status,
+                reason_code=DeploymentReasonCode.PROBE_FAILED,
+                reason=f"probe returned non-dict payload for {dc.component_id!r}",
+            )
+
+        step = _plan_step_for_component(dc, definition, probe)
+        steps.append(step)
+
+    blocked = any(s.action == DeploymentAction.BLOCKED for s in steps)
+
+    return DeploymentPlan(
+        desired_state=desired_state,
+        runtime_state=runtime_status.state,
+        steps=tuple(steps),
+        blocked=blocked,
+        blocked_reason="one or more components blocked" if blocked else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_component_definition_match(
+    dc: DesiredComponent,
+    definition: ComponentDefinition,
+) -> None:
+    """Validate that *dc* and *definition* agree on distribution identity."""
+    normalised_artifact = normalise_distribution_name(dc.artifact.distribution_name)
+    normalised_definition = normalise_distribution_name(definition.distribution_name)
+    if normalised_artifact != normalised_definition:
+        raise PlanningError(
+            f"distribution_name mismatch for {dc.component_id!r}: "
+            f"artifact {dc.artifact.distribution_name!r} "
+            f"(normalised: {normalised_artifact!r}) != "
+            f"definition {definition.distribution_name!r} "
+            f"(normalised: {normalised_definition!r})"
+        )
+
+
+def _build_blocked_plan(
+    desired_state: DesiredRuntimeState,
+    runtime_status: RuntimeStatus,
+    *,
+    reason_code: DeploymentReasonCode,
+    reason: str,
+) -> DeploymentPlan:
+    steps = tuple(
+        DeploymentStep(
+            component_id=dc.component_id,
+            desired_version=dc.version,
+            artifact=dc.artifact,
+            action=DeploymentAction.BLOCKED,
+            reason_code=reason_code,
+            reason=reason,
+        )
+        for dc in desired_state.components
+    )
+    return DeploymentPlan(
+        desired_state=desired_state,
+        runtime_state=runtime_status.state,
+        steps=steps,
+        blocked=True,
+        blocked_reason=reason,
+    )
+
+
+def _build_absent_plan(
+    desired_state: DesiredRuntimeState,
+    runtime_status: RuntimeStatus,
+) -> DeploymentPlan:
+    """Plan INSTALL for every component when the runtime is ABSENT."""
+    steps = tuple(
+        DeploymentStep(
+            component_id=dc.component_id,
+            desired_version=dc.version,
+            artifact=dc.artifact,
+            action=DeploymentAction.INSTALL,
+            reason_code=DeploymentReasonCode.RUNTIME_ABSENT,
+            reason="shared runtime is absent — install planned",
+        )
+        for dc in desired_state.components
+    )
+    return DeploymentPlan(
+        desired_state=desired_state,
+        runtime_state=runtime_status.state,
+        steps=steps,
+        blocked=False,
+    )
+
+
+def _plan_step_for_component(
+    dc: DesiredComponent,
+    definition: ComponentDefinition,
+    probe: dict[str, Any],
+) -> DeploymentStep:
+    """Decide KEEP / INSTALL for one component based on the probe result."""
+    installed = probe.get("installed")
+
+    # --- Not installed -------------------------------------------------------
+    if not installed:
+        return DeploymentStep(
+            component_id=dc.component_id,
+            desired_version=dc.version,
+            artifact=dc.artifact,
+            action=DeploymentAction.INSTALL,
+            reason_code=DeploymentReasonCode.DISTRIBUTION_MISSING,
+            reason=f"distribution {definition.distribution_name!r} not installed",
+        )
+
+    # --- Installed — check version -------------------------------------------
+    installed_version = _string_or_none(probe.get("version"))
+
+    if installed_version != dc.version:
+        return DeploymentStep(
+            component_id=dc.component_id,
+            desired_version=dc.version,
+            artifact=dc.artifact,
+            action=DeploymentAction.INSTALL,
+            current_version=installed_version,
+            reason_code=DeploymentReasonCode.VERSION_MISMATCH,
+            reason=(
+                f"version mismatch: installed {installed_version!r}, "
+                f"desired {dc.version!r}"
+            ),
+        )
+
+    # --- Installed, version matches — check launch contract -------------------
+    contract_ok = _check_launch_contract_from_probe(probe, definition)
+
+    if not contract_ok:
+        return DeploymentStep(
+            component_id=dc.component_id,
+            desired_version=dc.version,
+            artifact=dc.artifact,
+            action=DeploymentAction.INSTALL,
+            current_version=installed_version,
+            reason_code=DeploymentReasonCode.LAUNCH_CONTRACT_MISMATCH,
+            reason="installed distribution does not satisfy the expected launch contract",
+        )
+
+    # --- Everything matches — KEEP -------------------------------------------
+    return DeploymentStep(
+        component_id=dc.component_id,
+        desired_version=dc.version,
+        artifact=dc.artifact,
+        action=DeploymentAction.KEEP,
+        current_version=installed_version,
+        reason_code=DeploymentReasonCode.ALREADY_SATISFIED,
+        reason="installed version and launch contract are correct",
+    )
+
+
+def _check_launch_contract_from_probe(
+    probe: dict[str, Any],
+    definition: ComponentDefinition,
+) -> bool:
+    """Return True if *probe* entry_points satisfy the *definition* launch contract.
+
+    This is a local copy of the logic from :mod:`zealfie.runtime.manager` to
+    avoid importing private helpers from a mutation module.
+    """
+    expected_contracts = set(definition.launch_entry_points)
+    if not expected_contracts:
+        # No launch contract required — satisfied by definition.
+        return True
+
+    observed_eps = probe.get("entry_points", [])
+    if not isinstance(observed_eps, list):
+        return False
+
+    # Import locally to avoid coupling to components.model internals.
+    from zealfie.components.model import EntryPointContract
+
+    for ep in observed_eps:
+        try:
+            contract = EntryPointContract(
+                group=str(ep.get("group", "")),
+                name=str(ep.get("name", "")),
+            )
+        except ValueError:
+            continue
+        if contract in expected_contracts:
+            return True
+
+    return False
+
+
+def _string_or_none(value: object) -> str | None:
+    """Convert a value to str, or return None if it is None."""
+    if value is None:
+        return None
+    return str(value)

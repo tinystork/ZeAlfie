@@ -3,6 +3,8 @@
 The ``runtime`` package provides the persistent, shared Python
 environment that hosts ZeSoftware components via immutable slots
 and atomic activation.
+
+M0-8A adds the pure, read-only deployment planning layer.
 """
 
 from __future__ import annotations
@@ -19,6 +21,16 @@ from .model import (
     RuntimeState,
     RuntimeStatus,
 )
+from .planning import (
+    DeploymentAction,
+    DeploymentPlan,
+    DeploymentReasonCode,
+    DeploymentStep,
+    DesiredComponent,
+    DesiredRuntimeState,
+    PlanningError,
+    build_deployment_plan,
+)
 from .probe import probe_runtime_distribution, probe_runtime_python_version
 from .state import load_active_state, save_active_state
 from .transaction import RuntimeTransaction, generate_slot_id
@@ -26,8 +38,15 @@ from .transaction import RuntimeTransaction, generate_slot_id
 __all__ = [
     "ActiveRuntimeState",
     "CandidateState",
+    "DeploymentAction",
+    "DeploymentPlan",
+    "DeploymentReasonCode",
+    "DeploymentStep",
+    "DesiredComponent",
+    "DesiredRuntimeState",
     "InstallOutcome",
     "InstallResult",
+    "PlanningError",
     "RuntimeLayout",
     "RuntimeReasonCode",
     "RuntimeSlot",
@@ -37,6 +56,7 @@ __all__ = [
     "RuntimeTransaction",
     "SharedRuntime",
     "SharedRuntimeError",
+    "build_deployment_plan",
     "default_runtime_layout",
     "default_runtime_root",
     "generate_slot_id",

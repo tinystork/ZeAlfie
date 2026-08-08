@@ -570,3 +570,83 @@ This document is intentionally provisional.
 Its structure, terminology, component model, runtime strategy, and module boundaries may evolve as ZeAlfie progresses from a minimal experimental launcher to a stable cross-platform application manager.
 
 Architectural changes should be driven by validated requirements and implementation experience rather than premature generalisation.
+
+## M0-8A — Desired Runtime State & Deployment Planning
+
+The M0-8A planning layer adds a pure, read-only mechanism to express a
+complete desired runtime state and produce a structured deployment plan.
+It does **not** install, create candidate slots, activate, rollback,
+discard, or mutate the filesystem.
+
+### Desired Runtime State
+
+``DesiredComponent`` links a component id, version, and a
+``VerifiedArtifact``.  ``DesiredRuntimeState`` is an immutable, sorted
+tuple of ``DesiredComponent``.  It validates non-empty, no duplicate
+component ids, and deterministic ordering by ``component_id``.
+
+### Completeness Guard
+
+At plan-build time, the desired component ids must **exactly match**
+``registry.available_ids()``.  Missing or extra ids are rejected via
+``PlanningError``.  This is the M0-8A guard against a future
+ZeSolver-only update accidentally dropping other trusted runtime
+components — you cannot express a partial desired state.
+
+### Deployment Plan
+
+``build_deployment_plan(desired_state, registry, runtime_status, *, probe_distribution)``
+returns a ``DeploymentPlan`` with deterministic ``DeploymentStep``
+entries in ``component_id`` order.
+
+Each step carries:
+
+* **component_id** — stable identity.
+* **desired_version** — version requested by the desired state.
+* **artifact** — the ``VerifiedArtifact``, **always present** even for
+  ``KEEP`` steps, so a future full-state application can materialize the
+  entire desired runtime from the plan alone.
+* **action** — ``DeploymentAction.KEEP``, ``.INSTALL``, or ``.BLOCKED``.
+* **reason_code** / **reason** — structured ``DeploymentReasonCode``
+  and human-readable reason.
+
+### Runtime State Routing
+
+* **ABSENT** → every component is ``INSTALL`` with
+  ``RUNTIME_ABSENT``.  No probes are executed.
+* **BROKEN** → every component is ``BLOCKED`` with ``RUNTIME_BROKEN``.
+  No probes are executed.  The plan describes the failure but does not
+  attempt mutation.
+* **READY** → each component is probed via ``probe_distribution()``:
+  - not installed → ``INSTALL`` (``DISTRIBUTION_MISSING``).
+  - installed, version matches, launch contract satisfied → ``KEEP``
+    (``ALREADY_SATISFIED``).
+  - version mismatch → ``INSTALL`` (``VERSION_MISMATCH``).
+  - launch contract missing/mismatched → ``INSTALL`` (repair by future
+    application; ``LAUNCH_CONTRACT_MISMATCH``).
+  - probe exception or malformed payload → whole plan blocked
+    (``PROBE_FAILED``).
+
+### VerifiedArtifact TOCTOU Semantics
+
+``VerifiedArtifact`` describes verification performed at a point in
+time.  M0-8A carries the artifact reference in every step but does
+**not** re-verify it.  A future application step (M0-8B) must revalidate
+before installation to close the TOCTOU window.  The plan does not
+create a persistent trust cache.
+
+### No Mutation
+
+M0-8A uses ``stdlib`` only.  It does not call:
+
+* ``SharedRuntime.install_local_wheel``
+* ``RuntimeTransaction`` / ``activate`` / ``rollback`` / ``discard``
+* ``venv.create`` / ``pip install``
+* any filesystem mutation
+
+### Relationship to M0-8B
+
+M0-8A produces a plan.  M0-8B will apply the plan, revalidating each
+``VerifiedArtifact`` immediately before installation into candidate
+slots.  The separation keeps planning deterministic, testable, and
+fail-closed independent of the transaction engine.
