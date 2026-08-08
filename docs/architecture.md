@@ -773,3 +773,58 @@ closure pass:
   file locking or process coordination may be needed;
 * rollback uses the current previous-slot pointer and is not yet a complete
   multi-generation retention or disaster-recovery policy.
+
+## M0-9 — Application Service / Offline Orchestration
+
+M0-9 assembles the existing component, release, planning, transaction, and
+rollback primitives behind a small application service and terminal surface.
+It does not add a GUI, network channel, dependency solver, or new generic
+deployment engine.
+
+### Offline Release Directory
+
+M0-9 intentionally supports one local, deterministic convention:
+
+```text
+release_dir/
+  <component_id>.toml
+  <wheel_filename>.whl
+```
+
+For every component id in the trusted registry, a top-level
+``<component_id>.toml`` release manifest must exist.  The manifest's
+``component_id`` must match its filename stem, referenced wheels live at the
+same top level, and unknown top-level ``.toml`` files are rejected.  There is
+no recursive scan, fallback filename, channel discovery, or heuristic bundle
+resolution.
+
+### Application Service
+
+``ZeAlfieService`` is the M0-9 application-level orchestrator:
+
+* ``resolve_offline_release_set(release_dir)`` resolves a complete
+  ``DesiredRuntimeState`` from the deterministic release directory.
+* ``plan_offline_deployment(release_dir)`` is read-only and returns a
+  ``DeploymentPlan`` from the current runtime status.
+* ``apply_offline_deployment(release_dir)`` resolves and plans fresh at call
+  time, then delegates to ``apply_deployment_plan``.  It never consumes or
+  persists a previous preview plan.
+* ``rollback_runtime()`` delegates to ``SharedRuntime.rollback()``.
+
+The service reuses the existing M0-7/M0-8 models and engines rather than
+reimplementing release verification, planning, transactional apply, or
+rollback semantics.
+
+### CLI Surface
+
+M0-9.3 exposes the service through the existing ``runtime`` command group:
+
+```bash
+zealfie runtime plan --release-dir PATH
+zealfie runtime apply --release-dir PATH
+zealfie runtime rollback
+```
+
+``runtime plan`` is a read-only preview.  ``runtime apply`` performs fresh
+resolution and planning through ``ZeAlfieService.apply_offline_deployment``.
+``runtime rollback`` uses the existing pointer-level rollback mechanism.

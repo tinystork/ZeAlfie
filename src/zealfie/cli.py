@@ -9,11 +9,21 @@ from pathlib import Path
 from typing import TextIO
 
 from . import get_version
-from .app import collect_status, format_component_status, format_status, startup_message
+from .app import (
+    OfflineReleaseError,
+    ZeAlfieService,
+    collect_status,
+    format_component_status,
+    format_status,
+    startup_message,
+)
 from .components import UnknownComponentError, default_registry
 from .runtime import (
-    RuntimeReasonCode,
+    DeploymentPlan,
+    DeploymentResult,
     RuntimeState,
+    RuntimeStatus,
+    DeploymentStep,
     SharedRuntime,
     SharedRuntimeError,
     default_runtime_layout,
@@ -37,8 +47,19 @@ def build_parser() -> argparse.ArgumentParser:
     # -- runtime subcommand --------------------------------------------------
     runtime_parser = subparsers.add_parser("runtime", help="manage the shared runtime")
     runtime_subs = runtime_parser.add_subparsers(dest="runtime_command")
-    runtime_status = runtime_subs.add_parser("status", help="show shared runtime status")
-    runtime_create = runtime_subs.add_parser("create", help="create the shared runtime")
+    runtime_subs.add_parser("status", help="show shared runtime status")
+    runtime_subs.add_parser("create", help="create the shared runtime")
+    runtime_plan = runtime_subs.add_parser("plan", help="plan an offline deployment (read-only)")
+    runtime_plan.add_argument(
+        "--release-dir", required=True, type=Path, dest="release_dir",
+        help="path to the offline release directory",
+    )
+    runtime_apply = runtime_subs.add_parser("apply", help="apply an offline deployment")
+    runtime_apply.add_argument(
+        "--release-dir", required=True, type=Path, dest="release_dir",
+        help="path to the offline release directory",
+    )
+    runtime_subs.add_parser("rollback", help="rollback the shared runtime")
     return parser
 
 
@@ -83,6 +104,34 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
                 print(f"Cannot create shared runtime: {exc}", file=sys.stderr)
                 return 3
 
+        if args.runtime_command == "plan":
+            service = _make_service()
+            try:
+                plan = service.plan_offline_deployment(args.release_dir)
+                print(_format_deployment_plan(plan), file=stdout)
+                if plan.blocked:
+                    return 1
+                return 0
+            except OfflineReleaseError as exc:
+                print(f"plan failed: {exc}", file=sys.stderr)
+                return 4
+
+        if args.runtime_command == "apply":
+            service = _make_service()
+            try:
+                result = service.apply_offline_deployment(args.release_dir)
+                print(_format_deployment_result(result), file=stdout)
+                return 0 if result.success else 3
+            except OfflineReleaseError as exc:
+                print(f"apply failed: {exc}", file=sys.stderr)
+                return 4
+
+        if args.runtime_command == "rollback":
+            service = _make_service()
+            status = service.rollback_runtime()
+            print(_format_runtime_status(status), file=stdout)
+            return 0 if status.state == RuntimeState.READY else 3
+
         # No runtime subcommand given → show help.
         runtime_parser.print_help(file=stdout)
         return 0
@@ -91,7 +140,7 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
     return 0
 
 
-def _format_runtime_status(st: "RuntimeStatus") -> str:
+def _format_runtime_status(st: RuntimeStatus) -> str:
     lines = [
         f"Shared runtime:",
         f" State: {st.state.value}",
@@ -112,6 +161,69 @@ def _format_runtime_status(st: "RuntimeStatus") -> str:
     if st.reason_code is not None:
         lines.append(f" Reason code: {st.reason_code.value}")
     return "\n".join(lines)
+
+
+def _format_deployment_plan(plan: DeploymentPlan) -> str:
+    """Format a DeploymentPlan for CLI output."""
+    lines = [
+        f"Deployment plan:",
+        f" Runtime state: {plan.runtime_state.value}",
+    ]
+    if plan.source_active_slot_id:
+        lines.append(f" Source active slot: {plan.source_active_slot_id}")
+    if plan.source_previous_slot_id:
+        lines.append(f" Source previous slot: {plan.source_previous_slot_id}")
+    if plan.blocked:
+        lines.append(f" Blocked: {plan.blocked_reason or 'yes'}")
+    lines.append("")
+    lines.append("Components:")
+    for step in plan.steps:
+        lines.extend(_format_deployment_step(step))
+    return "\n".join(lines)
+
+
+def _format_deployment_step(step: DeploymentStep) -> list[str]:
+    """Format a single DeploymentStep."""
+    parts = [
+        f" {step.component_id}:",
+        f"  Action: {step.action.value}",
+        f"  Desired version: {step.desired_version}",
+    ]
+    if step.current_version is not None:
+        parts.append(f"  Current version: {step.current_version}")
+    if step.reason_code is not None:
+        parts.append(f"  Reason code: {step.reason_code.value}")
+    if step.reason is not None:
+        parts.append(f"  Reason: {step.reason}")
+    return parts
+
+
+def _format_deployment_result(result: DeploymentResult) -> str:
+    """Format a DeploymentResult for CLI output."""
+    lines = ["Deployment result:"]
+    if result.success:
+        lines.append(" Success: yes")
+        if result.active_slot_id:
+            lines.append(f" Active slot: {result.active_slot_id}")
+        if result.previous_slot_id:
+            lines.append(f" Previous slot: {result.previous_slot_id}")
+    else:
+        lines.append(" Success: no")
+        if result.reason:
+            lines.append(f" Reason: {result.reason}")
+    return "\n".join(lines)
+
+
+def _make_service() -> ZeAlfieService:
+    """Construct the default application service.
+
+    Isolated into a private factory so tests can monkeypatch without
+    touching the real user runtime.
+    """
+    return ZeAlfieService(
+        registry=default_registry(),
+        runtime=SharedRuntime(default_runtime_layout()),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

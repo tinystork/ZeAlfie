@@ -1,11 +1,41 @@
 from __future__ import annotations
 
+import hashlib
+import shutil
+import textwrap
 from io import StringIO
+from pathlib import Path
+
+import pytest
 
 import zealfie.cli as cli
 from zealfie import get_version
-from zealfie.components.model import ComponentStatus, ReasonCode
-from zealfie.cli import main, run
+from zealfie.components.model import ComponentDefinition, ComponentStatus, EntryPointContract, ReasonCode
+from zealfie.components.registry import ComponentRegistry
+from zealfie.cli import _format_deployment_plan, _format_deployment_result, main, run
+from zealfie.releases.model import VerifiedArtifact
+from zealfie.runtime.layout import RuntimeLayout
+from zealfie.runtime.manager import SharedRuntime
+from zealfie.runtime.model import (
+    DeploymentResult,
+    RuntimeReasonCode,
+    RuntimeState,
+    RuntimeStatus,
+)
+from zealfie.runtime.planning import (
+    DeploymentAction,
+    DeploymentPlan,
+    DeploymentReasonCode,
+    DeploymentStep,
+    DesiredComponent,
+    DesiredRuntimeState,
+)
+from zealfie.runtime.probe import probe_runtime_distribution
+
+
+# ===========================================================================
+# Fake registry for component status tests
+# ===========================================================================
 
 
 class FakeRegistry:
@@ -60,15 +90,18 @@ AVAILABLE_WITNESS = ComponentStatus(
 )
 
 
+# ===========================================================================
+# Existing CLI tests (unchanged)
+# ===========================================================================
+
+
 def test_main_returns_success() -> None:
     assert main([]) == 0
 
 
 def test_version_option_outputs_package_version() -> None:
     stdout = StringIO()
-
     code = run(["--version"], stdout=stdout)
-
     assert code == 0
     assert stdout.getvalue().strip() == f"ZeAlfie {get_version()}"
 
@@ -76,10 +109,8 @@ def test_version_option_outputs_package_version() -> None:
 def test_status_command_outputs_absent_component(monkeypatch) -> None:
     monkeypatch.setattr(cli, "default_registry", lambda: FakeRegistry(ABSENT_ZESOLVER))
     stdout = StringIO()
-
     code = run(["status"], stdout=stdout)
     output = stdout.getvalue()
-
     assert code == 0
     assert f"ZeAlfie {get_version()}" in output
     assert "Platform:" in output
@@ -95,10 +126,8 @@ def test_status_command_outputs_absent_component(monkeypatch) -> None:
 def test_status_command_outputs_present_component(monkeypatch) -> None:
     monkeypatch.setattr(cli, "default_registry", lambda: FakeRegistry(PRESENT_ZESOLVER))
     stdout = StringIO()
-
     code = run(["status"], stdout=stdout)
     output = stdout.getvalue()
-
     assert code == 0
     assert "ZeSolver" in output
     assert "Installed: yes" in output
@@ -110,10 +139,8 @@ def test_status_command_outputs_present_component(monkeypatch) -> None:
 def test_status_command_outputs_available_contract(monkeypatch) -> None:
     monkeypatch.setattr(cli, "default_registry", lambda: FakeRegistry(AVAILABLE_WITNESS))
     stdout = StringIO()
-
     code = run(["status"], stdout=stdout)
     output = stdout.getvalue()
-
     assert code == 0
     assert "ZeWitness" in output
     assert "Installed: yes" in output
@@ -129,9 +156,7 @@ def test_unknown_command_returns_error_code() -> None:
 def test_cli_does_not_import_or_require_zesolver(monkeypatch) -> None:
     monkeypatch.setattr(cli, "default_registry", lambda: FakeRegistry(ABSENT_ZESOLVER))
     stdout = StringIO()
-
     code = run(["status"], stdout=stdout)
-
     assert code == 0
     assert "ZeSolver" in stdout.getvalue()
 
@@ -139,10 +164,8 @@ def test_cli_does_not_import_or_require_zesolver(monkeypatch) -> None:
 def test_status_specific_unknown_component_returns_error_without_traceback(monkeypatch) -> None:
     monkeypatch.setattr(cli, "default_registry", lambda: FakeRegistry(ABSENT_ZESOLVER))
     stdout = StringIO()
-
     code = run(["status", "missing"], stdout=stdout)
     output = stdout.getvalue()
-
     assert code == 2
     assert "Unknown component: missing" in output
     assert "zesolver" in output
@@ -152,10 +175,8 @@ def test_status_specific_unknown_component_returns_error_without_traceback(monke
 def test_status_specific_zesolver_displays_reason(monkeypatch) -> None:
     monkeypatch.setattr(cli, "default_registry", lambda: FakeRegistry(PRESENT_ZESOLVER))
     stdout = StringIO()
-
     code = run(["status", "zesolver"], stdout=stdout)
     output = stdout.getvalue()
-
     assert code == 0
     assert "ZeSolver" in output
     assert "Installed: yes" in output
@@ -163,3 +184,793 @@ def test_status_specific_zesolver_displays_reason(monkeypatch) -> None:
     assert "Launch contract: unavailable" in output
     assert 'Reason: expected public entry point "gui_scripts:zesolver" was not found' in output
     assert ReasonCode.PUBLIC_ENTRY_POINT_NOT_FOUND.value not in output
+
+
+# ===========================================================================
+# CLI unit tests — plan format output
+# ===========================================================================
+
+WITNESS_DEF = ComponentDefinition(
+    "zewitness",
+    "ZeWitness",
+    "zealfie-witness",
+    (EntryPointContract("console_scripts", "zewitness"),),
+)
+
+WITNESS2_DEF = ComponentDefinition(
+    "zewitness2",
+    "ZeWitness2",
+    "zealfie-witness2",
+    (EntryPointContract("console_scripts", "zewitness2"),),
+)
+
+_FAKE_ARTIFACT = VerifiedArtifact(
+    component_id="zewitness",
+    version="0.0.1",
+    path=Path("/fake/witness.whl"),
+    size=100,
+    sha256="a" * 64,
+    distribution_name="zealfie-witness",
+    wheel_version="0.0.1",
+)
+
+_FAKE_ARTIFACT2 = VerifiedArtifact(
+    component_id="zewitness2",
+    version="0.1.0",
+    path=Path("/fake/witness2.whl"),
+    size=200,
+    sha256="b" * 64,
+    distribution_name="zealfie-witness2",
+    wheel_version="0.1.0",
+)
+
+
+def _fake_absent_plan() -> DeploymentPlan:
+    desired = DesiredRuntimeState(
+        components=(
+            DesiredComponent("zewitness", "0.0.1", _FAKE_ARTIFACT),
+        )
+    )
+    steps = (
+        DeploymentStep(
+            component_id="zewitness",
+            desired_version="0.0.1",
+            artifact=_FAKE_ARTIFACT,
+            action=DeploymentAction.INSTALL,
+            reason_code=DeploymentReasonCode.RUNTIME_ABSENT,
+            reason="shared runtime is absent — install planned",
+        ),
+    )
+    return DeploymentPlan(
+        desired_state=desired,
+        runtime_state=RuntimeState.ABSENT,
+        steps=steps,
+        blocked=False,
+    )
+
+
+def _fake_keep_plan() -> DeploymentPlan:
+    desired = DesiredRuntimeState(
+        components=(
+            DesiredComponent("zewitness", "0.0.1", _FAKE_ARTIFACT),
+        )
+    )
+    steps = (
+        DeploymentStep(
+            component_id="zewitness",
+            desired_version="0.0.1",
+            artifact=_FAKE_ARTIFACT,
+            action=DeploymentAction.KEEP,
+            current_version="0.0.1",
+            reason_code=DeploymentReasonCode.ALREADY_SATISFIED,
+            reason="installed version and launch contract are correct",
+        ),
+    )
+    return DeploymentPlan(
+        desired_state=desired,
+        runtime_state=RuntimeState.READY,
+        steps=steps,
+        blocked=False,
+        source_active_slot_id="rt-deadbeef0000",
+        source_previous_slot_id="rt-cafebabe0000",
+    )
+
+
+def _fake_blocked_plan() -> DeploymentPlan:
+    desired = DesiredRuntimeState(
+        components=(
+            DesiredComponent("zewitness", "0.0.1", _FAKE_ARTIFACT),
+        )
+    )
+    steps = (
+        DeploymentStep(
+            component_id="zewitness",
+            desired_version="0.0.1",
+            artifact=_FAKE_ARTIFACT,
+            action=DeploymentAction.BLOCKED,
+            reason_code=DeploymentReasonCode.RUNTIME_BROKEN,
+            reason="shared runtime is BROKEN",
+        ),
+    )
+    return DeploymentPlan(
+        desired_state=desired,
+        runtime_state=RuntimeState.BROKEN,
+        steps=steps,
+        blocked=True,
+        blocked_reason="shared runtime is BROKEN",
+    )
+
+
+def test_format_absent_plan():
+    """Format output for an ABSENT runtime plan."""
+    plan = _fake_absent_plan()
+    output = _format_deployment_plan(plan)
+    assert "Runtime state: ABSENT" in output
+    assert "zewitness:" in output
+    assert "Action: INSTALL" in output
+    assert "Desired version: 0.0.1" in output
+    assert "Reason code: RUNTIME_ABSENT" in output
+    assert "shared runtime is absent — install planned" in output
+
+
+def test_format_keep_plan():
+    """Format output for a READY runtime KEEP plan."""
+    plan = _fake_keep_plan()
+    output = _format_deployment_plan(plan)
+    assert "Runtime state: READY" in output
+    assert "Source active slot: rt-deadbeef0000" in output
+    assert "Source previous slot: rt-cafebabe0000" in output
+    assert "Action: KEEP" in output
+    assert "Current version: 0.0.1" in output
+    assert "ALREADY_SATISFIED" in output
+
+
+def test_format_blocked_plan():
+    """Format output for a blocked plan."""
+    plan = _fake_blocked_plan()
+    output = _format_deployment_plan(plan)
+    assert "Runtime state: BROKEN" in output
+    assert "Blocked: shared runtime is BROKEN" in output
+    assert "Action: BLOCKED" in output
+    assert "RUNTIME_BROKEN" in output
+
+
+def test_format_deployment_result_success():
+    """Format output for a successful deployment."""
+    result = DeploymentResult(
+        success=True,
+        active_slot_id="rt-newslot0000",
+        previous_slot_id="rt-oldslot0000",
+    )
+    output = _format_deployment_result(result)
+    assert "Success: yes" in output
+    assert "Active slot: rt-newslot0000" in output
+    assert "Previous slot: rt-oldslot0000" in output
+
+
+def test_format_deployment_result_failure():
+    """Format output for a failed deployment."""
+    result = DeploymentResult(
+        success=False,
+        reason="deployment plan is blocked",
+    )
+    output = _format_deployment_result(result)
+    assert "Success: no" in output
+    assert "Reason: deployment plan is blocked" in output
+
+
+# ===========================================================================
+# CLI unit tests — runtime plan with fake service
+# ===========================================================================
+
+
+class _FakePlanService:
+    """Fake ZeAlfieService for CLI plan tests."""
+
+    def __init__(self, plan: DeploymentPlan) -> None:
+        self._plan = plan
+
+    def plan_offline_deployment(self, release_dir: Path) -> DeploymentPlan:
+        return self._plan
+
+
+def test_runtime_plan_absent_success(monkeypatch):
+    """CLI runtime plan returns 0 for a successful non-blocked plan."""
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakePlanService(_fake_absent_plan()))
+    stdout = StringIO()
+    code = run(["runtime", "plan", "--release-dir", "/fake/rd"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "Deployment plan:" in output
+    assert "Runtime state: ABSENT" in output
+    assert "Action: INSTALL" in output
+
+
+def test_runtime_plan_blocked_returns_1(monkeypatch):
+    """CLI runtime plan returns 1 for blocked plans."""
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakePlanService(_fake_blocked_plan()))
+    stdout = StringIO()
+    code = run(["runtime", "plan", "--release-dir", "/fake/rd"], stdout=stdout)
+    assert code == 1
+    output = stdout.getvalue()
+    assert "Blocked:" in output
+    assert "Action: BLOCKED" in output
+
+
+def test_runtime_plan_offline_error_stderr(monkeypatch):
+    """OfflineReleaseError returns code 4 and does not print a plan."""
+    from zealfie.app import OfflineReleaseError
+
+    class _ErrorService:
+        def plan_offline_deployment(self, release_dir):
+            raise OfflineReleaseError("missing manifest 'missing.toml'")
+
+    monkeypatch.setattr(cli, "_make_service", lambda: _ErrorService())
+    stdout = StringIO()
+    code = run(
+        ["runtime", "plan", "--release-dir", "/fake/rd"],
+        stdout=stdout,
+    )
+    assert code == 4
+    assert "Deployment plan:" not in stdout.getvalue()
+
+
+def test_runtime_plan_offline_error_to_stderr(monkeypatch):
+    """OfflineReleaseError goes to stderr with message and no traceback."""
+    from zealfie.app import OfflineReleaseError
+    import sys
+
+    class _ErrorService:
+        def plan_offline_deployment(self, release_dir):
+            raise OfflineReleaseError("bad release dir")
+
+    monkeypatch.setattr(cli, "_make_service", lambda: _ErrorService())
+
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(
+            ["runtime", "plan", "--release-dir", "/fake/rd"],
+            stdout=stdout,
+        )
+        assert code == 4
+        assert "plan failed: bad release dir" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+def test_runtime_plan_keep_returns_0(monkeypatch):
+    """CLI runtime plan returns 0 for a READY KEEP plan."""
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakePlanService(_fake_keep_plan()))
+    stdout = StringIO()
+    code = run(["runtime", "plan", "--release-dir", "/fake/rd"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "Action: KEEP" in output
+    assert "ALREADY_SATISFIED" in output
+
+
+# ===========================================================================
+# CLI unit tests — runtime apply with fake service
+# ===========================================================================
+
+
+class _FakeApplyService:
+    """Fake ZeAlfieService for CLI apply tests."""
+
+    def __init__(self, result: DeploymentResult) -> None:
+        self._result = result
+        self.apply_called_with: list[Path] = []
+
+    def apply_offline_deployment(self, release_dir: Path) -> DeploymentResult:
+        self.apply_called_with.append(release_dir)
+        return self._result
+
+
+def test_runtime_apply_success(monkeypatch):
+    """CLI runtime apply returns 0 on success."""
+    result = DeploymentResult(
+        success=True,
+        active_slot_id="rt-slot12340000",
+        previous_slot_id="rt-slotabcd0000",
+    )
+    service = _FakeApplyService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = run(["runtime", "apply", "--release-dir", "/fake/rd"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "Success: yes" in output
+    assert "Active slot: rt-slot12340000" in output
+    assert "Previous slot: rt-slotabcd0000" in output
+
+
+def test_runtime_apply_failure_returns_3(monkeypatch):
+    """CLI runtime apply returns 3 on DeploymentResult(success=False)."""
+    result = DeploymentResult(success=False, reason="stale plan")
+    service = _FakeApplyService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = run(["runtime", "apply", "--release-dir", "/fake/rd"], stdout=stdout)
+    assert code == 3
+    output = stdout.getvalue()
+    assert "Success: no" in output
+    assert "Reason: stale plan" in output
+
+
+def test_runtime_apply_offline_error_to_stderr(monkeypatch):
+    """OfflineReleaseError from apply → stderr, exit 4, no traceback."""
+    from zealfie.app import OfflineReleaseError
+    import sys
+
+    class _ErrorService:
+        def apply_offline_deployment(self, release_dir):
+            raise OfflineReleaseError("bad sha256")
+
+    monkeypatch.setattr(cli, "_make_service", lambda: _ErrorService())
+
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(
+            ["runtime", "apply", "--release-dir", "/fake/rd"],
+            stdout=stdout,
+        )
+        assert code == 4
+        assert "apply failed: bad sha256" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+def test_runtime_apply_calls_service_with_release_dir(monkeypatch):
+    """CLI runtime apply passes release_dir to service.apply_offline_deployment."""
+    result = DeploymentResult(success=True, active_slot_id="rt-0000")
+    service = _FakeApplyService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = run(["runtime", "apply", "--release-dir", "/my/release"], stdout=stdout)
+    assert code == 0
+    assert len(service.apply_called_with) == 1
+    assert service.apply_called_with[0] == Path("/my/release")
+
+
+# ===========================================================================
+# CLI unit tests — runtime rollback with fake service
+# ===========================================================================
+
+
+class _FakeRollbackService:
+    """Fake ZeAlfieService for CLI rollback tests."""
+
+    def __init__(self, status: RuntimeStatus) -> None:
+        self._status = status
+
+    def rollback_runtime(self) -> RuntimeStatus:
+        return self._status
+
+
+def test_runtime_rollback_success(monkeypatch):
+    """CLI runtime rollback returns 0 when resulting state is READY."""
+    status = RuntimeStatus(
+        state=RuntimeState.READY,
+        runtime_root=Path("/fake/rt"),
+        active_slot_id="rt-rolled0000",
+        previous_slot_id="rt-prevslot0000",
+        reason_code=RuntimeReasonCode.RUNTIME_READY,
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakeRollbackService(status))
+    stdout = StringIO()
+    code = run(["runtime", "rollback"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "State: READY" in output
+    assert "Active slot: rt-rolled0000" in output
+    assert "Previous slot: rt-prevslot0000" in output
+
+
+def test_runtime_rollback_broken_returns_3(monkeypatch):
+    """CLI runtime rollback returns 3 when resulting state is BROKEN."""
+    status = RuntimeStatus(
+        state=RuntimeState.BROKEN,
+        runtime_root=Path("/fake/rt"),
+        reason_code=RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND,
+        reason="no previous slot to rollback to",
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakeRollbackService(status))
+    stdout = StringIO()
+    code = run(["runtime", "rollback"], stdout=stdout)
+    assert code == 3
+    output = stdout.getvalue()
+    assert "State: BROKEN" in output
+    assert "ROLLBACK_TARGET_NOT_FOUND" in output
+
+
+# ===========================================================================
+# CLI does not consume/persist a previous plan (apply is fresh)
+# ===========================================================================
+
+
+def test_cli_has_no_plan_persistence_path(monkeypatch):
+    """CLI has no mechanism to consume/persist a previous plan.
+
+    plan and apply are independent code paths that each create a fresh
+    service and call the corresponding method.  The CLI never stores a
+    plan object between commands and has no persistence path for it.
+    """
+    # Verify _make_service creates a fresh service each call.
+    # Since _make_service is isolated, tests can verify no plan reuse.
+    call_count = 0
+
+    class _CountingService:
+        def plan_offline_deployment(self, release_dir):
+            nonlocal call_count
+            call_count += 1
+            return _fake_absent_plan()
+
+    monkeypatch.setattr(cli, "_make_service", lambda: _CountingService())
+
+    # Call plan twice — each call creates fresh service.
+    run(["runtime", "plan", "--release-dir", "/a"], stdout=StringIO())
+    assert call_count == 1
+
+    # Plan again — new service, count increments.
+    run(["runtime", "plan", "--release-dir", "/b"], stdout=StringIO())
+    assert call_count == 2
+
+    # Plan has no way to store/retrieve a plan. No CLI path for it.
+    # The _make_service factory is the only entry point.
+
+
+# ===========================================================================
+# CLI plan is read-only — test that it doesn't mutate runtime
+# ===========================================================================
+
+
+def test_plan_does_not_create_runtime(tmp_path, monkeypatch):
+    """CLI runtime plan does not create a runtime or mutate filesystem.
+
+    When we inject a fake service that returns a plan, no runtime
+    directories are created.
+    """
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakePlanService(_fake_absent_plan()))
+    stdout = StringIO()
+    code = run(
+        ["runtime", "plan", "--release-dir", str(tmp_path / "noexist")],
+        stdout=stdout,
+    )
+    assert code == 0
+    assert "INSTALL" in stdout.getvalue()
+    assert not (tmp_path / "noexist").exists()
+
+
+# ===========================================================================
+# Witness end-to-end via CLI layer
+# ===========================================================================
+
+
+# Session-scoped witness wheels
+@pytest.fixture(scope="session")
+def witness_wheel_cli(tmp_path_factory) -> Path:
+    d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    t = tmp_path_factory.mktemp("cli-wheel")
+    from zealfie.building import build_wheel
+    return build_wheel(d, output_dir=t)
+
+
+@pytest.fixture(scope="session")
+def witness_v2_wheel_cli(tmp_path_factory) -> Path:
+    d = Path(__file__).resolve().parent / "fixtures" / "witness_component_v2"
+    t = tmp_path_factory.mktemp("cli-wheel-v2")
+    from zealfie.building import build_wheel
+    return build_wheel(d, output_dir=t)
+
+
+@pytest.fixture(scope="session")
+def witness2_wheel_cli(tmp_path_factory) -> Path:
+    d = Path(__file__).resolve().parent / "fixtures" / "witness_second"
+    t = tmp_path_factory.mktemp("cli-wheel2")
+    from zealfie.building import build_wheel
+    return build_wheel(d, output_dir=t)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _copy_wheel_as(wheel_path: Path, root: Path, filename: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    copied = root / filename
+    shutil.copy2(wheel_path, copied)
+    return copied
+
+
+def _write_manifest(
+    release_dir: Path,
+    component_id: str,
+    version: str,
+    filename: str,
+    sha256_val: str,
+    size_val: int,
+    *,
+    python_tag: str = "py3",
+    abi_tag: str = "none",
+    platform_tag: str = "any",
+) -> None:
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "{component_id}"
+        version = "{version}"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {size_val}
+        sha256 = "{sha256_val}"
+        python_tag = "{python_tag}"
+        abi_tag = "{abi_tag}"
+        platform_tag = "{platform_tag}"
+    """)
+    (release_dir / f"{component_id}.toml").write_text(toml_text)
+
+
+def _make_release_dir(
+    root: Path,
+    witness_wheel: Path,
+    witness2_wheel: Path | None = None,
+    *,
+    version: str = "0.0.1",
+) -> Path:
+    """Prepare a release directory with witness(es)."""
+    rd = root / "release"
+    rd.mkdir(parents=True)
+
+    fn1 = f"zealfie_witness-{version}-py3-none-any.whl"
+    w1 = _copy_wheel_as(witness_wheel, rd, fn1)
+    _write_manifest(rd, "zewitness", version, fn1, _sha256(w1), w1.stat().st_size)
+
+    if witness2_wheel is not None:
+        fn2 = "zealfie_witness2-0.1.0-py3-none-any.whl"
+        w2 = _copy_wheel_as(witness2_wheel, rd, fn2)
+        _write_manifest(rd, "zewitness2", "0.1.0", fn2, _sha256(w2), w2.stat().st_size)
+
+    return rd
+
+
+def _registry_for_ids(*component_ids: str) -> ComponentRegistry:
+    """Build a ComponentRegistry containing only the requested witness defs."""
+    defs = []
+    for cid in component_ids:
+        if cid == "zewitness":
+            defs.append(WITNESS_DEF)
+        elif cid == "zewitness2":
+            defs.append(WITNESS2_DEF)
+        else:
+            raise ValueError(f"unknown component id: {cid}")
+    return ComponentRegistry(defs)
+
+
+def test_witness_e2e_plan_apply_rollback_via_cli(
+    tmp_path, witness_wheel_cli, witness_v2_wheel_cli, monkeypatch
+):
+    """End-to-end witness cycle through CLI: plan, apply v1, apply v2, rollback.
+
+    Uses monkeypatched _make_service to inject a controlled registry and
+    a temp runtime layout — no production runtime is touched.
+    """
+    rt_root = tmp_path / "rt"
+    layout = RuntimeLayout(root=rt_root)
+    runtime = SharedRuntime(layout=layout)
+
+    # Registry with just zewitness.
+    registry = _registry_for_ids("zewitness")
+
+    # -- Build release dirs --
+    rd_v1 = _make_release_dir(tmp_path / "v1", witness_wheel_cli, version="0.0.1")
+    rd_v2 = _make_release_dir(tmp_path / "v2", witness_v2_wheel_cli, version="0.0.2")
+
+    # -- Patch _make_service to use controlled registry and runtime --
+    from zealfie.app import ZeAlfieService
+
+    def _controlled_service():
+        return ZeAlfieService(registry=registry, runtime=runtime)
+
+    monkeypatch.setattr(cli, "_make_service", _controlled_service)
+
+    # -- Step 1: plan v1 (read-only, ABSENT runtime) --
+    stdout = StringIO()
+    code = run(["runtime", "plan", "--release-dir", str(rd_v1)], stdout=stdout)
+    assert code == 0, f"plan v1 failed with code {code}"
+    output = stdout.getvalue()
+    assert "Action: INSTALL" in output
+    assert "RUNTIME_ABSENT" in output
+
+    # Verify runtime is still ABSENT (plan is read-only).
+    rt_status = runtime.status()
+    assert rt_status.state == RuntimeState.ABSENT, (
+        f"plan should not mutate runtime, but state is {rt_status.state}"
+    )
+
+    # -- Step 2: apply v1 --
+    stdout = StringIO()
+    code = run(["runtime", "apply", "--release-dir", str(rd_v1)], stdout=stdout)
+    assert code == 0, f"apply v1 failed with code {code}: {stdout.getvalue()}"
+    output = stdout.getvalue()
+    assert "Success: yes" in output
+    assert "Active slot:" in output
+    # First apply on ABSENT runtime has no previous slot.
+
+    # Verify runtime is READY with v1.
+    rt_status = runtime.status()
+    assert rt_status.state == RuntimeState.READY
+    active_python = runtime.python()
+    assert active_python is not None
+    probe = probe_runtime_distribution(active_python, "zealfie-witness")
+    assert probe["version"] == "0.0.1"
+
+    # Record slot for rollback reference.
+    slot_v1 = rt_status.active_slot_id
+
+    # -- Step 3: plan v2 (should see version mismatch → INSTALL) --
+    stdout = StringIO()
+    code = run(["runtime", "plan", "--release-dir", str(rd_v2)], stdout=stdout)
+    assert code == 0, f"plan v2 failed with code {code}"
+    output = stdout.getvalue()
+    assert "Action: INSTALL" in output
+    assert "VERSION_MISMATCH" in output
+    assert "0.0.1" in output  # current version
+    assert "0.0.2" in output  # desired version
+
+    # -- Step 4: apply v2 --
+    stdout = StringIO()
+    code = run(["runtime", "apply", "--release-dir", str(rd_v2)], stdout=stdout)
+    assert code == 0, f"apply v2 failed with code {code}: {stdout.getvalue()}"
+    output = stdout.getvalue()
+    assert "Success: yes" in output
+
+    # Verify runtime has v2.
+    active_python = runtime.python()
+    probe = probe_runtime_distribution(active_python, "zealfie-witness")
+    assert probe["version"] == "0.0.2"
+
+    slot_v2 = runtime.status().active_slot_id
+    assert slot_v2 != slot_v1
+
+    # -- Step 5: rollback --
+    stdout = StringIO()
+    code = run(["runtime", "rollback"], stdout=stdout)
+    assert code == 0, f"rollback failed with code {code}: {stdout.getvalue()}"
+    output = stdout.getvalue()
+    assert "State: READY" in output
+
+    # Verify runtime is back to v1.
+    rt_status = runtime.status()
+    assert rt_status.active_slot_id == slot_v1
+    assert rt_status.previous_slot_id == slot_v2
+
+    active_python = runtime.python()
+    probe = probe_runtime_distribution(active_python, "zealfie-witness")
+    assert probe["version"] == "0.0.1"
+
+
+def test_witness_e2e_plan_then_apply_fresh_not_persisted(
+    tmp_path, witness_wheel_cli, monkeypatch
+):
+    """apply re-plans fresh internally; a previous plan call is not consumed.
+
+    Plan v1, then apply v1.  The plan output from the first call is
+    not passed to apply — apply re-plans fresh internally.
+    """
+    rt_root = tmp_path / "rt"
+    layout = RuntimeLayout(root=rt_root)
+    runtime = SharedRuntime(layout=layout)
+    registry = _registry_for_ids("zewitness")
+
+    rd = _make_release_dir(tmp_path / "r", witness_wheel_cli, version="0.0.1")
+
+    from zealfie.app import ZeAlfieService
+
+    def _controlled_service():
+        return ZeAlfieService(registry=registry, runtime=runtime)
+
+    monkeypatch.setattr(cli, "_make_service", _controlled_service)
+
+    # Plan
+    stdout = StringIO()
+    code = run(["runtime", "plan", "--release-dir", str(rd)], stdout=stdout)
+    assert code == 0
+    plan_output = stdout.getvalue()
+
+    # Plan output contains plan information but no result ID to reuse.
+    assert "INSTALL" in plan_output
+
+    # Apply (fresh — no plan passed)
+    stdout = StringIO()
+    code = run(["runtime", "apply", "--release-dir", str(rd)], stdout=stdout)
+    assert code == 0
+    assert "Success: yes" in stdout.getvalue()
+
+    # Verify witness installed
+    active_python = runtime.python()
+    probe = probe_runtime_distribution(active_python, "zealfie-witness")
+    assert probe["version"] == "0.0.1"
+
+
+def test_witness_e2e_multi_component_plan(
+    tmp_path, witness_wheel_cli, witness2_wheel_cli, monkeypatch
+):
+    """CLI plan for multi-component release shows both components."""
+    rt_root = tmp_path / "rt"
+    layout = RuntimeLayout(root=rt_root)
+    runtime = SharedRuntime(layout=layout)
+    registry = _registry_for_ids("zewitness", "zewitness2")
+
+    rd = _make_release_dir(
+        tmp_path / "r",
+        witness_wheel_cli,
+        witness2_wheel=witness2_wheel_cli,
+    )
+
+    from zealfie.app import ZeAlfieService
+
+    monkeypatch.setattr(
+        cli, "_make_service",
+        lambda: ZeAlfieService(registry=registry, runtime=runtime),
+    )
+
+    stdout = StringIO()
+    code = run(["runtime", "plan", "--release-dir", str(rd)], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "zewitness:" in output
+    assert "zewitness2:" in output
+    assert output.count("Action: INSTALL") == 2
+
+
+# ===========================================================================
+# Existing tests still pass — runtime status/create unchanged
+# ===========================================================================
+
+
+def test_runtime_status_absent(tmp_path, monkeypatch):
+    """CLI runtime status on an ABSENT runtime."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rt = SharedRuntime(layout=layout)
+    monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout)
+    stdout = StringIO()
+    code = run(["runtime", "status"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "State: ABSENT" in output
+    assert str(layout.root) in output
+
+
+def test_runtime_status_ready(tmp_path, monkeypatch):
+    """CLI runtime status on a READY runtime."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rt = SharedRuntime(layout=layout)
+    rt.create()
+    monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout)
+    stdout = StringIO()
+    code = run(["runtime", "status"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "State: READY" in output
+
+
+def test_runtime_create_idempotent(tmp_path, monkeypatch):
+    """CLI runtime create is idempotent."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rh = SharedRuntime(layout=layout)
+    rh.create()
+    monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout)
+    stdout = StringIO()
+    code = run(["runtime", "create"], stdout=stdout)
+    assert code == 0
+    assert "State: READY" in stdout.getvalue()

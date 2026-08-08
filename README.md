@@ -19,7 +19,13 @@ Key capabilities:
 * offline local wheel installation with pre- and post-validation;
 * external Python metadata probe (no application code imported);
 * temporary isolated environments for hermetic testing;
-* structured launch plans and controlled subprocess execution.
+* structured launch plans and controlled subprocess execution;
+* **offline deployment planning** (M0-9.1) — resolve a deterministic
+  release directory into a read-only deployment plan.
+* **offline deployment apply + rollback** (M0-9.2) — orchestrate
+  full-state apply and reversible rollback via the application service.
+* **offline deployment CLI** (M0-9.3) — plan, apply, and rollback from
+  the terminal using the same application service.
 
 Concepts kept distinct by design:
 
@@ -80,3 +86,104 @@ You can also inspect a known component directly:
 ```bash
 zealfie status zesolver
 ```
+
+## Offline release directory convention (M0-9.1)
+
+A deterministic, minimal, local convention for offline release
+directories.  Used by the deployment planning service to resolve a
+complete desired runtime state without network access.
+
+Layout:
+
+```
+release_dir/
+  <component_id>.toml      -- one release manifest per component
+  <wheel_filename>.whl     -- wheel artifacts at top level
+```
+
+Rules:
+
+1. For every *component_id* in the trusted component registry, the
+   file ``<component_id>.toml`` MUST exist at the top level.
+2. Each manifest's declared ``component_id`` MUST match its
+   filename stem.
+3. Wheel artifacts referenced by manifests live at the top level
+   of the release directory.
+4. Any ``.toml`` file whose stem does not match a known component
+   id is rejected (fail-closed).
+5. No recursive scan, no fallback names, no heuristic discovery.
+
+### Deployment planning service
+
+```python
+from zealfie.app import ZeAlfieService
+
+service = ZeAlfieService()
+plan = service.plan_offline_deployment(release_dir)
+```
+
+``plan_offline_deployment`` is **read-only** — it does not mutate the
+filesystem or shared runtime.  It resolves all manifests, verifies
+every artifact, builds a ``DesiredRuntimeState``, probes the current
+runtime, and returns a ``DeploymentPlan`` describing INSTALL/KEEP/BLOCKED
+for each component.
+
+The ``runtime plan`` command remains a preview: ``runtime apply`` always
+resolves and plans fresh instead of consuming a previous plan output.
+
+### Runtime plan, apply, and rollback commands (M0-9.3)
+
+```bash
+zealfie runtime plan --release-dir PATH
+```
+
+Read-only preview.  Resolves the offline release directory, builds a
+``DeploymentPlan`` from the current runtime state, and prints planned
+actions/reasons/versions for each component.  Returns 0 for a
+successfully built plan, 1 when the plan is blocked, or 4 on
+``OfflineReleaseError`` (stderr, no traceback).  Does **not** mutate
+the shared runtime.
+
+```bash
+zealfie runtime apply --release-dir PATH
+```
+
+Applies the offline deployment.  Re-plans fresh at call time — a
+plan from a previous ``runtime plan`` is never consumed or persisted.
+Prints success/failure with active/previous slot ids.  Returns 0 on
+success, 3 when the ``DeploymentResult`` reports failure, or 4 on
+``OfflineReleaseError`` (stderr, no traceback).
+
+```bash
+zealfie runtime rollback
+```
+
+Rolls back the shared runtime to the previous active slot.  Prints the
+resulting runtime status using the existing runtime status formatting.
+Returns 0 when the resulting state is ``READY``, or 3 otherwise.
+
+### Application service injection for tests
+
+The CLI constructs services via a private ``_make_service()`` factory
+that returns ``ZeAlfieService(registry=default_registry(),
+runtime=SharedRuntime(default_runtime_layout()))``.  Tests can
+monkeypatch ``zealfie.cli._make_service`` to inject a controlled
+registry and temp runtime — no production runtime is touched.
+
+### Offline deployment orchestration service
+
+``ZeAlfieService`` (``zealfie.app.service``) is the application-level
+orchestrator for offline deployment:
+
+* ``resolve_offline_release_set(release_dir)`` — read-only, resolves
+  the complete desired runtime state from a release directory.
+* ``plan_offline_deployment(release_dir)`` — read-only, builds a
+  ``DeploymentPlan`` from the current runtime status.
+* ``apply_offline_deployment(release_dir)`` — re-plans fresh, then
+  applies via ``apply_deployment_plan`` (transactional, mutates the
+  shared runtime).
+* ``rollback_runtime()`` — delegates to ``SharedRuntime.rollback()``.
+
+Errors during release resolution are surfaced as ``OfflineReleaseError``,
+which wraps all lower-level failures (missing manifests, parse errors,
+artifact verification, extra unknown manifests).

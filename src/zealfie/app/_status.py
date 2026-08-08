@@ -5,8 +5,8 @@ from __future__ import annotations
 import platform
 from dataclasses import dataclass
 
-from . import get_version
-from .components import ComponentRegistry, ComponentStatus, default_registry
+from zealfie import get_version
+from zealfie.components import ComponentRegistry, ComponentStatus, default_registry
 
 
 FULL_NAME = "Astronomy Launcher For Imaging Engines"
