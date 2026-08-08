@@ -2,6 +2,9 @@
 
 M0-7B extends the release manifest to support multiple wheel artifacts
 per release, each with optional host compatibility tags.
+
+M0-7B hardening adds fail-closed validation on ``HostTarget`` fields
+to reject empty or whitespace-only strings.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ class HostTarget:
 
     Tags follow the wheel tag convention (PEP 425) but are stored as
     plain strings to avoid a runtime dependency on ``packaging``.
+
+    All fields must be non-empty, non-whitespace strings.
     """
 
     python_tag: str
@@ -34,6 +39,16 @@ class HostTarget:
 
     platform_tag: str
     """e.g. ``linux_x86_64``, ``win_amd64``, ``macosx_14_0_arm64``."""
+
+    def __post_init__(self) -> None:
+        """Validate all fields are non-empty, non-whitespace strings."""
+        for field_name in ("python_tag", "abi_tag", "platform_tag"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"HostTarget.{field_name} must be a non-empty string, "
+                    f"got {value!r}"
+                )
 
     @classmethod
     def from_current_host(cls) -> HostTarget:

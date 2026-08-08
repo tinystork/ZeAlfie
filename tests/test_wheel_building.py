@@ -341,3 +341,66 @@ def test_build_wheel_tempdir_uses_neutral_cwd(monkeypatch, tmp_path: Path) -> No
         f"expected cwd={fake_tmp}, got cwd={capture.get('cwd')}; "
         f"a repo-local build/ directory would mask PyPA build"
     )
+
+
+# ---------------------------------------------------------------------------
+# M0-7B Hardening — relative source_dir survives neutral CWD
+# ---------------------------------------------------------------------------
+
+
+def test_build_wheel_with_relative_source_from_repo_root(tmp_path, monkeypatch):
+    """Relative source_dir must work even though cwd is the output dir.
+
+    The hardening of build_wheel() sets cwd to the output directory to
+    prevent a local build/ from masking the PyPA build package.  But if
+    source_dir is relative, python -m build would resolve it from out/,
+    not from the repo root.  The fix resolves source_dir to an absolute
+    path before changing cwd.
+    """
+    import subprocess as sp_mod
+
+    # We use monkeypatch to verify the source path passed to subprocess
+    # is absolute, and the build succeeds.
+    captured_source: str = ""
+    captured_cwd: str = ""
+
+    def fake_run(cmd, **kwargs):
+        nonlocal captured_source, captured_cwd
+        captured_cwd = kwargs.get("cwd", "")
+        # source_dir is the positional arg after --wheel in the cmd list
+        try:
+            wheel_idx = cmd.index("build")
+            captured_source = str(cmd[wheel_idx + 1])
+        except (ValueError, IndexError):
+            pass
+        # Produce a fake wheel in the cwd
+        cwd = Path(captured_cwd)
+        (cwd / "fake-0.0.1-py3-none-any.whl").write_text("")
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+
+    # Call with a relative path from the project root.
+    project_root = Path(__file__).resolve().parents[1]
+    import os
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(project_root)
+        result = build_wheel("tests/fixtures/witness_component", output_dir=tmp_path)
+    finally:
+        os.chdir(old_cwd)
+
+    # The source passed to subprocess must be an absolute path.
+    assert Path(captured_source).is_absolute(), (
+        f"source_dir must be absolute after resolve, "
+        f"got relative: {captured_source!r}"
+    )
+
+    # The cwd must still be the neutral output directory.
+    assert captured_cwd == str(tmp_path), (
+        f"expected cwd={tmp_path}, got cwd={captured_cwd}"
+    )
+
+    assert result.is_file()

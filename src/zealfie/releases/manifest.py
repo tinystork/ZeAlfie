@@ -2,10 +2,15 @@
 
 M0-7B extends the parser to handle multiple ``[[artifacts]]`` entries,
 each with optional host compatibility tags.
+
+M0-7B hardening adds fail-closed validation on tag values to prevent
+overly-permissive prefix matches (e.g. ``python_tag="p"`` matching
+``py312``).
 """
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -18,13 +23,49 @@ class ReleaseManifestError(ValueError):
     """Raised when a release manifest is structurally invalid."""
 
 
+# ---------------------------------------------------------------------------
+# Tag validation patterns (fail-closed — reject unexpectedly permissive tags)
+# ---------------------------------------------------------------------------
+
+# Python tag: pyN, cpN (e.g. py3, py312, cp312)
+_PYTHON_TAG_RE = re.compile(r"^(?:py|cp)\d+$")
+
+# ABI tag: none, cpN, abiN (e.g. none, cp312, abi3)
+_ABI_TAG_RE = re.compile(r"^(?:none|cp\d+|abi\d+)$")
+
+# Platform tag: any, or a non-empty wheel-like token
+_PLATFORM_TAG_RE = re.compile(r"^(?:any|[A-Za-z0-9_]+)$")
+
+# Validation map keyed by tag name.
+_TAG_VALIDATORS: dict[str, tuple[re.Pattern, str]] = {
+    "python_tag": (_PYTHON_TAG_RE, "e.g. py3, py312, cp312"),
+    "abi_tag": (_ABI_TAG_RE, "e.g. none, cp312, abi3"),
+    "platform_tag": (_PLATFORM_TAG_RE, "e.g. any, linux_x86_64, win_amd64"),
+}
+
+
+def _validate_tag(tag_name: str, value: str) -> None:
+    """Validate a tag value against its expected pattern.
+
+    Raises ``ReleaseManifestError`` if the value does not match the
+    fail-closed pattern for *tag_name*.
+    """
+    pattern, expected = _TAG_VALIDATORS[tag_name]
+    if not pattern.match(value):
+        raise ReleaseManifestError(
+            f"{tag_name} value {value!r} is not a recognised tag pattern; "
+            f"expected form: {expected}"
+        )
+
+
 def parse_release_manifest(text: str) -> ReleaseManifest:
     """Parse and strictly validate a release manifest from TOML text.
 
     Unknown top-level keys are rejected.  Each artifact entry must
     declare at least *filename*, *size*, and *sha256*.  Optional host
     compatibility tags (*python_tag*, *abi_tag*, *platform_tag*) are
-    accepted; unknown per-artifact keys are rejected.
+    accepted and validated against fail-closed patterns; unknown
+    per-artifact keys are rejected.
     """
     try:
         payload = tomllib.loads(text)
@@ -66,7 +107,7 @@ def parse_release_manifest(text: str) -> ReleaseManifest:
         size = _required_int(entry, "size")
         sha256 = _required_sha256(entry, "sha256")
 
-        # --- optional host compatibility tags ---
+        # --- optional host compatibility tags (validated fail-closed) ---
         python_tag = _optional_tag(entry, "python_tag")
         abi_tag = _optional_tag(entry, "abi_tag")
         platform_tag = _optional_tag(entry, "platform_tag")
@@ -158,8 +199,9 @@ def _required_sha256(payload: dict, key: str) -> str:
 def _optional_tag(payload: dict, key: str) -> str | None:
     """Parse an optional host compatibility tag.
 
-    When present it must be a non-empty string.  ``None`` means the
-    tag was not declared (absent metadata).
+    When present it must be a non-empty string matching the fail-closed
+    pattern for that tag type.  ``None`` means the tag was not declared
+    (absent metadata).
     """
     value = payload.get(key)
     if value is None:
@@ -169,6 +211,8 @@ def _optional_tag(payload: dict, key: str) -> str | None:
     stripped = value.strip()
     if not stripped:
         raise ReleaseManifestError(f"{key} must not be empty if present")
+    # Validate tag value against fail-closed pattern.
+    _validate_tag(key, stripped)
     return stripped
 
 

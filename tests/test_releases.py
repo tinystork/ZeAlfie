@@ -1047,3 +1047,268 @@ def test_release_to_transaction_with_candidate_slot(tmp_path, witness_wheel, wit
     act = rt.activate(txn)
     assert act.active_slot_id == slot_b
     assert act.previous_slot_id is not None
+
+# ===================================================================
+# M0-7B Hardening — Finding 1: verify_artifact bypass fix
+# ===================================================================
+
+
+def test_multi_artifact_without_index_rejected(witness_wheel, witness_registry):
+    """Multi-artifact manifest without explicit artifact_index → rejected."""
+    sha = _sha256(witness_wheel)
+    size = witness_wheel.stat().st_size
+    fn = witness_wheel.name
+
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{fn}"
+        size = {size}
+        sha256 = "{sha}"
+
+        [[artifacts]]
+        filename = "other.whl"
+        size = {size}
+        sha256 = "{sha}"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    with pytest.raises(ArtifactRejectionError, match="explicit artifact_index required"):
+        verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
+
+
+def test_single_artifact_without_index_still_works(witness_wheel, witness_registry):
+    """Single-artifact manifest without index continues to work (M0-7A compat)."""
+    manifest = _make_manifest(witness_wheel)
+    va = verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
+    assert va.component_id == "zewitness"
+
+
+def test_multi_artifact_with_explicit_index_works(witness_wheel, witness_registry):
+    """Multi-artifact manifest with explicit artifact_index=0 works."""
+    sha = _sha256(witness_wheel)
+    size = witness_wheel.stat().st_size
+    fn = witness_wheel.name
+
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{fn}"
+        size = {size}
+        sha256 = "{sha}"
+
+        [[artifacts]]
+        filename = "other.whl"
+        size = {size}
+        sha256 = "{sha}"
+    """)
+    manifest = parse_release_manifest(toml_text)
+    va = verify_artifact(
+        manifest, registry=witness_registry,
+        artifact_root=witness_wheel.parent, artifact_index=0,
+    )
+    assert va.component_id == "zewitness"
+
+
+def test_adversarial_artifact0_wrong_host_bypassed_default(witness_wheel, witness_registry):
+    """Adversarial: artifact 0 tagged win_amd64, no index → reject.
+
+    Even though artifact 0 would be valid on Windows, on Linux the
+    verifier must refuse to silently verify it.  The old default of
+    artifact_index=0 would have let this pass.
+    """
+    sha = _sha256(witness_wheel)
+    size = witness_wheel.stat().st_size
+    fn = witness_wheel.name
+
+    # Artifact 0 is tagged win_amd64 (incompatible on Linux).
+    # Artifact 1 is tagged linux_x86_64 (correct for Linux).
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{fn}"
+        size = {size}
+        sha256 = "{sha}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "win_amd64"
+
+        [[artifacts]]
+        filename = "adversarial-copy.whl"
+        size = {size}
+        sha256 = "{sha}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "linux_x86_64"
+    """)
+    manifest = parse_release_manifest(toml_text)
+
+    # Without explicit index → MUST reject.
+    with pytest.raises(ArtifactRejectionError, match="explicit artifact_index required"):
+        verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
+
+    import shutil
+    shutil.copy2(witness_wheel, witness_wheel.parent / "adversarial-copy.whl")
+    # With explicit index 1 (correct for Linux host) → succeeds.
+    host = HostTarget.from_current_host()
+    idx = select_artifact(manifest, host)
+    assert idx == 1  # the linux one
+    va = verify_artifact(
+        manifest, registry=witness_registry,
+        artifact_root=witness_wheel.parent, artifact_index=idx,
+    )
+    assert va.component_id == "zewitness"
+
+
+# ===================================================================
+# M0-7B Hardening — tag validation (fail-closed patterns)
+# ===================================================================
+
+
+def test_python_tag_single_letter_rejected():
+    """python_tag='p' (prefix-match risk) → rejected at parse time."""
+    with pytest.raises(ReleaseManifestError, match="python_tag.*not a recognised tag pattern"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+
+            [[artifacts]]
+            filename = "f.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            python_tag = "p"
+            abi_tag = "none"
+            platform_tag = "any"
+        """))
+
+
+def test_python_tag_empty_string_rejected():
+    """python_tag='' → rejected at parse time."""
+    with pytest.raises(ReleaseManifestError, match="abi_tag must not be empty"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+
+            [[artifacts]]
+            filename = "f.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            abi_tag = ""
+        """))
+
+
+def test_abi_tag_garbage_rejected():
+    """abi_tag='totally_wrong' → rejected at parse time."""
+    with pytest.raises(ReleaseManifestError, match="abi_tag.*not a recognised tag pattern"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+
+            [[artifacts]]
+            filename = "f.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            python_tag = "py312"
+            abi_tag = "totally_wrong"
+            platform_tag = "any"
+        """))
+
+
+def test_valid_tags_accepted():
+    """Well-formed tags are accepted at parse time."""
+    manifest = parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "linux_x86_64"
+    """))
+    ae = manifest.artifacts[0]
+    assert ae.python_tag == "py312"
+    assert ae.abi_tag == "cp312"
+    assert ae.platform_tag == "linux_x86_64"
+
+
+def test_valid_tag_variants_accepted():
+    """Various valid tag forms pass validation."""
+    manifest = parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+
+        [[artifacts]]
+        filename = "g.whl"
+        size = 0
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "cp312"
+        abi_tag = "abi3"
+        platform_tag = "macosx_14_0_arm64"
+    """))
+    assert len(manifest.artifacts) == 2
+
+
+def test_platform_tag_empty_rejected():
+    """platform_tag with no valid chars → rejected."""
+    with pytest.raises(ReleaseManifestError, match="platform_tag.*not a recognised tag pattern"):
+        parse_release_manifest(textwrap.dedent("""\
+            schema_version = 1
+            component_id = "x"
+            version = "1"
+
+            [[artifacts]]
+            filename = "f.whl"
+            size = 0
+            sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            python_tag = "py3"
+            abi_tag = "none"
+            platform_tag = "!!!"
+        """))
+
+
+def test_host_target_empty_python_tag_rejected():
+    """HostTarget with empty python_tag → ValueError."""
+    with pytest.raises(ValueError, match="HostTarget.python_tag must be a non-empty string"):
+        HostTarget(python_tag="", abi_tag="cp312", platform_tag="linux_x86_64")
+
+
+def test_host_target_empty_abi_tag_rejected():
+    """HostTarget with empty abi_tag → ValueError."""
+    with pytest.raises(ValueError, match="HostTarget.abi_tag must be a non-empty string"):
+        HostTarget(python_tag="py312", abi_tag="", platform_tag="linux_x86_64")
+
+
+def test_host_target_empty_platform_tag_rejected():
+    """HostTarget with empty platform_tag → ValueError."""
+    with pytest.raises(ValueError, match="HostTarget.platform_tag must be a non-empty string"):
+        HostTarget(python_tag="py312", abi_tag="cp312", platform_tag="")
+
+
+def test_host_target_whitespace_only_rejected():
+    """HostTarget with whitespace-only field → ValueError."""
+    with pytest.raises(ValueError, match="HostTarget.python_tag must be a non-empty string"):
+        HostTarget(python_tag="   ", abi_tag="cp312", platform_tag="linux_x86_64")

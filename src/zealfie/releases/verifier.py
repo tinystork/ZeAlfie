@@ -119,17 +119,18 @@ def verify_artifact(
     *,
     registry: ComponentRegistry,
     artifact_root: Path,
-    artifact_index: int = 0,
+    artifact_index: int | None = None,
 ) -> VerifiedArtifact:
     """Run the complete verification chain against *manifest*.
 
     The manifest's ``component_id`` is resolved against *registry*.
     A mismatch between the requested and resolved component is rejected.
 
-    *artifact_index* selects which artifact entry to verify (default 0
-    for single-artifact M0-7A manifests).  The caller is responsible
-    for host-compatibility selection via :func:`select_artifact` before
-    calling this function.
+    *artifact_index* selects which artifact entry to verify.  If
+    ``None`` and the manifest contains exactly one artifact, index 0
+    is used (M0-7A backward compatibility).  For multi-artifact
+    manifests the caller must pass an explicit index, typically
+    obtained via :func:`select_artifact`.
     """
     from zealfie.components import UnknownComponentError
 
@@ -146,13 +147,24 @@ def verify_artifact(
             f"registry returned {definition.component_id!r}"
         )
 
-    # Validate artifact index.
+    # --- resolve artifact_index ---
+    if artifact_index is None:
+        if len(manifest.artifacts) == 1:
+            artifact_index = 0
+        else:
+            raise ArtifactRejectionError(
+                f"explicit artifact_index required for multi-artifact manifest "
+                f"({len(manifest.artifacts)} artifacts); "
+                f"use select_artifact() to resolve the correct index"
+            )
+
     if artifact_index < 0 or artifact_index >= len(manifest.artifacts):
         raise ArtifactRejectionError(
             f"artifact_index {artifact_index} out of range "
             f"(manifest has {len(manifest.artifacts)} artifact(s))"
         )
     artifact_entry = manifest.artifacts[artifact_index]
+    # --- end artifact_index ---
 
     # 1. Path
     artifact_path = _resolve_safe_artifact_path(

@@ -46,6 +46,9 @@ def build_wheel(
     to ``sys.path``, and ``python -m build`` would otherwise find the
     local directory instead of the installed ``build`` module.
 
+    *source_dir* is resolved to an absolute path before changing the
+    CWD, so relative source directories work correctly.
+
     Uses ``python -m build --wheel`` in a temporary directory when
     *output_dir* is not supplied, so the repository working tree is
     never polluted.
@@ -55,6 +58,10 @@ def build_wheel(
     source = Path(source_dir)
     if not source.is_dir():
         raise FileNotFoundError(f"source directory not found: {source}")
+
+    # Resolve to absolute path before changing CWD; relative sources
+    # would fail when resolved from the output directory.
+    source = source.resolve(strict=True)
 
     tmp_own = output_dir is None
     out = Path(output_dir) if output_dir is not None else Path(tempfile.mkdtemp(prefix="zealfie-build-"))
