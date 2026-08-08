@@ -351,11 +351,11 @@ compatible artifact or raises ``ArtifactSelectionError``:
 
 ``resolve_local_release(manifest, registry, artifact_root, host)`` is the
 preferred M0-7C API for trusted local releases.  It resolves the manifest's
-component id through the trusted ``ComponentRegistry``, calls
-``select_artifact()`` internally, validates that any declared artifact tags
-match the simple wheel filename suffix
-``-{python_tag}-{abi_tag}-{platform_tag}.whl``, and then calls
-``verify_artifact()`` with that exact selected index.  Callers never pass an
+component id through the trusted ``ComponentRegistry`` and validates that
+every artifact entry with declared compatibility tags matches the simple
+wheel filename suffix ``-{python_tag}-{abi_tag}-{platform_tag}.whl`` before
+selection.  It then calls ``select_artifact()`` internally and passes that
+exact selected index to ``verify_artifact()``.  Callers never pass an
 ``artifact_index`` to this high-level API, which removes the easy misuse
 ``select artifact A`` followed by ``verify artifact B``.
 
@@ -369,12 +369,15 @@ rejected fail-closed.
 
 **Verification** (``verifier.py``):
 
-``verify_artifact(manifest, artifact_index=0)`` runs the full M0-7A chain
-against the selected artifact: path confinement (no symlinks, no escapes),
-size, SHA-256, wheel structural inspection, distribution name/version
-match, and entry-point contract check.  The result is a ``VerifiedArtifact``
-with TOCTOU semantics (valid at a point in time, not a permanent trust
-cache).
+``verify_artifact(manifest, artifact_index=selected_index)`` runs the full
+M0-7A chain against the selected artifact: path confinement (no symlinks, no
+escapes), size, SHA-256, wheel structural inspection, distribution
+name/version match, and entry-point contract check.  Omitting
+``artifact_index`` is allowed only for single-artifact manifests;
+multi-artifact manifests require an explicit selected index.  The normal
+M0-7C path is ``resolve_local_release()`` rather than direct verifier calls.
+The result is a ``VerifiedArtifact`` with TOCTOU semantics (valid at a point
+in time, not a permanent trust cache).
 
 **CWD-shadow hardening** (``building/__init__.py``):
 
@@ -515,9 +518,10 @@ ReleaseManifest + HostTarget + trusted ComponentRegistry + artifact_root
     -> VerifiedArtifact
 ```
 
-It resolves component identity, selects exactly one host-compatible artifact,
-checks declared manifest tags against the simple wheel filename tag suffix,
-and verifies that same selected artifact.  The lower-level
+It resolves component identity, checks declared manifest tags for every
+artifact against the simple wheel filename tag suffix, selects exactly one
+host-compatible artifact, and verifies that same selected artifact.  The
+lower-level
 ``select_artifact()`` and ``verify_artifact()`` primitives remain available
 for focused tests and internal uses, but callers of the normal release path do
 not provide an artifact index.

@@ -1401,6 +1401,47 @@ def test_resolve_local_release_select_a_verify_b_bypass_impossible(tmp_path, wit
     assert verified.path.name != valid_incompatible_name
 
 
+def test_resolve_local_release_rejects_non_selected_filename_tag_mismatch(
+    tmp_path, witness_wheel, witness_registry
+):
+    """A non-selected artifact with inconsistent tags fails the whole release."""
+    root = tmp_path / "release"
+    inconsistent_name = "zealfie_witness-0.0.1-py3-none-linux_x86_64.whl"
+    compatible_name = "zealfie_witness-0.0.1-py3-none-any.whl"
+    inconsistent = _copy_wheel_as(witness_wheel, root, inconsistent_name)
+    compatible = _copy_wheel_as(witness_wheel, root, compatible_name)
+
+    manifest = parse_release_manifest(textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "zewitness"
+        version = "0.0.1"
+
+        [[artifacts]]
+        filename = "{inconsistent_name}"
+        size = {inconsistent.stat().st_size}
+        sha256 = "{_sha256(inconsistent)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "win_amd64"
+
+        [[artifacts]]
+        filename = "{compatible_name}"
+        size = {compatible.stat().st_size}
+        sha256 = "{_sha256(compatible)}"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+
+    with pytest.raises(ReleaseResolutionError, match="platform_tag mismatch"):
+        resolve_local_release(
+            manifest,
+            registry=witness_registry,
+            artifact_root=root,
+            host=HostTarget("py312", "cp312", "linux_x86_64"),
+        )
+
+
 def test_resolve_local_release_platform_tag_must_match_filename(tmp_path, witness_wheel, witness_registry):
     """Manifest platform_tag linux_x86_64 with filename py3-none-any is rejected."""
     root = tmp_path / "release"

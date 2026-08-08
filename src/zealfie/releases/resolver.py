@@ -35,9 +35,9 @@ def resolve_local_release(
     """Resolve and verify the single host-compatible local artifact.
 
     The resolver intentionally hides ``artifact_index`` from callers.  It
-    resolves component identity through the trusted registry, selects exactly
-    one artifact for *host*, validates declared wheel filename tags for that
-    selected artifact, and then verifies that same artifact entry.
+    resolves component identity through the trusted registry, validates
+    declared wheel filename tags for every artifact entry, selects exactly
+    one artifact for *host*, and then verifies that same artifact entry.
     """
     try:
         definition = registry.get(manifest.component_id)
@@ -52,13 +52,12 @@ def resolve_local_release(
             f"registry returned {definition.component_id!r}"
         )
 
+    _validate_manifest_declared_tags_match_wheel_filenames(manifest)
+
     try:
         artifact_index = select_artifact(manifest, host)
     except ArtifactSelectionError as exc:
         raise ReleaseResolutionError(str(exc)) from exc
-
-    artifact_entry = manifest.artifacts[artifact_index]
-    _validate_declared_tags_match_wheel_filename(artifact_entry)
 
     try:
         return verify_artifact(
@@ -69,6 +68,13 @@ def resolve_local_release(
         )
     except ArtifactRejectionError as exc:
         raise ReleaseResolutionError(str(exc)) from exc
+
+
+def _validate_manifest_declared_tags_match_wheel_filenames(
+    manifest: ReleaseManifest,
+) -> None:
+    for artifact_entry in manifest.artifacts:
+        _validate_declared_tags_match_wheel_filename(artifact_entry)
 
 
 def _validate_declared_tags_match_wheel_filename(entry: ArtifactEntry) -> None:
