@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from io import StringIO
 
 import zealfie.cli as cli
@@ -71,6 +72,17 @@ def test_version_option_outputs_package_version() -> None:
 
     assert code == 0
     assert stdout.getvalue().strip() == f"ZeAlfie {get_version()}"
+
+
+def test_version_json_outputs_json() -> None:
+    stdout = StringIO()
+
+    code = run(["--version-json"], stdout=stdout)
+
+    output = stdout.getvalue()
+    assert code == 0
+    data = json.loads(output)
+    assert data == {"product": "ZeAlfie", "version": get_version()}
 
 
 def test_status_command_outputs_absent_component(monkeypatch) -> None:

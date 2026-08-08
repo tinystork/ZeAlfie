@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -30,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show the ZeAlfie version and exit",
     )
+    parser.add_argument(
+        "--version-json",
+        action="store_true",
+        help="show the ZeAlfie version as JSON and exit",
+    )
     subparsers = parser.add_subparsers(dest="command")
     status_parser = subparsers.add_parser("status", help="show current ZeAlfie runtime status")
     status_parser.add_argument("component_id", nargs="?", help="optional component id to inspect")
@@ -48,6 +54,11 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
 
     if args.version:
         print(f"ZeAlfie {get_version()}", file=stdout)
+        return 0
+
+    if args.version_json:
+        json.dump({"product": "ZeAlfie", "version": get_version()}, stdout)
+        print(file=stdout)
         return 0
 
     if args.command == "status":
