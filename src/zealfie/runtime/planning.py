@@ -185,6 +185,9 @@ class DeploymentPlan:
     steps: tuple[DeploymentStep, ...]
     blocked: bool = False
     blocked_reason: str | None = None
+    # M0-8B foundation: bind to source runtime identity.
+    source_active_slot_id: str | None = None
+    source_previous_slot_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +275,11 @@ def build_deployment_plan(
         _validate_component_definition_match(dc, definition)
 
     # ------------------------------------------------------------------
+    # 2b) Conflict hardening — refuse incoherent shared-runtime desires.
+    # ------------------------------------------------------------------
+    _check_desired_state_conflicts(desired_state, registry)
+
+    # ------------------------------------------------------------------
     # 3) Route by runtime state.
     # ------------------------------------------------------------------
     if runtime_status.state == RuntimeState.BROKEN:
@@ -339,6 +347,9 @@ def build_deployment_plan(
     return DeploymentPlan(
         desired_state=desired_state,
         runtime_state=runtime_status.state,
+        # M0-8B foundation: populate source slot identity.
+        source_active_slot_id=runtime_status.active_slot_id,
+        source_previous_slot_id=runtime_status.previous_slot_id,
         steps=tuple(steps),
         blocked=blocked,
         blocked_reason="one or more components blocked" if blocked else None,
@@ -388,6 +399,9 @@ def _build_blocked_plan(
     return DeploymentPlan(
         desired_state=desired_state,
         runtime_state=runtime_status.state,
+        # M0-8B foundation: populate source slot identity.
+        source_active_slot_id=runtime_status.active_slot_id,
+        source_previous_slot_id=runtime_status.previous_slot_id,
         steps=steps,
         blocked=True,
         blocked_reason=reason,
@@ -413,6 +427,9 @@ def _build_absent_plan(
     return DeploymentPlan(
         desired_state=desired_state,
         runtime_state=runtime_status.state,
+        # M0-8B foundation: populate source slot identity.
+        source_active_slot_id=runtime_status.active_slot_id,
+        source_previous_slot_id=runtime_status.previous_slot_id,
         steps=steps,
         blocked=False,
     )
@@ -628,3 +645,70 @@ def _validate_probe_payload(probe: dict[str, Any], component_id: str) -> str | N
 # ---------------------------------------------------------------------------
 # Internal helpers (continued)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# M0-8B foundation: desired-state conflict hardening
+# ---------------------------------------------------------------------------
+
+
+def _check_desired_state_conflicts(
+    desired_state: DesiredRuntimeState,
+    registry: ComponentRegistry,
+) -> None:
+    """Refuse incoherent shared-runtime desires before planning succeeds.
+
+    Two invariants are enforced — this is intentionally NOT a dependency
+    resolver, conflict solver, or version negotiator.  It is a fail-closed
+    structural guard.
+
+    1. No two registry components may normalise to the same Python
+       distribution name (as installed by pip).  A shared venv cannot
+       contain two distributions with the same normalised name.
+
+    2. No two components may declare the same launch entry-point
+       ``group:name`` contract.  Two components that both claim
+       ``console_scripts:zesolver`` would make the runtime incoherent
+       — only one can own the entry-point.
+
+    Raises
+    ------
+    PlanningError
+        If either invariant is violated.
+    """
+    # --- Duplicate normalised distribution names ---------------------------
+    seen_dists: dict[str, str] = {}  # normalised_name -> component_id
+    for dc in desired_state.components:
+        try:
+            definition = registry.get(dc.component_id)
+        except KeyError:
+            # Should not happen — full validation occurred earlier.
+            continue
+        normalised = normalise_distribution_name(definition.distribution_name)
+        if normalised in seen_dists:
+            raise PlanningError(
+                f"duplicate normalised distribution name {normalised!r}: "
+                f"components {seen_dists[normalised]!r} and {dc.component_id!r} "
+                f"both normalise to {normalised!r}; a shared venv cannot contain "
+                f"two distributions with the same normalised pip name"
+            )
+        seen_dists[normalised] = dc.component_id
+
+    # --- Duplicate launch entry-point group:name contracts ------------------
+    seen_contracts: dict[tuple[str, str], str] = {}
+    for dc in desired_state.components:
+        try:
+            definition = registry.get(dc.component_id)
+        except KeyError:
+            continue
+        for contract in definition.launch_entry_points:
+            key = (contract.group, contract.name)
+            if key in seen_contracts:
+                raise PlanningError(
+                    f"duplicate launch entry-point contract "
+                    f"{contract.group!r}:{contract.name!r}: "
+                    f"components {seen_contracts[key]!r} and "
+                    f"{dc.component_id!r} both declare the same "
+                    f"entry-point; a shared runtime cannot resolve the ambiguity"
+                )
+            seen_contracts[key] = dc.component_id

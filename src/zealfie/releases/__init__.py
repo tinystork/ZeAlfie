@@ -31,6 +31,7 @@ from .selector import (
 )
 from .verifier import (
     ArtifactRejectionError,
+    revalidate_verified_artifact,
     verify_artifact,
 )
 from .resolver import (
@@ -56,5 +57,6 @@ __all__ = [
     "parse_release_manifest_file",
     "resolve_local_release",
     "select_artifact",
+    "revalidate_verified_artifact",
     "verify_artifact",
 ]

@@ -226,3 +226,69 @@ def verify_artifact(
         distribution_name=wheel_name,
         wheel_version=wheel_version,
     )
+
+
+# ---------------------------------------------------------------------------
+# M0-8B foundation: artifact revalidation primitive
+# ---------------------------------------------------------------------------
+
+
+def revalidate_verified_artifact(
+    verified: VerifiedArtifact,
+    *,
+    registry: ComponentRegistry,
+    artifact_root: Path | None = None,
+) -> VerifiedArtifact:
+    """Re-check a :class:`VerifiedArtifact` immediately before pip handoff.
+
+    Re-runs the full M0-7 verification chain (path safety, size, SHA256,
+    wheel identity, version, distribution match, entry-point contract)
+    without duplicating any hash or inspection logic.  The caller can use
+    this to protect against TOCTOU — a ``VerifiedArtifact`` is a
+    point-in-time proof, not a permanent authorization.
+
+    Parameters
+    ----------
+    verified:
+        The previously-verified artifact to revalidate.
+    registry:
+        The trusted component registry (must contain a definition for
+        ``verified.component_id``).
+    artifact_root:
+        Root directory for path-resolution.  Defaults to
+        ``verified.path.parent``, which is correct for the common case
+        where the artifact was verified in-place.
+
+    Returns
+    -------
+    VerifiedArtifact
+        A fresh ``VerifiedArtifact`` reflecting the re-validated state.
+
+    Raises
+    ------
+    ArtifactRejectionError
+        If any M0-7 check fails (changed size, changed SHA256, malformed
+        wheel, distribution mis-match, version mismatch, broken contract).
+    """
+    if artifact_root is None:
+        artifact_root = verified.path.parent
+
+    # Construct a minimal single-artifact ReleaseManifest from the
+    # VerifiedArtifact fields so we can reuse verify_artifact unchanged.
+    artifact_entry = ArtifactEntry(
+        filename=verified.path.name,
+        size=verified.size,
+        sha256=verified.sha256,
+    )
+    manifest = ReleaseManifest(
+        schema_version=1,
+        component_id=verified.component_id,
+        version=verified.version,
+        artifacts=(artifact_entry,),
+    )
+
+    return verify_artifact(
+        manifest,
+        registry=registry,
+        artifact_root=artifact_root,
+    )

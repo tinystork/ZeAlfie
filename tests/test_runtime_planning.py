@@ -989,3 +989,335 @@ def test_planning_types_exported_from_runtime_package() -> None:
     assert rt.DesiredRuntimeState is DesiredRuntimeState
     assert rt.PlanningError is PlanningError
     assert rt.build_deployment_plan is build_deployment_plan
+
+
+# =====================================================================
+# M0-8B foundation -- source binding
+# =====================================================================
+
+
+def test_source_binding_ready_stores_active_slot() -> None:
+    """READY runtime: plan carries active_slot_id from RuntimeStatus."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY, active_slot_id="slot-abc123")
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": True,
+            "version": "1.0.0",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zesolver",
+                 "value": "zesolver:main"},
+            ],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+    assert plan.source_active_slot_id == "slot-abc123"
+    assert plan.source_previous_slot_id is None
+
+
+def test_source_binding_ready_stores_previous_slot() -> None:
+    """READY runtime with previous_slot_id: plan carries both slot ids."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY,
+                     active_slot_id="slot-xyz",
+                     previous_slot_id="slot-old")
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": True,
+            "version": "1.0.0",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zesolver",
+                 "value": "zesolver:main"},
+            ],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+    assert plan.source_active_slot_id == "slot-xyz"
+    assert plan.source_previous_slot_id == "slot-old"
+
+
+def test_source_binding_absent_stores_none() -> None:
+    """ABSENT runtime: plan carries None for both slot ids."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.ABSENT)
+
+    plan = build_deployment_plan(desired, registry, status)
+    assert plan.source_active_slot_id is None
+    assert plan.source_previous_slot_id is None
+
+
+def test_source_binding_broken_carries_state_identity() -> None:
+    """BROKEN runtime: plan still carries slot ids from RuntimeStatus."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.BROKEN,
+                     active_slot_id="slot-crash",
+                     previous_slot_id="slot-previous")
+
+    plan = build_deployment_plan(desired, registry, status)
+    assert plan.source_active_slot_id == "slot-crash"
+    assert plan.source_previous_slot_id == "slot-previous"
+    assert plan.blocked is True  # still blocked
+
+
+def test_source_binding_default_backward_compatible() -> None:
+    """DeploymentPlan constructed without source args defaults to None."""
+    plan = DeploymentPlan(
+        desired_state=DesiredRuntimeState(components=(_dc("zesolver"),)),
+        runtime_state=RuntimeState.ABSENT,
+        steps=(),
+    )
+    assert plan.source_active_slot_id is None
+    assert plan.source_previous_slot_id is None
+
+
+# =====================================================================
+# M0-8B foundation -- conflict hardening
+# =====================================================================
+
+
+def test_duplicate_normalised_distribution_name_rejected() -> None:
+    """Two components with the same normalised distribution name -> PlanningError."""
+    desired = DesiredRuntimeState(
+        components=(
+            _dc("zesolver", distribution_name="Ze-Solver"),
+            _dc("zesolver-neo", distribution_name="Ze_Solver"),
+        )
+    )
+    registry = ComponentRegistry(
+        (
+            ComponentDefinition(
+                component_id="zesolver",
+                display_name="ZeSolver",
+                distribution_name="Ze-Solver",
+                launch_entry_points=(EntryPointContract("console_scripts", "zesolver"),),
+            ),
+            ComponentDefinition(
+                component_id="zesolver-neo",
+                display_name="ZeSolver Neo",
+                distribution_name="Ze_Solver",
+                launch_entry_points=(EntryPointContract("console_scripts", "zsneo"),),
+            ),
+        )
+    )
+    status = _status(RuntimeState.ABSENT)
+
+    with pytest.raises(PlanningError, match="duplicate normalised distribution name"):
+        build_deployment_plan(desired, registry, status)
+
+
+def test_distinct_distribution_names_accepted() -> None:
+    """Two components with different distribution names are fine."""
+    desired = DesiredRuntimeState(
+        components=(_dc("zesolver"), _dc("zemosaic"))
+    )
+    registry = _registry("zesolver", "zemosaic")
+    status = _status(RuntimeState.ABSENT)
+
+    plan = build_deployment_plan(desired, registry, status)
+    assert plan.blocked is False
+    assert len(plan.steps) == 2
+
+
+def test_duplicate_launch_entry_point_contract_rejected() -> None:
+    """Two components declaring the same group:name -> PlanningError."""
+    desired = DesiredRuntimeState(
+        components=(
+            DesiredComponent(
+                component_id="zesolver",
+                version="1.0.0",
+                artifact=_va(component_id="zesolver", version="1.0.0",
+                             distribution_name="zesolver"),
+            ),
+            DesiredComponent(
+                component_id="zemosaic",
+                version="1.0.0",
+                artifact=_va(component_id="zemosaic", version="1.0.0",
+                             distribution_name="zemosaic"),
+            ),
+        )
+    )
+    registry = ComponentRegistry(
+        (
+            ComponentDefinition(
+                component_id="zesolver",
+                display_name="ZeSolver",
+                distribution_name="zesolver",
+                launch_entry_points=(EntryPointContract("console_scripts", "run"),),
+            ),
+            ComponentDefinition(
+                component_id="zemosaic",
+                display_name="ZeMosaic",
+                distribution_name="zemosaic",
+                launch_entry_points=(EntryPointContract("console_scripts", "run"),),
+            ),
+        )
+    )
+    status = _status(RuntimeState.ABSENT)
+
+    with pytest.raises(PlanningError, match="duplicate launch entry-point contract"):
+        build_deployment_plan(desired, registry, status)
+
+
+def test_duplicate_entry_point_same_dist_name_both_errors_fired() -> None:
+    """Both invariants are checked; the first failure is dominant."""
+    desired = DesiredRuntimeState(
+        components=(
+            DesiredComponent(
+                component_id="zesolver",
+                version="1.0.0",
+                artifact=_va(component_id="zesolver", version="1.0.0",
+                             distribution_name="Z_Solver"),
+            ),
+            DesiredComponent(
+                component_id="zemosaic",
+                version="1.0.0",
+                artifact=_va(component_id="zemosaic", version="1.0.0",
+                             distribution_name="z-solver"),
+            ),
+        )
+    )
+    registry = ComponentRegistry(
+        (
+            ComponentDefinition(
+                component_id="zesolver",
+                display_name="ZeSolver",
+                distribution_name="Z_Solver",
+                launch_entry_points=(EntryPointContract("console_scripts", "run"),),
+            ),
+            ComponentDefinition(
+                component_id="zemosaic",
+                display_name="ZeMosaic",
+                distribution_name="z-solver",
+                launch_entry_points=(EntryPointContract("console_scripts", "run"),),
+            ),
+        )
+    )
+    status = _status(RuntimeState.ABSENT)
+
+    with pytest.raises(PlanningError, match="duplicate normalised distribution name"):
+        build_deployment_plan(desired, registry, status)
+
+
+def test_distinct_entry_points_accepted() -> None:
+    """Two components with different group:name contracts are fine."""
+    desired = DesiredRuntimeState(
+        components=(
+            DesiredComponent(
+                component_id="zesolver",
+                version="1.0.0",
+                artifact=_va(component_id="zesolver", version="1.0.0",
+                             distribution_name="zesolver"),
+            ),
+            DesiredComponent(
+                component_id="zemosaic",
+                version="1.0.0",
+                artifact=_va(component_id="zemosaic", version="1.0.0",
+                             distribution_name="zemosaic"),
+            ),
+        )
+    )
+    registry = ComponentRegistry(
+        (
+            ComponentDefinition(
+                component_id="zesolver",
+                display_name="ZeSolver",
+                distribution_name="zesolver",
+                launch_entry_points=(EntryPointContract("console_scripts", "zesolver"),),
+            ),
+            ComponentDefinition(
+                component_id="zemosaic",
+                display_name="ZeMosaic",
+                distribution_name="zemosaic",
+                launch_entry_points=(EntryPointContract("console_scripts", "zemosaic"),),
+            ),
+        )
+    )
+    status = _status(RuntimeState.ABSENT)
+
+    plan = build_deployment_plan(desired, registry, status)
+    assert plan.blocked is False
+
+
+def test_duplicate_entry_point_different_groups_accepted() -> None:
+    """Same name in different groups is fine (different contract)."""
+    desired = DesiredRuntimeState(
+        components=(
+            DesiredComponent(
+                component_id="zesolver",
+                version="1.0.0",
+                artifact=_va(component_id="zesolver", version="1.0.0",
+                             distribution_name="zesolver"),
+            ),
+            DesiredComponent(
+                component_id="zemosaic",
+                version="1.0.0",
+                artifact=_va(component_id="zemosaic", version="1.0.0",
+                             distribution_name="zemosaic"),
+            ),
+        )
+    )
+    registry = ComponentRegistry(
+        (
+            ComponentDefinition(
+                component_id="zesolver",
+                display_name="ZeSolver",
+                distribution_name="zesolver",
+                launch_entry_points=(EntryPointContract("console_scripts", "run"),),
+            ),
+            ComponentDefinition(
+                component_id="zemosaic",
+                display_name="ZeMosaic",
+                distribution_name="zemosaic",
+                launch_entry_points=(EntryPointContract("gui_scripts", "run"),),
+            ),
+        )
+    )
+    status = _status(RuntimeState.ABSENT)
+
+    plan = build_deployment_plan(desired, registry, status)
+    assert plan.blocked is False
+
+
+def test_conflict_checks_happen_before_probing() -> None:
+    """Conflict hardening fires before probes run -- fail early."""
+    desired = DesiredRuntimeState(
+        components=(
+            _dc("zesolver", distribution_name="common-dist"),
+            _dc("zemosaic", distribution_name="Common-Dist"),
+        )
+    )
+    registry = ComponentRegistry(
+        (
+            ComponentDefinition(
+                component_id="zesolver",
+                display_name="ZeSolver",
+                distribution_name="common-dist",
+                launch_entry_points=(EntryPointContract("console_scripts", "zs"),),
+            ),
+            ComponentDefinition(
+                component_id="zemosaic",
+                display_name="ZeMosaic",
+                distribution_name="Common-Dist",
+                launch_entry_points=(EntryPointContract("console_scripts", "zm"),),
+            ),
+        )
+    )
+    # READY runtime with valid probe -- should still be rejected by conflict check.
+    status = _status(RuntimeState.READY)
+
+    def probe_should_not_run(*args, **kwargs):
+        raise AssertionError("probe must not run when conflict is detected")
+
+    with pytest.raises(PlanningError, match="duplicate normalised distribution name"):
+        build_deployment_plan(desired, registry, status,
+                              probe_distribution=probe_should_not_run)

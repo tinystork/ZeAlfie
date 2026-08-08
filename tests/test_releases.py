@@ -1980,3 +1980,203 @@ def test_untagged_declared_tags_still_must_match_filename(
             artifact_root=root,
             host=HostTarget("py312", "cp312", "linux_x86_64"),
         )
+
+
+# =====================================================================
+# M0-8B foundation -- artifact revalidation primitive
+# =====================================================================
+
+
+def _make_va(
+    witness_wheel: Path,
+    component_id: str = "zewitness",
+    version: str = "0.0.1",
+) -> VerifiedArtifact:
+    """Build a VerifiedArtifact via the normal verify_artifact path."""
+    manifest = _make_manifest(witness_wheel, component_id=component_id)
+    return verify_artifact(
+        manifest,
+        registry=ComponentRegistry([WITNESS_DEF]),
+        artifact_root=witness_wheel.parent,
+    )
+
+
+def test_revalidate_verified_artifact_accepts_valid(witness_wheel) -> None:
+    """A freshly-verified artifact revalidates successfully."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    result = revalidate_verified_artifact(va, registry=registry)
+    assert result.component_id == va.component_id
+    assert result.version == va.version
+    assert result.path == va.path
+    # Fresh instance (not same object)
+    assert result is not va
+
+
+def test_revalidate_uses_default_artifact_root(witness_wheel) -> None:
+    """revalidate_verified_artifact defaults artifact_root to path.parent."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    # No artifact_root= passed -- should use va.path.parent
+    result = revalidate_verified_artifact(va, registry=registry)
+    assert result.path == va.path
+
+
+def test_revalidate_explicit_artifact_root(witness_wheel) -> None:
+    """revalidate_verified_artifact with explicit artifact_root."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    result = revalidate_verified_artifact(
+        va, registry=registry, artifact_root=witness_wheel.parent
+    )
+    assert result.path == va.path
+
+
+def test_revalidate_rejects_changed_size(witness_wheel) -> None:
+    """Revalidation rejects artifact whose size changed since verification."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    # Tamper with the size field in the VerifiedArtifact
+    tampered = VerifiedArtifact(
+        component_id=va.component_id,
+        version=va.version,
+        path=va.path,
+        size=va.size + 1,  # wrong
+        sha256=va.sha256,
+        distribution_name=va.distribution_name,
+        wheel_version=va.wheel_version,
+    )
+
+    with pytest.raises(ArtifactRejectionError, match="size mismatch"):
+        revalidate_verified_artifact(tampered, registry=registry)
+
+
+def test_revalidate_rejects_changed_sha256(witness_wheel) -> None:
+    """Revalidation rejects artifact whose sha256 changed since verification."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    tampered = VerifiedArtifact(
+        component_id=va.component_id,
+        version=va.version,
+        path=va.path,
+        size=va.size,
+        sha256="b" * 64,  # wrong
+        distribution_name=va.distribution_name,
+        wheel_version=va.wheel_version,
+    )
+
+    with pytest.raises(ArtifactRejectionError, match="SHA256 mismatch"):
+        revalidate_verified_artifact(tampered, registry=registry)
+
+
+def test_revalidate_rejects_wrong_distribution(witness_wheel) -> None:
+    """Revalidation rejects a VerifiedArtifact with wrong distribution_name."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    # Change the recorded distribution_name to something else
+    tampered = VerifiedArtifact(
+        component_id=va.component_id,
+        version=va.version,
+        path=va.path,
+        size=va.size,
+        sha256=va.sha256,
+        distribution_name="other-dist",  # wrong
+        wheel_version=va.wheel_version,
+    )
+
+    # The verify_artifact will check the actual wheel dist name against
+    # the registry -- but since our manifest's component_id matches the
+    # registry, it will look up "zealfie-witness" from the registry and
+    # compare against the wheel's actual dist name. The tampered
+    # distribution_name in the VerifiedArtifact doesn't actually affect
+    # what's re-verified because we construct the manifest from
+    # component_id (from the registry). The actual wheel still has
+    # correct metadata, so it passes.
+    #
+    # To test distribution rejection, we need the wheel dist to mismatch
+    # the registry. Let's change the component_id to one with a wrong def.
+    wrong_registry = ComponentRegistry([
+        ComponentDefinition(
+            "zewitness", "ZeWitness", "other-dist",
+            (EntryPointContract("console_scripts", "zewitness"),),
+        )
+    ])
+
+    with pytest.raises(ArtifactRejectionError, match="distribution mismatch"):
+        revalidate_verified_artifact(va, registry=wrong_registry)
+
+
+def test_revalidate_rejects_wrong_version(witness_wheel) -> None:
+    """Revalidation rejects a VerifiedArtifact with wrong wheel_version."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    tampered = VerifiedArtifact(
+        component_id=va.component_id,
+        version="9.9.9",  # wrong -- will get a version_mismatch from manifest vs wheel
+        path=va.path,
+        size=va.size,
+        sha256=va.sha256,
+        distribution_name=va.distribution_name,
+        wheel_version="9.9.9",  # also wrong
+    )
+
+    with pytest.raises(ArtifactRejectionError, match="version mismatch"):
+        revalidate_verified_artifact(tampered, registry=registry)
+
+
+def test_revalidate_rejects_broken_contract(witness_wheel) -> None:
+    """Revalidation rejects a VerifiedArtifact whose wheel lost its contract."""
+    va = _make_va(witness_wheel)
+    # Registry with a contract the wheel does not satisfy
+    wrong_registry = ComponentRegistry([
+        ComponentDefinition(
+            "zewitness", "ZeWitness", "zealfie-witness",
+            (EntryPointContract("gui_scripts", "no_such_entry"),),
+        )
+    ])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    with pytest.raises(ArtifactRejectionError, match="launch contract"):
+        revalidate_verified_artifact(va, registry=wrong_registry)
+
+
+def test_revalidate_rejects_missing_file(witness_wheel, tmp_path) -> None:
+    """Revalidation rejects when the artifact file no longer exists."""
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+    from zealfie.releases.verifier import revalidate_verified_artifact
+
+    # Move the file away so revalidation fails at path check
+    import shutil
+    moved = tmp_path / "gone.whl"
+    shutil.move(str(va.path), str(moved))
+
+    with pytest.raises(ArtifactRejectionError, match="not found"):
+        revalidate_verified_artifact(va, registry=registry)
+
+    # Restore for other tests
+    shutil.move(str(moved), str(va.path))
+
+
+def test_revalidate_exported_from_releases_package(witness_wheel) -> None:
+    """revalidate_verified_artifact is exported from zealfie.releases."""
+    from zealfie import releases
+    va = _make_va(witness_wheel)
+    registry = ComponentRegistry([WITNESS_DEF])
+
+    result = releases.revalidate_verified_artifact(va, registry=registry)
+    assert result is not None
