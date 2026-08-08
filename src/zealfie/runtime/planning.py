@@ -16,6 +16,7 @@ from zealfie.components.model import ComponentDefinition
 from zealfie.components.registry import ComponentRegistry
 from zealfie.releases.model import VerifiedArtifact
 
+from .probe import probe_runtime_distribution
 from .model import RuntimeState, RuntimeStatus
 
 # ---------------------------------------------------------------------------
@@ -224,8 +225,9 @@ def build_deployment_plan(
     probe_distribution:
         Callable with the same signature and semantics as
         :func:`probe_runtime_distribution`.  Passed as a dependency so
-        tests can supply synthetic probes.  Required when the runtime is
-        ``READY``; unused for ``ABSENT`` / ``BROKEN``.
+        tests can supply synthetic probes.  Defaults to the real
+        :func:`probe_runtime_distribution` for ``READY`` runtimes;
+        unused for ``ABSENT`` / ``BROKEN``.
 
     Returns
     -------
@@ -293,9 +295,7 @@ def build_deployment_plan(
         )
 
     if probe_distribution is None:
-        raise PlanningError(
-            "probe_distribution callable is required for READY runtime planning"
-        )
+        probe_distribution = probe_runtime_distribution
 
     runtime_python = str(runtime_status.python_executable)
     steps: list[DeploymentStep] = []
@@ -319,6 +319,16 @@ def build_deployment_plan(
                 runtime_status,
                 reason_code=DeploymentReasonCode.PROBE_FAILED,
                 reason=f"probe returned non-dict payload for {dc.component_id!r}",
+            )
+
+        # Strict payload structure validation.
+        validation_error = _validate_probe_payload(probe, dc.component_id)
+        if validation_error is not None:
+            return _build_blocked_plan(
+                desired_state,
+                runtime_status,
+                reason_code=DeploymentReasonCode.PROBE_FAILED,
+                reason=validation_error,
             )
 
         step = _plan_step_for_component(dc, definition, probe)
@@ -414,10 +424,8 @@ def _plan_step_for_component(
     probe: dict[str, Any],
 ) -> DeploymentStep:
     """Decide KEEP / INSTALL for one component based on the probe result."""
-    installed = probe.get("installed")
-
     # --- Not installed -------------------------------------------------------
-    if not installed:
+    if probe.get("installed") is False:
         return DeploymentStep(
             component_id=dc.component_id,
             desired_version=dc.version,
@@ -510,3 +518,93 @@ def _string_or_none(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Probe payload validation (strict, fail-closed)
+# ---------------------------------------------------------------------------
+
+
+def _validate_probe_payload(probe: dict[str, Any], component_id: str) -> str | None:
+    """Validate the structure of a READY probe payload.
+
+    Returns ``None`` if the payload is well-formed, or an error message
+    string suitable for ``PROBE_FAILED`` reason.
+
+    Rules (fail-closed — any violation blocks the plan):
+
+    * ``installed`` must be exactly ``bool``.
+    * If ``installed is False``:
+        * ``version`` must be ``None`` or ``str``.
+        * ``entry_points`` must be ``None`` or ``list``.
+    * If ``installed is True``:
+        * ``version`` must be a non-empty ``str``.
+        * ``entry_points`` must be a ``list``.
+        * Every item in ``entry_points`` must be a ``dict`` whose
+          ``group`` and ``name`` values are ``str``.
+    """
+    installed = probe.get("installed")
+
+    # --- installed must be exactly bool ---------------------------------
+    if not isinstance(installed, bool):
+        return (
+            f"probe payload for {component_id!r}: "
+            f"installed must be bool, got {type(installed).__name__}"
+        )
+
+    # --- installed False ------------------------------------------------
+    if installed is False:
+        version = probe.get("version")
+        if version is not None and not isinstance(version, str):
+            return (
+                f"probe payload for {component_id!r}: "
+                f"version must be None or str when installed=False, "
+                f"got {type(version).__name__}"
+            )
+        entry_points = probe.get("entry_points")
+        if entry_points is not None and not isinstance(entry_points, list):
+            return (
+                f"probe payload for {component_id!r}: "
+                f"entry_points must be None or list when installed=False, "
+                f"got {type(entry_points).__name__}"
+            )
+        return None
+
+    # --- installed True -------------------------------------------------
+    version = probe.get("version")
+    if not isinstance(version, str) or not version:
+        return (
+            f"probe payload for {component_id!r}: "
+            f"version must be non-empty str when installed=True, "
+            f"got {type(version).__name__}={version!r}"
+        )
+
+    entry_points = probe.get("entry_points")
+    if not isinstance(entry_points, list):
+        return (
+            f"probe payload for {component_id!r}: "
+            f"entry_points must be a list when installed=True, "
+            f"got {type(entry_points).__name__}"
+        )
+
+    for i, ep in enumerate(entry_points):
+        if not isinstance(ep, dict):
+            return (
+                f"probe payload for {component_id!r}: "
+                f"entry_points[{i}] must be dict, got {type(ep).__name__}"
+            )
+        group = ep.get("group")
+        name = ep.get("name")
+        if not isinstance(group, str) or not isinstance(name, str):
+            return (
+                f"probe payload for {component_id!r}: "
+                f"entry_points[{i}] group/name must be str, "
+                f"got group={type(group).__name__} name={type(name).__name__}"
+            )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers (continued)
+# ---------------------------------------------------------------------------

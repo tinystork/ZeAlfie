@@ -387,7 +387,7 @@ def test_ready_missing_launch_contract_install() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9) READY probe exception or malformed entry_points -> blocked/fail closed
+# 9) READY probe exception or malformed payload -> blocked/fail closed
 # ---------------------------------------------------------------------------
 
 
@@ -426,13 +426,109 @@ def test_ready_probe_returns_non_dict_blocked() -> None:
     assert "non-dict" in (plan.steps[0].reason or "")
 
 
-def test_ready_probe_malformed_entry_points_repair() -> None:
-    """entry_points not a list should be treated as contract failure.
+# ---------------------------------------------------------------------------
+# 10) Strict payload validation — malformed entries -> BLOCKED/PROBE_FAILED
+# ---------------------------------------------------------------------------
 
-    The contract-check logic: observed_eps not a list => return False
-    => LAUNCH_CONTRACT_MISMATCH -> INSTALL.  This is correct behaviour:
-    we plan a repair install rather than blocking.
-    """
+
+def test_installed_string_false_is_malformed_blocks() -> None:
+    """installed as string "false" is truthy -> must be caught as malformed."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": "false",  # string, not bool — was truthy bypass
+            "version": "1.0",
+            "entry_points": [],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "installed must be bool" in (plan.steps[0].reason or "")
+
+
+def test_installed_missing_is_malformed_blocks() -> None:
+    """Missing installed key -> probe.get returns None, not bool -> blocked."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            # installed key intentionally missing
+            "version": "1.0.0",
+            "entry_points": [],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "installed must be bool" in (plan.steps[0].reason or "")
+
+
+def test_installed_true_version_none_blocks() -> None:
+    """installed=True with version=None is malformed -> blocked."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": True,
+            "version": None,
+            "entry_points": [
+                {"group": "console_scripts", "name": "zesolver", "value": "..."},
+            ],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "version must be non-empty str" in (plan.steps[0].reason or "")
+
+
+def test_installed_true_version_non_string_blocks() -> None:
+    """installed=True with version=int -> was stringified; now blocked."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": True,
+            "version": {"major": 1, "minor": 0},  # non-string object
+            "entry_points": [
+                {"group": "console_scripts", "name": "zesolver", "value": "..."},
+            ],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "version must be non-empty str" in (plan.steps[0].reason or "")
+
+
+def test_entry_points_not_list_blocks() -> None:
+    """entry_points: "not-a-list" with matching installed/version -> blocked."""
     desired = DesiredRuntimeState(components=(_dc("zesolver"),))
     registry = _registry("zesolver")
     status = _status(RuntimeState.READY)
@@ -448,14 +544,104 @@ def test_ready_probe_malformed_entry_points_repair() -> None:
     plan = build_deployment_plan(desired, registry, status,
                                  probe_distribution=probe)
 
-    assert plan.blocked is False
-    step = plan.steps[0]
-    assert step.action == DeploymentAction.INSTALL
-    assert step.reason_code == DeploymentReasonCode.LAUNCH_CONTRACT_MISMATCH
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "entry_points must be a list" in (plan.steps[0].reason or "")
+
+
+def test_entry_points_contains_non_dict_blocks() -> None:
+    """entry_points list with a string element -> blocked."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": True,
+            "version": "1.0.0",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zesolver", "value": "..."},
+                "not-a-dict",
+            ],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "must be dict" in (plan.steps[0].reason or "")
+
+
+def test_entry_points_non_string_group_name_blocks() -> None:
+    """entry_points dict with int group/name -> blocked."""
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": True,
+            "version": "1.0.0",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zesolver", "value": "..."},
+                {"group": 123, "name": "bad-ep"},
+            ],
+        }
+
+    plan = build_deployment_plan(desired, registry, status,
+                                 probe_distribution=probe)
+
+    assert plan.blocked is True
+    assert plan.steps[0].action == DeploymentAction.BLOCKED
+    assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
+    assert "group/name must be str" in (plan.steps[0].reason or "")
 
 
 # ---------------------------------------------------------------------------
-# 10) Multi-component deterministic order + completeness guard
+# 11) Default probe — READY without explicit probe_distribution
+# ---------------------------------------------------------------------------
+
+
+def test_ready_uses_default_probe_distribution(monkeypatch) -> None:
+    """Without explicit probe_distribution, defaults to real probe_runtime_distribution.
+
+    Monkeypatches the module-level import so no real subprocess runs.
+    """
+    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
+    registry = _registry("zesolver")
+    status = _status(RuntimeState.READY)
+
+    def fake_real_probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.13.5",
+            "installed": True,
+            "version": "1.0.0",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zesolver",
+                 "value": "zesolver:main"},
+            ],
+        }
+
+    monkeypatch.setattr(
+        "zealfie.runtime.planning.probe_runtime_distribution",
+        fake_real_probe,
+    )
+
+    # No probe_distribution= passed — should use the patched default.
+    plan = build_deployment_plan(desired, registry, status)
+
+    assert plan.blocked is False
+    assert plan.steps[0].action == DeploymentAction.KEEP
+    assert plan.steps[0].reason_code == DeploymentReasonCode.ALREADY_SATISFIED
+
+
+# ---------------------------------------------------------------------------
+# 12) Multi-component deterministic order + completeness guard
 # ---------------------------------------------------------------------------
 
 
@@ -486,7 +672,7 @@ def test_single_component_update_impossible_when_registry_has_two() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11) Distribution name mismatch -> PlanningError
+# 13) Distribution name mismatch -> PlanningError
 # ---------------------------------------------------------------------------
 
 
@@ -555,7 +741,6 @@ def test_distribution_name_normalisation_accepted() -> None:
     plan = build_deployment_plan(desired, registry, status,
                                  probe_distribution=probe)
     assert plan.steps[0].action == DeploymentAction.KEEP
-    assert plan.steps[0].action == DeploymentAction.KEEP
 
 
 # ---------------------------------------------------------------------------
@@ -571,15 +756,6 @@ def test_ready_without_python_executable_raises() -> None:
     with pytest.raises(PlanningError, match="python_executable"):
         build_deployment_plan(desired, registry, status,
                               probe_distribution=_default_probe)
-
-
-def test_ready_without_probe_callable_raises() -> None:
-    desired = DesiredRuntimeState(components=(_dc("zesolver"),))
-    registry = _registry("zesolver")
-    status = _status(RuntimeState.READY)
-
-    with pytest.raises(PlanningError, match="probe_distribution"):
-        build_deployment_plan(desired, registry, status)
 
 
 # ---------------------------------------------------------------------------
