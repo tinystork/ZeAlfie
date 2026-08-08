@@ -10,7 +10,7 @@ import subprocess
 import sys
 import venv
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from zealfie.building import inspect_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
@@ -343,11 +343,18 @@ class SharedRuntime:
         txn: RuntimeTransaction,
         *,
         component_definition: ComponentDefinition | None = None,
+        component_definitions: Sequence[ComponentDefinition] | None = None,
     ) -> RuntimeStatus:
         """Validate a prepared candidate slot.
 
         Checks: slot exists, Python works, distribution/version/contract
-        (if definition supplied) are correct.
+        (if definition(s) supplied) are correct.
+
+        When *component_definitions* is provided, every definition is
+        probed and expectations are stored on the transaction for
+        activation-time TOCTOU revalidation.  The single
+        *component_definition* parameter is preserved for backward
+        compatibility.
         """
         slot_path = txn.candidate_path
         if not slot_path.is_dir():
@@ -379,6 +386,13 @@ class SharedRuntime:
                 reason="candidate Python is not usable",
             )
 
+        # -- Multi-component validation (new) --------------------------------
+        if component_definitions is not None:
+            return self._validate_multi_component_candidate(
+                txn, python, component_definitions, version
+            )
+
+        # -- Single-component validation (existing) --------------------------
         if component_definition is not None:
             try:
                 probe = probe_runtime_distribution(
@@ -419,6 +433,59 @@ class SharedRuntime:
             active_slot_id=txn.candidate_slot_id,
             python_executable=python,
             python_version=version,
+            reason_code=RuntimeReasonCode.RUNTIME_READY,
+        )
+
+    def _validate_multi_component_candidate(
+        self,
+        txn: RuntimeTransaction,
+        python: Path,
+        component_definitions: Sequence[ComponentDefinition],
+        python_version: str,
+    ) -> RuntimeStatus:
+        """Validate every component definition in the candidate slot."""
+        versions: dict[str, str] = {}
+        for cd in component_definitions:
+            try:
+                probe = probe_runtime_distribution(python, cd.distribution_name)
+            except Exception as exc:
+                txn._mark_invalid()
+                return RuntimeStatus(
+                    state=RuntimeState.BROKEN,
+                    runtime_root=self._layout.root,
+                    reason_code=RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED,
+                    reason=f"candidate probe failed for {cd.component_id!r}: {exc}",
+                )
+            if not probe.get("installed"):
+                txn._mark_invalid()
+                return RuntimeStatus(
+                    state=RuntimeState.BROKEN,
+                    runtime_root=self._layout.root,
+                    reason_code=RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED,
+                    reason=f"expected distribution {cd.distribution_name!r} not found in candidate",
+                )
+            if not _check_contract_from_probe(probe, cd):
+                txn._mark_invalid()
+                return RuntimeStatus(
+                    state=RuntimeState.BROKEN,
+                    runtime_root=self._layout.root,
+                    reason_code=RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED,
+                    reason=f"candidate does not satisfy the expected launch contract for {cd.component_id!r}",
+                )
+            versions[cd.component_id] = probe.get("version", "")
+
+        # Store expectations for TOCTOU revalidation at activation time.
+        txn.set_component_expectations(
+            tuple(component_definitions), versions
+        )
+
+        txn._mark_valid()
+        return RuntimeStatus(
+            state=RuntimeState.READY,
+            runtime_root=self._layout.root,
+            active_slot_id=txn.candidate_slot_id,
+            python_executable=python,
+            python_version=python_version,
             reason_code=RuntimeReasonCode.RUNTIME_READY,
         )
 

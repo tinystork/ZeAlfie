@@ -277,7 +277,7 @@ def build_deployment_plan(
     # ------------------------------------------------------------------
     # 2b) Conflict hardening — refuse incoherent shared-runtime desires.
     # ------------------------------------------------------------------
-    _check_desired_state_conflicts(desired_state, registry)
+    check_desired_state_conflicts(desired_state, registry)
 
     # ------------------------------------------------------------------
     # 3) Route by runtime state.
@@ -652,7 +652,7 @@ def _validate_probe_payload(probe: dict[str, Any], component_id: str) -> str | N
 # ---------------------------------------------------------------------------
 
 
-def _check_desired_state_conflicts(
+def check_desired_state_conflicts(
     desired_state: DesiredRuntimeState,
     registry: ComponentRegistry,
 ) -> None:

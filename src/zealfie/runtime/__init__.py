@@ -5,15 +5,18 @@ environment that hosts ZeSoftware components via immutable slots
 and atomic activation.
 
 M0-8A adds the pure, read-only deployment planning layer.
+M0-8B adds the transactional offline deployment engine.
 """
 
 from __future__ import annotations
 
+from .deployment import apply_deployment_plan
 from .layout import RuntimeLayout, default_runtime_layout, default_runtime_root, validate_slot_id
 from .manager import SharedRuntime, SharedRuntimeError
 from .model import (
     ActiveRuntimeState,
     CandidateState,
+    DeploymentResult,
     InstallOutcome,
     InstallResult,
     RuntimeReasonCode,
@@ -28,6 +31,7 @@ from .planning import (
     DeploymentStep,
     DesiredComponent,
     DesiredRuntimeState,
+    check_desired_state_conflicts,
     PlanningError,
     build_deployment_plan,
 )
@@ -41,6 +45,7 @@ __all__ = [
     "DeploymentAction",
     "DeploymentPlan",
     "DeploymentReasonCode",
+    "DeploymentResult",
     "DeploymentStep",
     "DesiredComponent",
     "DesiredRuntimeState",
@@ -56,6 +61,8 @@ __all__ = [
     "RuntimeTransaction",
     "SharedRuntime",
     "SharedRuntimeError",
+    "apply_deployment_plan",
+    "check_desired_state_conflicts",
     "build_deployment_plan",
     "default_runtime_layout",
     "default_runtime_root",

@@ -27,8 +27,12 @@ class RuntimeTransaction:
     called and validates successfully.
 
     *component_definition* and *expected_version* are stored so
-    :meth:`activate` can revalidate the candidate immediately before
-    switching the pointer (TOCTOU protection).
+    :meth:`activate` can revalidate a single component immediately
+    before switching the pointer (TOCTOU protection).
+
+    For multi-component deployments, :meth:`set_component_expectations`
+    stores a map of ``component_id → version`` and the full list of
+    definitions, which :meth:`activate` rechecks.
     """
 
     def __init__(
@@ -49,6 +53,9 @@ class RuntimeTransaction:
         self._candidate_state = CandidateState.PREPARED
         self._component_definition = component_definition
         self._expected_version = expected_version
+        # Multi-component support.
+        self._component_definitions: "tuple[ComponentDefinition, ...]" = ()
+        self._expected_versions: dict[str, str] = {}
 
     @property
     def candidate_slot_id(self) -> str:
@@ -66,11 +73,33 @@ class RuntimeTransaction:
     def state(self) -> CandidateState:
         return self._candidate_state
 
+    @property
+    def component_definitions(self) -> "tuple[ComponentDefinition, ...]":
+        return self._component_definitions
+
+    @property
+    def expected_versions(self) -> dict[str, str]:
+        return dict(self._expected_versions)
+
     def _mark_valid(self) -> None:
         self._candidate_state = CandidateState.VALID
 
     def _mark_invalid(self) -> None:
         self._candidate_state = CandidateState.INVALID
+
+    def set_component_expectations(
+        self,
+        definitions: "tuple[ComponentDefinition, ...]",
+        versions: dict[str, str],
+    ) -> None:
+        """Record expected components and versions for TOCTOU revalidation.
+
+        Called by :meth:`SharedRuntime.validate_candidate` when multiple
+        component definitions are supplied.  :meth:`activate` re-checks
+        every entry before atomically switching the active pointer.
+        """
+        self._component_definitions = definitions
+        self._expected_versions = dict(versions)
 
     def activate(self) -> RuntimeStatus:
         """Activate this candidate, making it the active slot.
@@ -154,7 +183,22 @@ class RuntimeTransaction:
                 reason_code=RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED,
                 reason="candidate Python unusable at activation time",
             )
-        if self._component_definition is not None:
+
+        # -- Multi-component TOCTOU revalidation ---------------------------
+        if self._component_definitions:
+            error = _revalidate_multi_component(
+                python, self._component_definitions, self._expected_versions
+            )
+            if error is not None:
+                return RuntimeStatus(
+                    state=RuntimeState.BROKEN,
+                    runtime_root=self._layout.root,
+                    reason_code=RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED,
+                    reason=error,
+                )
+
+        # -- Single-component TOCTOU revalidation (backward-compat) --------
+        elif self._component_definition is not None:
             try:
                 probe = probe_runtime_distribution(
                     python, self._component_definition.distribution_name
@@ -371,3 +415,68 @@ def _slot_python(slot_dir: "pathlib.Path") -> "pathlib.Path | None":
     else:
         candidate = slot_dir / "bin" / "python"
     return candidate if candidate.is_file() else None
+
+
+def _revalidate_multi_component(
+    python: "pathlib.Path",
+    definitions: "tuple[ComponentDefinition, ...]",
+    expected_versions: dict[str, str],
+) -> str | None:
+    """Revalidate every expected component at activation time.
+
+    Returns ``None`` on success, or an error string on the first failure.
+    """
+    from .probe import probe_runtime_distribution
+    from zealfie.components.model import EntryPointContract
+
+    for cd in definitions:
+        # Check expected version is recorded.
+        expected_ver = expected_versions.get(cd.component_id)
+        if expected_ver is None:
+            return (
+                f"missing expected version for component "
+                f"{cd.component_id!r} at activation time"
+            )
+
+        try:
+            probe = probe_runtime_distribution(python, cd.distribution_name)
+        except Exception as exc:
+            return (
+                f"activation probe failed for {cd.component_id!r}: {exc}"
+            )
+
+        if not probe.get("installed"):
+            return (
+                f"distribution {cd.distribution_name!r} not found in "
+                f"candidate at activation time"
+            )
+
+        probe_ver = probe.get("version")
+        if probe_ver != expected_ver:
+            return (
+                f"version changed for {cd.component_id!r} at activation "
+                f"time: expected {expected_ver!r}, got {probe_ver!r}"
+            )
+
+        # Check contract.
+        expected_contracts = set(cd.launch_entry_points)
+        if expected_contracts:
+            observed_eps = probe.get("entry_points", [])
+            if not isinstance(observed_eps, list):
+                observed_eps = []
+            matched = False
+            for ep in observed_eps:
+                contract = EntryPointContract(
+                    group=str(ep.get("group", "")),
+                    name=str(ep.get("name", "")),
+                )
+                if contract in expected_contracts:
+                    matched = True
+                    break
+            if not matched:
+                return (
+                    f"candidate no longer satisfies launch contract "
+                    f"for {cd.component_id!r} at activation time"
+                )
+
+    return None

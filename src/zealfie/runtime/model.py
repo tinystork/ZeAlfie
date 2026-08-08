@@ -103,3 +103,24 @@ class InstallResult:
     distribution_name: str
     version: str | None = None
     detail: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Deployment result
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentResult:
+    """The result of applying a deployment plan to the shared runtime.
+
+    When *success* is ``True``, *active_slot_id* carries the newly
+    activated candidate slot id.
+
+    When *success* is ``False``, *reason* explains the failure.
+    """
+
+    success: bool
+    active_slot_id: str | None = None
+    previous_slot_id: str | None = None
+    reason: str | None = None
