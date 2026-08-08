@@ -152,7 +152,12 @@ def parse_release_manifest(text: str) -> ReleaseManifest:
 
 def parse_release_manifest_file(path: str | Path) -> ReleaseManifest:
     """Load and parse a release manifest from a TOML file."""
-    text = Path(path).read_text(encoding="utf-8")
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ReleaseManifestError(
+            f"cannot read release manifest at {path}: {exc}"
+        ) from exc
     return parse_release_manifest(text)
 
 

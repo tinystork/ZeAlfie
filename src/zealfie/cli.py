@@ -21,9 +21,10 @@ from .components import UnknownComponentError, default_registry
 from .runtime import (
     DeploymentPlan,
     DeploymentResult,
+    DeploymentStep,
+    RuntimeReasonCode,
     RuntimeState,
     RuntimeStatus,
-    DeploymentStep,
     SharedRuntime,
     SharedRuntimeError,
     default_runtime_layout,
@@ -130,7 +131,10 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
             service = _make_service()
             status = service.rollback_runtime()
             print(_format_runtime_status(status), file=stdout)
-            return 0 if status.state == RuntimeState.READY else 3
+            if (status.state == RuntimeState.READY
+                    and status.reason_code == RuntimeReasonCode.RUNTIME_READY):
+                return 0
+            return 3
 
         # No runtime subcommand given → show help.
         runtime_parser.print_help(file=stdout)

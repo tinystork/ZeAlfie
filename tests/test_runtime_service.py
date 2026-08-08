@@ -882,3 +882,84 @@ def test_apply_blocked_plan_returns_failure(
     assert result.success is False
     assert result.reason is not None
     assert "blocked" in result.reason.lower()
+
+
+# ===========================================================================
+# M0-9 Closure C — User-controlled release-dir read failures
+# ===========================================================================
+
+
+def test_invalid_utf8_manifest_wraps_error(tmp_path, witness_wheel) -> None:
+    """A manifest file with invalid UTF-8 raises OfflineReleaseError, not
+    a raw UnicodeDecodeError, with a clear message."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    fn = "zealfie_witness-0.0.1-py3-none-any.whl"
+    w1 = _copy_wheel_as(witness_wheel, rd, fn)
+    # Write a valid manifest alongside so the directory isn't empty.
+    _write_manifest(rd, "zewitness", "0.0.1", fn, _sha256(w1), w1.stat().st_size)
+
+    # Write a second manifest (for a multi-component registry) with invalid
+    # bytes that are not valid UTF-8.
+    bad_bytes = b'\xff\xfe\x00\x00invalid bytes here'
+    (rd / "zewitness2.toml").write_bytes(bad_bytes)
+
+    registry = ComponentRegistry([WITNESS_DEF, WITNESS2_DEF])
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    with pytest.raises(OfflineReleaseError, match="cannot read release manifest"):
+        service.resolve_offline_release_set(rd)
+
+
+def test_unreadable_manifest_file_wraps_error(
+    tmp_path, witness_wheel, monkeypatch
+) -> None:
+    """A manifest file that cannot be read (e.g., permissions) raises
+    OfflineReleaseError, not a raw OSError."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    fn = "zealfie_witness-0.0.1-py3-none-any.whl"
+    w1 = _copy_wheel_as(witness_wheel, rd, fn)
+    _write_manifest(rd, "zewitness", "0.0.1", fn, _sha256(w1), w1.stat().st_size)
+
+    # Create a manifest file whose read fails deterministically.
+    bad_path = rd / "zewitness2.toml"
+    bad_path.write_text("valid toml but unreadable in test")
+
+    original_read_text = Path.read_text
+
+    def failing_read_text(self, *args, **kwargs):
+        if self == bad_path:
+            raise OSError("simulated manifest read failure")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    registry = ComponentRegistry([WITNESS_DEF, WITNESS2_DEF])
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    with pytest.raises(OfflineReleaseError, match="cannot read release manifest"):
+        service.resolve_offline_release_set(rd)
+
+
+def test_unicode_decode_error_not_leaked_from_parse(tmp_path, witness_wheel) -> None:
+    """Direct call to parse_release_manifest_file with invalid UTF-8 raises
+    ReleaseManifestError, not UnicodeDecodeError."""
+    from zealfie.releases.manifest import (
+        ReleaseManifestError,
+        parse_release_manifest_file,
+    )
+
+    bad_path = tmp_path / "bad.toml"
+    bad_path.write_bytes(b'\xff\xfe\x00\x00garbage')
+
+    with pytest.raises(ReleaseManifestError, match="cannot read release manifest"):
+        parse_release_manifest_file(bad_path)

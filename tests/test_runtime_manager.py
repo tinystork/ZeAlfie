@@ -193,3 +193,25 @@ def test_python_returns_path(tmp_path: Path) -> None:
     p = rt.python()
     assert p is not None
     assert p.is_file()
+
+
+# ===========================================================================
+# M0-9 Closure A — ABSENT rollback invariant (manager level)
+# ===========================================================================
+
+
+def test_rollback_on_absent_manager(tmp_path: Path) -> None:
+    """SharedRuntime.rollback() on ABSENT returns ABSENT with
+    ROLLBACK_TARGET_NOT_FOUND and None active_slot_id."""
+    rt = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
+
+    # Pre-condition: runtime is ABSENT.
+    s = rt.status()
+    assert s.state == RuntimeState.ABSENT
+
+    # Rollback.
+    rb = rt.rollback()
+    assert rb.state == RuntimeState.ABSENT
+    assert rb.active_slot_id is None
+    assert rb.reason_code == RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND
+    assert rb.reason is not None

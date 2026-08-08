@@ -284,6 +284,15 @@ class RuntimeTransaction:
             layout.active_pointer, layout_root=layout.root
         )
 
+        # ABSENT runtime has nothing to roll back — return ABSENT unchanged.
+        if current.state == RuntimeState.ABSENT:
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=layout.root,
+                reason_code=RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND,
+                reason="shared runtime is absent — nothing to roll back",
+            )
+
         # Never rollback when global state is untrustworthy.
         if current.state == RuntimeState.BROKEN:
             return RuntimeStatus(

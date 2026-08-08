@@ -207,3 +207,69 @@ def _python_of(st: "RuntimeStatus") -> "Path":
     if sys.platform == "win32":
         return slot / "Scripts" / "python.exe"
     return slot / "bin" / "python"
+
+
+# ===========================================================================
+# M0-9 Closure A — ABSENT rollback invariant
+# ===========================================================================
+
+
+def test_rollback_absent_returns_absent(tmp_path) -> None:
+    """Rollback on an ABSENT runtime returns state ABSENT (not READY).
+
+    This preserves the invariant: READY implies a valid active slot.
+    """
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rt = SharedRuntime(layout=layout)
+
+    # Verify runtime is ABSENT.
+    assert rt.status().state == RuntimeState.ABSENT
+
+    # Rollback on ABSENT must return ABSENT.
+    result = rt.rollback()
+    assert result.state == RuntimeState.ABSENT, (
+        f"expected ABSENT, got {result.state.value}"
+    )
+    assert result.active_slot_id is None
+    assert result.reason_code == RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND
+
+
+def test_rollback_absent_no_filesystem_mutation(tmp_path) -> None:
+    """Rollback on ABSENT must not create any files or directories."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rt = SharedRuntime(layout=layout)
+
+    # Capture initial filesystem state.
+    root = tmp_path / "rt"
+    assert not root.exists() or list(root.iterdir()) == []
+
+    # Rollback on ABSENT.
+    result = rt.rollback()
+    assert result.state == RuntimeState.ABSENT
+
+    # Filesystem must be unchanged.
+    # The runtime root may not even exist, or if it does (from parent mkdir)
+    # it should be empty.
+    if root.exists():
+        contents = list(root.iterdir())
+        assert len(contents) == 0, f"unexpected filesystem changes: {contents}"
+
+
+def test_rollback_absent_state_unchanged(tmp_path) -> None:
+    """Rollback on ABSENT must not change the runtime state to READY.
+    After rollback, status() must still report ABSENT."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rt = SharedRuntime(layout=layout)
+
+    # Initial status is ABSENT.
+    s1 = rt.status()
+    assert s1.state == RuntimeState.ABSENT
+
+    # Rollback.
+    rt.rollback()
+
+    # Status must still be ABSENT.
+    s2 = rt.status()
+    assert s2.state == RuntimeState.ABSENT, (
+        f"status changed from ABSENT to {s2.state.value} after rollback"
+    )

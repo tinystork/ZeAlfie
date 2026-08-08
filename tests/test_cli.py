@@ -441,6 +441,47 @@ def test_runtime_plan_offline_error_to_stderr(monkeypatch):
         sys.stderr = backup
 
 
+def test_runtime_plan_invalid_utf8_manifest_to_stderr_no_traceback(
+    tmp_path, monkeypatch, witness_wheel_cli
+):
+    """A real invalid UTF-8 release manifest is reported cleanly by the CLI."""
+    from zealfie.app import ZeAlfieService
+    import sys
+
+    rd = tmp_path / "release"
+    rd.mkdir()
+    (rd / "zewitness.toml").write_bytes(b"\xff\xfe\x00\x00not utf-8")
+
+    # Artifact contents are irrelevant because manifest parsing fails first,
+    # but the release directory still looks like a local release bundle.
+    shutil.copy2(
+        witness_wheel_cli,
+        rd / "zealfie_witness-0.0.1-py3-none-any.whl",
+    )
+
+    runtime = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
+    registry = _registry_for_ids("zewitness")
+    monkeypatch.setattr(
+        cli,
+        "_make_service",
+        lambda: ZeAlfieService(registry=registry, runtime=runtime),
+    )
+
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["runtime", "plan", "--release-dir", str(rd)], stdout=stdout)
+        assert code == 4
+        assert stdout.getvalue() == ""
+        err = stderr.getvalue()
+        assert "plan failed:" in err
+        assert "cannot read release manifest" in err
+        assert "Traceback" not in err
+    finally:
+        sys.stderr = backup
+
+
 def test_runtime_plan_keep_returns_0(monkeypatch):
     """CLI runtime plan returns 0 for a READY KEEP plan."""
     monkeypatch.setattr(cli, "_make_service", lambda: _FakePlanService(_fake_keep_plan()))
@@ -974,3 +1015,84 @@ def test_runtime_create_idempotent(tmp_path, monkeypatch):
     code = run(["runtime", "create"], stdout=stdout)
     assert code == 0
     assert "State: READY" in stdout.getvalue()
+
+
+# ===========================================================================
+# M0-9 Closure B — CLI rollback exit-code hardening
+# ===========================================================================
+
+
+def test_runtime_rollback_absent_returns_nonzero(monkeypatch):
+    """ABSENT runtime rollback returns non-zero.
+    After fix A, rollback on ABSENT returns state=ABSENT with
+    reason_code=ROLLBACK_TARGET_NOT_FOUND, and the CLI returns 3."""
+    status = RuntimeStatus(
+        state=RuntimeState.ABSENT,
+        runtime_root=Path("/fake/rt"),
+        reason_code=RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND,
+        reason="shared runtime is absent — nothing to roll back",
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakeRollbackService(status))
+    stdout = StringIO()
+    code = run(["runtime", "rollback"], stdout=stdout)
+    assert code == 3, f"expected exit 3 for ABSENT rollback, got {code}"
+    output = stdout.getvalue()
+    assert "State: ABSENT" in output
+    assert "ROLLBACK_TARGET_NOT_FOUND" in output
+
+
+def test_runtime_rollback_ready_no_previous_returns_nonzero(monkeypatch):
+    """READY runtime with no previous slot returns non-zero.
+
+    This happens when the very first deployment is active and hasn't
+    been upgraded — there's no previous slot to roll back to."""
+    status = RuntimeStatus(
+        state=RuntimeState.READY,
+        runtime_root=Path("/fake/rt"),
+        active_slot_id="rt-someslot0000",
+        reason_code=RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND,
+        reason="no previous slot to roll back to",
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakeRollbackService(status))
+    stdout = StringIO()
+    code = run(["runtime", "rollback"], stdout=stdout)
+    assert code == 3, (
+        f"expected exit 3 for READY+ROLLBACK_TARGET_NOT_FOUND, got {code}"
+    )
+    output = stdout.getvalue()
+    assert "State: READY" in output
+    assert "ROLLBACK_TARGET_NOT_FOUND" in output
+
+
+def test_runtime_rollback_success_returns_zero(monkeypatch):
+    """Successful rollback (READY + RUNTIME_READY) returns exit 0."""
+    status = RuntimeStatus(
+        state=RuntimeState.READY,
+        runtime_root=Path("/fake/rt"),
+        active_slot_id="rt-rolled0000",
+        previous_slot_id="rt-prevslot0000",
+        reason_code=RuntimeReasonCode.RUNTIME_READY,
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakeRollbackService(status))
+    stdout = StringIO()
+    code = run(["runtime", "rollback"], stdout=stdout)
+    assert code == 0, f"expected exit 0 for successful rollback, got {code}"
+    output = stdout.getvalue()
+    assert "State: READY" in output
+    assert "RUNTIME_READY" in output
+
+
+def test_runtime_rollback_broken_returns_nonzero(monkeypatch):
+    """BROKEN runtime rollback returns non-zero."""
+    status = RuntimeStatus(
+        state=RuntimeState.BROKEN,
+        runtime_root=Path("/fake/rt"),
+        reason_code=RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND,
+        reason="cannot rollback: global state is BROKEN",
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: _FakeRollbackService(status))
+    stdout = StringIO()
+    code = run(["runtime", "rollback"], stdout=stdout)
+    assert code == 3, f"expected exit 3 for BROKEN rollback, got {code}"
+    output = stdout.getvalue()
+    assert "State: BROKEN" in output
