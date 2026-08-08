@@ -12,12 +12,17 @@ from pathlib import Path
 
 @dataclass(frozen=True, slots=True)
 class InspectedWheel:
-    """Result of inspecting a wheel archive without executing its code."""
+    """Result of inspecting a wheel archive without executing its code.
+
+    ``distribution_name`` and ``version`` come from the **canonical**
+    ``.dist-info/METADATA`` file, not from the directory name.
+    """
 
     wheel_path: Path
     top_level_packages: tuple[str, ...]
-    dist_info_dir: str | None
-    version: str | None
+    dist_info_dir: str
+    distribution_name: str
+    version: str
     entry_points: tuple[InspectedEntryPoint, ...]
 
 
@@ -95,42 +100,122 @@ def build_wheel(
     return wheels[0]
 
 
+class WheelInspectionError(ValueError):
+    """Raised when a wheel archive is structurally invalid or ambiguous."""
+
+
 def inspect_wheel(wheel_path: str | Path) -> InspectedWheel:
     """Open a wheel as a ZIP archive and inspect its contents.
 
+    Validates structural invariants:
+
+    * Exactly one top-level ``.dist-info`` directory.
+    * ``METADATA`` must exist and contain ``Name`` and ``Version`` fields.
+    * ``entry_points.txt`` must belong to the same ``.dist-info``.
+
     No Python code from the wheel is loaded or executed.
     """
+    from zealfie.common import normalise_distribution_name
+
     wheel = Path(wheel_path)
     if not wheel.is_file():
         raise FileNotFoundError(f"wheel not found: {wheel}")
 
-    top_level_packages: list[str] = []
-    dist_info_dir: str | None = None
-    version: str | None = None
-    entry_points_raw: str | None = None
+    try:
+        zf = zipfile.ZipFile(wheel, "r")
+    except zipfile.BadZipFile as exc:
+        raise WheelInspectionError(f"invalid wheel ZIP: {exc}") from exc
 
-    with zipfile.ZipFile(wheel, "r") as zf:
-        for name in zf.namelist():
+    with zf:
+        names = zf.namelist()
+        # infolist() preserves duplicate entries; used for critical-member
+        # duplicate detection (namelist deduplicates).
+        all_names = [zi.filename for zi in zf.infolist()]
+
+        # Find the single dist-info directory.
+        dist_info_dirs: list[str] = []
+        for name in names:
             parts = name.rstrip("/").split("/")
+            if len(parts) >= 1 and parts[0].endswith(".dist-info"):
+                di = parts[0]
+                if di not in dist_info_dirs:
+                    dist_info_dirs.append(di)
 
-            # Top-level packages (e.g. "zealfie/__init__.py")
-            if len(parts) == 2 and parts[1] == "__init__.py" and parts[0].endswith(".dist-info") is False:
-                top_level_packages.append(parts[0])
+        if len(dist_info_dirs) == 0:
+            raise WheelInspectionError("wheel has no .dist-info directory")
+        if len(dist_info_dirs) > 1:
+            raise WheelInspectionError(
+                f"ambiguous wheel: multiple .dist-info directories: {dist_info_dirs}"
+            )
+        dist_info_dir = dist_info_dirs[0]
 
-            # .dist-info directory
-            if not dist_info_dir and len(parts) >= 1 and parts[0].endswith(".dist-info"):
-                dist_info_dir = parts[0]
+        # Read METADATA for Name + Version.
+        metadata_name = f"{dist_info_dir}/METADATA"
+        metadata_count = all_names.count(metadata_name)
+        if metadata_count == 0:
+            raise WheelInspectionError(f"wheel has no {metadata_name}")
+        if metadata_count > 1:
+            raise WheelInspectionError(
+                f"duplicate critical member: {metadata_name} "
+                f"appears {metadata_count} times"
+            )
+        try:
+            metadata_text = zf.read(metadata_name).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WheelInspectionError(f"METADATA is not valid UTF-8: {exc}") from exc
 
-            # METADATA inside .dist-info
-            if len(parts) == 2 and parts[0].endswith(".dist-info") and parts[1] == "METADATA":
-                metadata_text = zf.read(name).decode("utf-8")
-                for line in metadata_text.splitlines():
-                    if line.startswith("Version:"):
-                        version = line.split(":", 1)[1].strip()
+        raw_name: str | None = None
+        raw_version: str | None = None
+        name_seen = 0
+        version_seen = 0
+        for line in metadata_text.splitlines():
+            if line.startswith("Name:"):
+                name_seen += 1
+                if name_seen == 1:
+                    raw_name = line.split(":", 1)[1].strip()
+                elif name_seen > 1:
+                    raise WheelInspectionError(
+                        "duplicate canonical METADATA field: Name"
+                    )
+            elif line.startswith("Version:"):
+                version_seen += 1
+                if version_seen == 1:
+                    raw_version = line.split(":", 1)[1].strip()
+                elif version_seen > 1:
+                    raise WheelInspectionError(
+                        "duplicate canonical METADATA field: Version"
+                    )
 
-            # entry_points.txt inside .dist-info
-            if len(parts) == 2 and parts[0].endswith(".dist-info") and parts[1] == "entry_points.txt":
-                entry_points_raw = zf.read(name).decode("utf-8")
+        if not raw_name:
+            raise WheelInspectionError("METADATA has no Name field")
+        if not raw_version:
+            raise WheelInspectionError("METADATA has no Version field")
+
+        distribution_name = normalise_distribution_name(raw_name)
+        version = raw_version
+
+        # Top-level packages.
+        top_level_packages: list[str] = []
+        for name in names:
+            parts = name.rstrip("/").split("/")
+            if len(parts) == 2 and parts[1] == "__init__.py" and not parts[0].endswith(".dist-info"):
+                if parts[0] not in top_level_packages:
+                    top_level_packages.append(parts[0])
+
+        # entry_points.txt from the *same* dist-info.
+        ep_name = f"{dist_info_dir}/entry_points.txt"
+        ep_count = all_names.count(ep_name)
+        entry_points_raw: str | None = None
+        if ep_count > 1:
+            raise WheelInspectionError(
+                f"duplicate critical member: {ep_name} "
+                f"appears {ep_count} times"
+            )
+        if ep_count == 1:
+            try:
+                entry_points_raw = zf.read(ep_name).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise WheelInspectionError(f"entry_points.txt is not valid UTF-8: {exc}") from exc
 
     entry_points = _parse_entry_points_text(entry_points_raw)
 
@@ -138,6 +223,7 @@ def inspect_wheel(wheel_path: str | Path) -> InspectedWheel:
         wheel_path=wheel,
         top_level_packages=tuple(sorted(top_level_packages)),
         dist_info_dir=dist_info_dir,
+        distribution_name=distribution_name,
         version=version,
         entry_points=entry_points,
     )
@@ -153,6 +239,7 @@ def _parse_entry_points_text(text: str | None) -> tuple[InspectedEntryPoint, ...
 
     entries: list[InspectedEntryPoint] = []
     current_group = ""
+    seen_contracts: set[tuple[str, str]] = set()
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -162,12 +249,21 @@ def _parse_entry_points_text(text: str | None) -> tuple[InspectedEntryPoint, ...
             current_group = line[1:-1]
             continue
         if "=" in line:
-            name, value = line.split("=", 1)
+            name_raw, value_raw = line.split("=", 1)
+            group = current_group.strip()
+            name = name_raw.strip()
+            value = value_raw.strip()
+            contract = (group, name)
+            if contract in seen_contracts:
+                raise WheelInspectionError(
+                    f"duplicate entry-point contract: {group}:{name}"
+                )
+            seen_contracts.add(contract)
             entries.append(
                 InspectedEntryPoint(
-                    group=current_group.strip(),
-                    name=name.strip(),
-                    value=value.strip(),
+                    group=group,
+                    name=name,
+                    value=value,
                 )
             )
 

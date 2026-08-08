@@ -1,0 +1,200 @@
+"""Artifact verifier — integrity, identity, and contract checks for M0-7A."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from zealfie.building import WheelInspectionError, inspect_wheel
+from zealfie.common import normalise_distribution_name
+from zealfie.components.model import ComponentDefinition, EntryPointContract
+from zealfie.components.registry import ComponentRegistry
+
+from .manifest import ReleaseManifest
+from .model import VerifiedArtifact
+
+
+class ArtifactRejectionError(ValueError):
+    """Raised when an artifact fails verification.  The detail explains why."""
+
+
+# ---------------------------------------------------------------------------
+# Path safety
+# ---------------------------------------------------------------------------
+
+
+def _validate_filename(filename: str) -> None:
+    """Reject filenames that look like paths, and enforce ``.whl`` extension."""
+    if not filename or filename.strip() != filename:
+        raise ArtifactRejectionError(f"invalid artifact filename: {filename!r}")
+    if "/" in filename or "\\" in filename:
+        raise ArtifactRejectionError(
+            f"artifact filename must not contain path separators: {filename!r}"
+        )
+    if filename.startswith(".") or ".." in filename:
+        raise ArtifactRejectionError(
+            f"artifact filename must not contain ..: {filename!r}"
+        )
+    if filename.startswith("/") or (len(filename) >= 2 and filename[1] == ":"):
+        raise ArtifactRejectionError(
+            f"artifact filename must not be absolute: {filename!r}"
+        )
+    # M0-7A only supports wheels.
+    if not filename.endswith(".whl") or filename == ".whl":
+        raise ArtifactRejectionError(
+            f"artifact filename must end with .whl: {filename!r}"
+        )
+
+
+def _resolve_safe_artifact_path(artifact_root: Path, filename: str) -> Path:
+    """Resolve *filename* under *artifact_root*, rejecting escapes and symlinks."""
+    _validate_filename(filename)
+    lexical = artifact_root / filename
+    # Reject symlinks before resolve.
+    if lexical.is_symlink():
+        raise ArtifactRejectionError(
+            f"artifact must not be a symlink: {lexical}"
+        )
+    candidate = lexical.resolve(strict=False)
+    root = artifact_root.resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ArtifactRejectionError(
+            f"artifact path {candidate} escapes artifact root {root}"
+        )
+    if not candidate.is_file():
+        raise ArtifactRejectionError(f"artifact file not found: {candidate}")
+    return candidate
+
+
+# ---------------------------------------------------------------------------
+# Integrity
+# ---------------------------------------------------------------------------
+
+
+def _compute_sha256(path: Path) -> str:
+    """Stream hash of *path* — never loads the whole file into RAM."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1 << 20)  # 1 MiB
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Wheel identity from METADATA
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Entry-point contract from wheel
+# ---------------------------------------------------------------------------
+
+
+def _wheel_has_contract(
+    info: "zealfie.building.InspectedWheel",
+    definition: ComponentDefinition,
+) -> bool:
+    """Check the wheel's entry points for at least one expected contract."""
+    expected = set(definition.launch_entry_points)
+    if not expected:
+        return True
+    for ep in info.entry_points:
+        if EntryPointContract(group=ep.group, name=ep.name) in expected:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Verification orchestrator
+# ---------------------------------------------------------------------------
+
+
+def verify_artifact(
+    manifest: ReleaseManifest,
+    *,
+    registry: ComponentRegistry,
+    artifact_root: Path,
+) -> VerifiedArtifact:
+    """Run the complete verification chain against *manifest*.
+
+    The manifest's ``component_id`` is resolved against *registry*.
+    A mismatch between the requested and resolved component is rejected.
+    """
+    from zealfie.components import UnknownComponentError
+
+    # Resolve component via trusted registry.
+    try:
+        definition = registry.get(manifest.component_id)
+    except UnknownComponentError:
+        raise ArtifactRejectionError(
+            f"unknown component: {manifest.component_id!r}"
+        )
+    if definition.component_id != manifest.component_id:
+        raise ArtifactRejectionError(
+            f"component mismatch: manifest says {manifest.component_id!r}, "
+            f"registry returned {definition.component_id!r}"
+        )
+
+    # 1. Path
+    artifact_path = _resolve_safe_artifact_path(artifact_root, manifest.filename)
+
+    # 2. Size
+    actual_size = artifact_path.stat().st_size
+    if actual_size != manifest.size:
+        raise ArtifactRejectionError(
+            f"size mismatch: expected {manifest.size}, got {actual_size}"
+        )
+
+    # 3. SHA256
+    actual_hash = _compute_sha256(artifact_path)
+    if actual_hash != manifest.sha256:
+        raise ArtifactRejectionError(
+            f"SHA256 mismatch: expected {manifest.sha256}, got {actual_hash}"
+        )
+
+    # 4. Wheel identity from METADATA (canonical inspect_wheel).
+    try:
+        info = inspect_wheel(artifact_path)
+    except WheelInspectionError as exc:
+        raise ArtifactRejectionError(f"wheel inspection failed: {exc}") from exc
+    wheel_name = info.distribution_name
+    wheel_version = info.version
+
+    # 5. Distribution match
+    expected_dist = normalise_distribution_name(definition.distribution_name)
+    if wheel_name != expected_dist:
+        raise ArtifactRejectionError(
+            f"distribution mismatch: wheel is {wheel_name!r}, "
+            f"expected {expected_dist!r}"
+        )
+
+    # 6. Version match
+    if manifest.version != wheel_version:
+        raise ArtifactRejectionError(
+            f"version mismatch: manifest says {manifest.version!r}, "
+            f"wheel says {wheel_version!r}"
+        )
+
+    # 7. Entry-point contract
+    if not _wheel_has_contract(info, definition):
+        expected_str = ", ".join(
+            f"{ep.group}:{ep.name}" for ep in definition.launch_entry_points
+        )
+        raise ArtifactRejectionError(
+            f"wheel does not declare expected launch contract(s): [{expected_str}]"
+        )
+
+    return VerifiedArtifact(
+        component_id=manifest.component_id,
+        version=manifest.version,
+        path=artifact_path,
+        size=actual_size,
+        sha256=actual_hash,
+        distribution_name=wheel_name,
+        wheel_version=wheel_version,
+    )

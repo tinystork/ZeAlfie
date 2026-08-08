@@ -450,8 +450,8 @@ class SharedRuntime:
 
 
 def _normalise_distribution_name(name: str) -> str:
-    import re
-    return re.sub(r"[-_.]+", "-", name.strip()).lower()
+    from zealfie.common import normalise_distribution_name
+    return normalise_distribution_name(name)
 
 
 def _inspect_or_fail(wp: Path) -> Any | None:
@@ -465,32 +465,9 @@ def _validate_wheel_contract(
     info: Any,
     component_definition: ComponentDefinition | None,
 ) -> tuple[str, str | None, InstallResult | None]:
-    """Extract dist name and version from wheel info.
-
-    Returns ``(dist_name, version, None)`` on success, or ``(..., ..., InstallResult)`` on failure.
-    """
-    if info.dist_info_dir is None:
-        return "?", None, InstallResult(
-            outcome=InstallOutcome.FAILED,
-            distribution_name="?",
-            detail="wheel has no .dist-info directory",
-        )
-
+    """Extract dist name and version from wheel info (from canonical METADATA)."""
+    dist_name = info.distribution_name
     wheel_version = info.version
-    if wheel_version is None:
-        return "?", None, InstallResult(
-            outcome=InstallOutcome.FAILED,
-            distribution_name="?",
-            detail="wheel has no version in METADATA",
-        )
-
-    suffix = f"-{wheel_version}.dist-info"
-    if info.dist_info_dir.endswith(suffix):
-        dist_name = _normalise_distribution_name(info.dist_info_dir[: -len(suffix)])
-    else:
-        dist_name = _normalise_distribution_name(
-            info.dist_info_dir.removesuffix(".dist-info").rsplit("-", 1)[0]
-        )
 
     # Pre-install contract validation.
     if component_definition is not None:
