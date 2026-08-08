@@ -85,7 +85,8 @@ def _validate_declared_tags_match_wheel_filename(entry: ArtifactEntry) -> None:
     This deliberately implements only the M0-7C subset: when any compatibility
     tag is declared, all three declared tags must literally match the final
     ``-{python_tag}-{abi_tag}-{platform_tag}.whl`` filename segments.
-    Untagged historical artifacts are left to selection and verification.
+    Fully untagged artifacts are normalized later by deriving their effective
+    resolver compatibility from those same filename tags.
     """
     declared = (entry.python_tag, entry.abi_tag, entry.platform_tag)
     if declared == (None, None, None):

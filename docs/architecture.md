@@ -334,10 +334,13 @@ detects the running interpreter via ``sysconfig`` and ``sys``; all other
 compatibility logic operates on synthetic targets, making policy testable
 without the real OS.
 
-``select_artifact(manifest, host)`` returns the index of the single
-compatible artifact or raises ``ArtifactSelectionError``:
+``select_artifact(manifest, host)`` is the low-level deterministic selector.
+It returns the index of the single compatible artifact or raises
+``ArtifactSelectionError``:
 
-* A universal artifact (all tags ``None``) matches any host.
+* At the low-level selector only, an artifact whose manifest tags are all
+  ``None`` matches any host.  This keeps the M0-7A/M0-7B primitive compatible
+  for focused tests and internal use.
 * A tagged artifact uses strict matching: ``python_tag`` must be an exact
   match or the generic ``py<major>`` form (``py3`` matches ``py312``),
   ``abi_tag`` ``"none"`` matches any host ABI, and ``platform_tag`` ``"any"``
@@ -361,11 +364,14 @@ exact selected index to ``verify_artifact()``.  Callers never pass an
 
 The filename tag check is intentionally narrow and dependency-free: filenames
 must end in ``.whl`` and the final three ``-``-separated stem segments are
-treated as the wheel's Python, ABI, and platform tags.  Untagged historical
-manifests remain valid and are handled by the universal compatibility rule.
-When any tag is declared, mismatches such as manifest
-``platform_tag="linux_x86_64"`` with filename ``...-py3-none-any.whl`` are
-rejected fail-closed.
+treated as the wheel's Python, ABI, and platform tags.  In the safe M0-7C
+resolver path, fully untagged manifest entries are not treated as universally
+compatible; the resolver derives their effective compatibility from those
+filename tags before selection.  This preserves historical ``py3-none-any``
+manifests while rejecting untagged platform-specific filenames such as
+``...-py3-none-win_amd64.whl`` on Linux.  When any tag is declared, mismatches
+such as manifest ``platform_tag="linux_x86_64"`` with filename
+``...-py3-none-any.whl`` are rejected fail-closed.
 
 **Verification** (``verifier.py``):
 
