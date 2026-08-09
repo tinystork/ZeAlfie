@@ -7,6 +7,11 @@ distribution_name = "ZeSolver"
 description = "Optical solver for high-resolution astrophotography — plate solve, blind solve, and star field analysis."
 required_extras = ["gui"]
 
+[products.remote_source]
+owner = "tinystork"
+repo = "ZeSolver"
+ref = "main"
+
 [[products.launch.entry_points]]
 group = "gui_scripts"
 name = "zesolver"

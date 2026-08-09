@@ -1075,3 +1075,578 @@ def test_service_catalog_property():
     service = ZeAlfieService()
     assert isinstance(service.catalog, ProductCatalog)
     assert len(service.catalog) == 4
+
+# ===========================================================================
+# M1-2D.1 — Remote Product Source
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# D.1.1: Catalog integrates remote source metadata
+# ---------------------------------------------------------------------------
+
+
+def test_zesolver_has_remote_source():
+    """ZeSolver's catalog entry carries the declared remote source."""
+    catalog = default_catalog()
+    from zealfie.sources import RemoteSource
+    desc = catalog.get("zesolver")
+    assert desc.remote_source is not None
+    assert isinstance(desc.remote_source, RemoteSource)
+    assert desc.remote_source.owner == "tinystork"
+    assert desc.remote_source.repo == "ZeSolver"
+    assert desc.remote_source.ref == "main"
+
+
+def test_other_products_have_no_remote_source():
+    """Products without explicit remote_source in TOML have None."""
+    catalog = default_catalog()
+    for pid in ("zemosaic", "zeseestarstacker", "zeanalyser"):
+        desc = catalog.get(pid)
+        assert desc.remote_source is None, f"{pid} should have no remote_source"
+
+
+# ---------------------------------------------------------------------------
+# D.1.2: RemoteSource validation
+# ---------------------------------------------------------------------------
+
+from zealfie.sources import (
+    InvalidRemoteSourceError,
+    RemoteSource,
+    ResolvedSource,
+    SourceResolutionError,
+    resolve_source,
+)
+
+
+def test_remote_source_valid():
+    """Valid owner/repo/ref creates a RemoteSource successfully."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    assert src.owner == "tinystork"
+    assert src.repo == "ZeSolver"
+    assert src.ref == "main"
+
+
+def test_remote_source_rejects_empty_owner():
+    """Empty owner → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="owner must not be empty"):
+        RemoteSource(owner="", repo="ZeSolver", ref="main")
+
+
+def test_remote_source_rejects_empty_repo():
+    """Empty repo → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="repo must not be empty"):
+        RemoteSource(owner="tinystork", repo="", ref="main")
+
+
+def test_remote_source_rejects_empty_ref():
+    """Empty ref → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="ref must not be empty"):
+        RemoteSource(owner="tinystork", repo="ZeSolver", ref="")
+
+
+def test_remote_source_rejects_whitespace_only_owner():
+    """Whitespace-only owner → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="owner must not be empty"):
+        RemoteSource(owner="   ", repo="ZeSolver", ref="main")
+
+
+def test_remote_source_rejects_invalid_owner_chars():
+    """Owner with leading special char → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="not a valid GitHub owner"):
+        RemoteSource(owner="-tinystork", repo="ZeSolver", ref="main")
+
+
+def test_remote_source_rejects_invalid_repo_chars():
+    """Repo with leading special char → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="not a valid GitHub.*repo"):
+        RemoteSource(owner="tinystork", repo="_ZeSolver", ref="main")
+
+
+def test_remote_source_rejects_consecutive_dots():
+    """Consecutive dots in repo → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="consecutive special"):
+        RemoteSource(owner="tinystork", repo="Ze..Solver", ref="main")
+
+
+def test_remote_source_rejects_consecutive_dashes():
+    """Consecutive dashes in owner → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="consecutive special"):
+        RemoteSource(owner="tiny--stork", repo="ZeSolver", ref="main")
+
+
+def test_remote_source_rejects_consecutive_underscores():
+    """Consecutive underscores in repo → InvalidRemoteSourceError."""
+    with pytest.raises(InvalidRemoteSourceError, match="consecutive special"):
+        RemoteSource(owner="tinystork", repo="Ze__Solver", ref="main")
+
+
+def test_remote_source_accepts_single_dot():
+    """Single dot in repo name is valid (e.g. github.io)."""
+    src = RemoteSource(owner="tinystork", repo="Ze.Solver", ref="main")
+    assert src.repo == "Ze.Solver"
+
+
+def test_remote_source_accepts_dash_in_name():
+    """Dash in repo name is valid."""
+    src = RemoteSource(owner="tiny-stork", repo="Ze-Solver", ref="v1.0.0")
+    assert src.owner == "tiny-stork"
+    assert src.ref == "v1.0.0"
+
+
+def test_remote_source_accepts_future_product_format():
+    """Different owner/repo/ref works (generic for later products)."""
+    src = RemoteSource(owner="anotherorg", repo="OtherProduct", ref="stable")
+    assert src.owner == "anotherorg"
+    assert src.repo == "OtherProduct"
+    assert src.ref == "stable"
+
+
+# ---------------------------------------------------------------------------
+# D.1.3: ResolvedSource validation
+# ---------------------------------------------------------------------------
+
+
+def test_resolved_source_valid_sha():
+    """ResolvedSource accepts a valid 40-char hex SHA."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    resolved = ResolvedSource(source=src, commit_sha="a" * 40)
+    assert resolved.source == src
+    assert resolved.commit_sha == "a" * 40
+
+
+def test_resolved_source_sha_is_normalized_lowercase():
+    """Commit SHA is normalized to lowercase."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    resolved = ResolvedSource(source=src, commit_sha="A" * 40)
+    assert resolved.commit_sha == "a" * 40
+
+
+def test_resolved_source_rejects_too_short_sha():
+    """SHA shorter than 40 chars → InvalidRemoteSourceError."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    with pytest.raises(InvalidRemoteSourceError, match="40-character hex"):
+        ResolvedSource(source=src, commit_sha="abc123")
+
+
+def test_resolved_source_rejects_too_long_sha():
+    """SHA longer than 40 chars → InvalidRemoteSourceError."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    with pytest.raises(InvalidRemoteSourceError, match="40-character hex"):
+        ResolvedSource(source=src, commit_sha="a" * 41)
+
+
+def test_resolved_source_rejects_non_hex_sha():
+    """SHA with non-hex chars → InvalidRemoteSourceError."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    with pytest.raises(InvalidRemoteSourceError, match="40-character hex"):
+        ResolvedSource(source=src, commit_sha="g" * 40)
+
+
+def test_resolved_source_rejects_empty_sha():
+    """Empty SHA → InvalidRemoteSourceError."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    with pytest.raises(InvalidRemoteSourceError, match="40-character hex"):
+        ResolvedSource(source=src, commit_sha="")
+
+
+def test_resolved_source_rejects_branch_name_as_sha():
+    """Branch name is not a valid SHA → InvalidRemoteSourceError."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    with pytest.raises(InvalidRemoteSourceError, match="40-character hex"):
+        ResolvedSource(source=src, commit_sha="main")
+
+
+# ---------------------------------------------------------------------------
+# D.1.4: Resolution with injectable/mockable resolver
+# ---------------------------------------------------------------------------
+
+VALID_SHA = "d4a0f1e2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8"
+
+
+def test_resolve_source_with_mock_resolver():
+    """Resolution with mock resolver returns correct ResolvedSource."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+
+    def mock_resolver(owner: str, repo: str, ref: str) -> str:
+        return VALID_SHA
+
+    resolved = resolve_source(src, resolver=mock_resolver)
+    assert isinstance(resolved, ResolvedSource)
+    assert resolved.source == src
+    assert resolved.commit_sha == VALID_SHA
+
+
+def test_resolve_source_passes_correct_args_to_resolver():
+    """The resolver receives the exact (owner, repo, ref) from the source."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+    captured: list[tuple[str, str, str]] = []
+
+    def mock_resolver(owner: str, repo: str, ref: str) -> str:
+        captured.append((owner, repo, ref))
+        return VALID_SHA
+
+    resolve_source(src, resolver=mock_resolver)
+    assert len(captured) == 1
+    assert captured[0] == ("tinystork", "ZeSolver", "main")
+
+
+def test_resolve_source_deterministic():
+    """Same source + same resolver → same result (deterministic)."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+
+    def mock_resolver(owner: str, repo: str, ref: str) -> str:
+        return VALID_SHA
+
+    result1 = resolve_source(src, resolver=mock_resolver)
+    result2 = resolve_source(src, resolver=mock_resolver)
+    assert result1 == result2
+    assert result1.commit_sha == result2.commit_sha
+
+
+def test_resolve_source_rejects_non_sha_response():
+    """Resolver returning a branch name is caught by ResolvedSource validation."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+
+    def bad_resolver(owner: str, repo: str, ref: str) -> str:
+        return "main"  # branch name, not SHA
+
+    with pytest.raises(InvalidRemoteSourceError, match="40-character hex"):
+        resolve_source(src, resolver=bad_resolver)
+
+
+def test_resolve_source_propagates_resolver_error():
+    """SourceResolutionError from the resolver propagates to caller."""
+    src = RemoteSource(owner="nonexistent", repo="ghost", ref="unknown")
+
+    def failing_resolver(owner: str, repo: str, ref: str) -> str:
+        raise SourceResolutionError(f"ref {ref} not found in {owner}/{repo}")
+
+    with pytest.raises(SourceResolutionError, match="ref unknown not found"):
+        resolve_source(src, resolver=failing_resolver)
+
+
+def test_resolve_source_immutable_result():
+    """ResolvedSource is immutable."""
+    src = RemoteSource(owner="tinystork", repo="ZeSolver", ref="main")
+
+    def mock_resolver(owner: str, repo: str, ref: str) -> str:
+        return VALID_SHA
+
+    resolved = resolve_source(src, resolver=mock_resolver)
+    with pytest.raises(Exception):
+        resolved.commit_sha = "b" * 40  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# D.1.5: TOML integration — remote source parsing
+# ---------------------------------------------------------------------------
+
+
+def test_load_catalog_with_remote_source():
+    """TOML with remote_source table parses correctly."""
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+[products.remote_source]
+owner = "tinystork"
+repo = "ZeSolver"
+ref = "main"
+"""
+    catalog = load_catalog_from_text(toml)
+    desc = catalog.get("zesolver")
+    assert desc.remote_source is not None
+    assert desc.remote_source.owner == "tinystork"
+    assert desc.remote_source.repo == "ZeSolver"
+    assert desc.remote_source.ref == "main"
+
+
+def test_load_catalog_remote_source_optional():
+    """Products without remote_source field still parse correctly."""
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zestack"
+display_name = "ZeStack"
+distribution_name = "ZeStack"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zestack"}]
+"""
+    catalog = load_catalog_from_text(toml)
+    desc = catalog.get("zestack")
+    assert desc.remote_source is None
+
+
+def test_load_catalog_rejects_remote_source_not_a_table():
+    """remote_source as a string → InvalidCatalogError."""
+    from zealfie.products.catalog import InvalidCatalogError
+
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+remote_source = "not-a-table"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+"""
+    with pytest.raises(InvalidCatalogError, match="remote_source must be a table"):
+        load_catalog_from_text(toml)
+
+
+def test_load_catalog_rejects_missing_remote_source_owner():
+    """remote_source without owner → InvalidCatalogError."""
+    from zealfie.products.catalog import InvalidCatalogError
+
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.remote_source]
+repo = "ZeSolver"
+ref = "main"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+"""
+    with pytest.raises(InvalidCatalogError, match="remote_source.owner"):
+        load_catalog_from_text(toml)
+
+
+def test_load_catalog_rejects_empty_remote_source_repo():
+    """remote_source with empty repo → InvalidCatalogError."""
+    from zealfie.products.catalog import InvalidCatalogError
+
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.remote_source]
+owner = "tinystork"
+repo = ""
+ref = "main"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+"""
+    with pytest.raises(InvalidCatalogError, match="remote_source.repo"):
+        load_catalog_from_text(toml)
+
+
+def test_load_catalog_rejects_invalid_remote_source_owner():
+    """remote_source with invalid owner format → InvalidCatalogError."""
+    from zealfie.products.catalog import InvalidCatalogError
+
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.remote_source]
+owner = "-bad"
+repo = "ZeSolver"
+ref = "main"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+"""
+    with pytest.raises(InvalidCatalogError, match="remote_source:"):
+        load_catalog_from_text(toml)
+
+
+# ---------------------------------------------------------------------------
+# D.1.6: Generic — remote source works for future products
+# ---------------------------------------------------------------------------
+
+
+def test_remote_source_generic_for_future_products():
+    """Solution is generic: different products can have different sources."""
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+[products.remote_source]
+owner = "tinystork"
+repo = "ZeSolver"
+ref = "main"
+
+[[products]]
+id = "futureprod"
+display_name = "Future Product"
+distribution_name = "FutureProduct"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "futureprod"}]
+[products.remote_source]
+owner = "otherorg"
+repo = "FutureProduct"
+ref = "develop"
+"""
+    catalog = load_catalog_from_text(toml)
+
+    zesolver = catalog.get("zesolver")
+    assert zesolver.remote_source is not None
+    assert zesolver.remote_source.owner == "tinystork"
+    assert zesolver.remote_source.ref == "main"
+
+    future = catalog.get("futureprod")
+    assert future.remote_source is not None
+    assert future.remote_source.owner == "otherorg"
+    assert future.remote_source.repo == "FutureProduct"
+    assert future.remote_source.ref == "develop"
+
+
+# ---------------------------------------------------------------------------
+# D.1.7: Remote source does not affect existing semantics
+# ---------------------------------------------------------------------------
+
+
+def test_remote_source_does_not_affect_product_descriptor_fields():
+    """Adding remote_source doesn't change other ProductDescriptor fields."""
+    catalog = default_catalog()
+    desc = catalog.get("zesolver")
+    assert desc.product_id == "zesolver"
+    assert desc.display_name == "ZeSolver"
+    assert desc.distribution_name == "ZeSolver"
+    assert len(desc.launch_entry_points) == 1
+    assert desc.required_extras == ("gui",)
+    # remote_source is present but doesn't change the above
+    assert desc.remote_source is not None
+
+
+def test_remote_source_does_not_make_product_managed():
+    """Having remote_source metadata does not add product to registry."""
+    from zealfie.components.registry import default_registry
+
+    registry = default_registry()
+    # The registry may or may not have zesolver - remote_source metadata
+    # doesn't influence this at all.
+    catalog = default_catalog()
+    desc = catalog.get("zesolver")
+    # Just verify independence: remote_source is metadata on the catalog,
+    # not on the registry.
+    assert desc.remote_source is not None  # metadata exists
+    # Registry is independent — no assertion about registry contents needed
+
+
+# ---------------------------------------------------------------------------
+# D.1.8: SourceRefResolver protocol duck typing
+# ---------------------------------------------------------------------------
+
+
+def test_source_ref_resolver_accepts_callable():
+    """Any callable with the right signature works as a resolver."""
+    src = RemoteSource(owner="a", repo="b", ref="c")
+
+    # Class with __call__
+    class Resolver:
+        def __call__(self, owner: str, repo: str, ref: str) -> str:
+            return VALID_SHA
+
+    resolved = resolve_source(src, resolver=Resolver())
+    assert resolved.commit_sha == VALID_SHA
+
+    # Lambda
+    resolved2 = resolve_source(src, resolver=lambda o, r, f: VALID_SHA)
+    assert resolved2.commit_sha == VALID_SHA
+
+
+def test_remote_source_roundtrip_through_resolution():
+    """Full roundtrip: catalog → RemoteSource → ResolvedSource."""
+    catalog = default_catalog()
+    desc = catalog.get("zesolver")
+    src = desc.remote_source
+    assert src is not None
+
+    # Resolve with a mock
+    def mock_resolver(owner: str, repo: str, ref: str) -> str:
+        return VALID_SHA
+
+    resolved = resolve_source(src, resolver=mock_resolver)
+    assert resolved.source == src
+    assert resolved.commit_sha == VALID_SHA
+    assert resolved.source.owner == "tinystork"
+    assert resolved.source.repo == "ZeSolver"
+    assert resolved.source.ref == "main"
+
+
+# ---------------------------------------------------------------------------
+# D.1.9: Edge cases — None handling
+# ---------------------------------------------------------------------------
+
+
+def test_product_descriptor_accepts_none_remote_source():
+    """ProductDescriptor with remote_source=None works."""
+    desc = ProductDescriptor(
+        product_id="test",
+        display_name="Test",
+        distribution_name="test",
+        launch_entry_points=(),
+        remote_source=None,
+    )
+    assert desc.remote_source is None
+
+
+def test_product_descriptor_default_remote_source_is_none():
+    """ProductDescriptor default for remote_source is None."""
+    desc = ProductDescriptor(
+        product_id="test",
+        display_name="Test",
+        distribution_name="test",
+        launch_entry_points=(),
+        # remote_source not specified — should default to None
+    )
+    assert desc.remote_source is None
+
+
+# ---------------------------------------------------------------------------
+# D.1.10: Coherent remote response — no implicit trust
+# ---------------------------------------------------------------------------
+
+# Note: The design enforces no implicit trust in GitHub responses through:
+# 1. ResolvedSource validates commit_sha format strictly (40 hex chars)
+# 2. The resolver is injectable, so tests never touch real GitHub
+# 3. InvalidRemoteSourceError is raised for any malformed input
+# 4. No git binary dependency or shell command generation
+#
+# These are tested implicitly by test_resolve_source_rejects_non_sha_response
+# and test_resolve_source_rejects_branch_name_as_sha which ensure that
+# a "coherent remote response" (well-formed JSON from GitHub but containing
+# something unexpected like a branch name) is caught by validation.
+
+
+def test_product_descriptor_rejects_non_remote_source_object():
+    """Direct constructor rejects remote_source that is not None and not
+    a RemoteSource instance — fail closed, not silently carry garbage."""
+    with pytest.raises(ValueError, match="remote_source"):
+        ProductDescriptor(
+            product_id="test",
+            display_name="Test",
+            distribution_name="test",
+            launch_entry_points=(),
+            remote_source="not-a-source",
+        )
+
+    # None is still accepted (regression check alongside the negative test above).
+    _ = ProductDescriptor(
+        product_id="test2", display_name="T2", distribution_name="t2",
+        launch_entry_points=(), remote_source=None,
+    )

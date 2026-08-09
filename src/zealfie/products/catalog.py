@@ -18,6 +18,7 @@ from typing import Any
 from packaging.utils import canonicalize_name
 
 from zealfie.components.model import EntryPointContract
+from zealfie.sources import InvalidRemoteSourceError, RemoteSource
 
 CATALOG_PACKAGE = "zealfie.manifests"
 CATALOG_RESOURCE = "products.toml"
@@ -75,6 +76,9 @@ class ProductDescriptor:
     launch_entry_points: tuple[EntryPointContract, ...]
     required_extras: tuple[str, ...] = ()
     description: str = ""
+    # M1-2D.1: Optional remote source metadata.
+    # None for products without a declared remote repository.
+    remote_source: RemoteSource | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("product_id", "display_name", "distribution_name"):
@@ -101,6 +105,14 @@ class ProductDescriptor:
             extras.append(extra)
         object.__setattr__(self, "required_extras", tuple(extras))
 
+
+        # Validate remote_source: must be None or a RemoteSource instance.
+        rs = self.remote_source
+        if rs is not None and not isinstance(rs, RemoteSource):
+            raise ValueError(
+                f"remote_source must be None or a RemoteSource instance, "
+                f"got {type(rs).__qualname__}"
+            )
 
 # ---------------------------------------------------------------------------
 # Catalog
@@ -317,6 +329,9 @@ def _product_from_payload(
             canonicals.append(canon)
         required_extras = tuple(canonicals)
 
+    # --- optional remote_source (M1-2D.1) ---
+    remote_source = _parse_optional_remote_source(raw, label_prefix)
+
     return ProductDescriptor(
         product_id=product_id,
         display_name=display_name,
@@ -324,6 +339,7 @@ def _product_from_payload(
         launch_entry_points=tuple(contracts),
         required_extras=required_extras,
         description=description,
+        remote_source=remote_source,
     )
 
 
@@ -339,3 +355,29 @@ def _required_str(
     if not value:
         raise InvalidCatalogError(f"{label} must not be empty")
     return value
+
+
+def _parse_optional_remote_source(
+    raw: dict[str, Any],
+    label_prefix: str,
+) -> RemoteSource | None:
+    """Parse an optional ``[products.remote_source]`` table.
+
+    Returns ``None`` if the key is absent — remote source metadata is
+    purely additive and does not affect existing catalog semantics.
+    """
+    raw_rs = raw.get("remote_source")
+    if raw_rs is None:
+        return None
+    if not isinstance(raw_rs, dict):
+        raise InvalidCatalogError(
+            f"{label_prefix}.remote_source must be a table"
+        )
+    try:
+        return RemoteSource(
+            owner=_required_str(raw_rs, "owner", f"{label_prefix}.remote_source.owner"),
+            repo=_required_str(raw_rs, "repo", f"{label_prefix}.remote_source.repo"),
+            ref=_required_str(raw_rs, "ref", f"{label_prefix}.remote_source.ref"),
+        )
+    except InvalidRemoteSourceError as exc:
+        raise InvalidCatalogError(f"{label_prefix}.remote_source: {exc}") from exc

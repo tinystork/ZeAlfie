@@ -11,6 +11,7 @@ These two are kept intentionally separate so that:
 
 See :mod:`zealfie.products.catalog` for definitions and loading.
 See :mod:`zealfie.products.state` for the runtime product-shell read model.
+See :mod:`zealfie.sources` for remote source models and resolution.
 """
 
 from __future__ import annotations
@@ -28,13 +29,32 @@ from .state import (
     ProductStateReasonCode,
 )
 
+# M1-2D.1: Re-export remote source types so consumers import from the
+# products package, keeping the sources module an implementation detail.
+from zealfie.sources import (
+    InvalidRemoteSourceError,
+    RemoteSource,
+    ResolvedSource,
+    SourceError,
+    SourceRefResolver,
+    SourceResolutionError,
+    resolve_source,
+)
+
 __all__ = [
+    "InvalidRemoteSourceError",
     "ManagedStatus",
     "ProductCatalog",
     "ProductDescriptor",
     "ProductShellState",
     "ProductState",
     "ProductStateReasonCode",
+    "RemoteSource",
+    "ResolvedSource",
+    "SourceError",
+    "SourceRefResolver",
+    "SourceResolutionError",
     "UnknownProductError",
     "default_catalog",
+    "resolve_source",
 ]

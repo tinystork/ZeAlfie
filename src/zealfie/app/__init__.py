@@ -34,6 +34,18 @@ from zealfie.products.state import (
     ProductStateReasonCode,
 )
 
+# M1-2D.1: Remote source models and resolution re-exported from the
+# application layer for consistency with existing patterns.
+from zealfie.sources import (
+    InvalidRemoteSourceError,
+    RemoteSource,
+    ResolvedSource,
+    SourceError,
+    SourceRefResolver,
+    SourceResolutionError,
+    resolve_source,
+)
+
 # M1-2B: SpawnedLaunch re-exported so that GUI consumers import from the
 # application layer.
 from zealfie.launching import SpawnedLaunch
@@ -41,6 +53,7 @@ from zealfie.launching import SpawnedLaunch
 __all__ = [
     "ComponentNotInstalledError",
     "FULL_NAME",
+    "InvalidRemoteSourceError",
     "LaunchContractNotSatisfiedError",
     "LaunchPreparationError",
     "LaunchScriptNotFoundError",
@@ -51,12 +64,18 @@ __all__ = [
     "ProductShellState",
     "ProductState",
     "ProductStateReasonCode",
+    "RemoteSource",
+    "ResolvedSource",
     "RuntimeStatus",
+    "SourceError",
+    "SourceRefResolver",
+    "SourceResolutionError",
     "SpawnedLaunch",
     "UnknownProductError",
     "ZeAlfieService",
     "collect_status",
     "format_component_status",
     "format_status",
+    "resolve_source",
     "startup_message",
 ]
