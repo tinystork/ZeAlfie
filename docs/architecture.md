@@ -957,3 +957,122 @@ zealfie products zesolver    # inspect one product
 
 The ``products`` command delegates to ``ZeAlfieService.collect_product_state``
 and ``ZeAlfieService.get_product_state``.  It reads no internals directly.
+
+## M1-2B — Non-Blocking Managed Product Launch
+
+M1-2B adds a non-blocking launch primitive for managed products/components.
+It is designed as the foundation for future GUI-triggered launches: spawn a
+process and return a handle immediately rather than blocking until the child
+exits.
+
+### Design Decision: Non-Blocking, Not Detached
+
+The minimum contract is *cross-platform non-blocking spawn* with explicitly
+documented ownership and lifetime semantics.
+
+* On UNIX, a child spawned via ``subprocess.Popen`` with default flags
+  normally survives its parent when the parent exits normally.
+* On Windows, true cross-platform survival after parent exit is **not**
+  guaranteed without extra ``DETACHED_PROCESS`` creation flags.
+* M1-2B does **not** implement an OS-specific process-manager palace,
+  polling daemon, job registry, or cross-platform detachment mechanism.
+
+The guarantee is: ``spawn_component`` returns immediately with a
+``SpawnedLaunch`` handle.  The child runs independently; ZeAlfie does not
+monitor or manage it after spawn.  If guaranteed survival after ZeAlfie
+shutdown is required, a future milestone (e.g. M1-2C) may add platform-
+specific detachment or a lightweight process supervisor.
+
+### Synchronous vs Non-Blocking Launch
+
+| Mechanism | Function | Blocking? | Use Case |
+|-----------|----------|-----------|----------|
+| ``execute_launch_plan`` | Blocks until child exits | Yes | Tests, diagnostics, CLI ``launch`` |
+| ``spawn_launch_plan`` | Returns ``SpawnedLaunch`` immediately | No | GUI-triggered launch |
+| ``launch_component`` | Service wrapper for ``execute_launch_plan`` | Yes | Synchronous component launch |
+| ``spawn_component`` | Service wrapper for ``spawn_launch_plan`` | No | Non-blocking component launch |
+
+Both exist side-by-side.  ``execute_launch_plan`` / ``launch_component`` are
+preserved for synchronous use cases (tests, diagnostics, CLI command).
+
+### Public API
+
+**Low-level executor** (``zealfie.launching.executor``):
+
+* ``SpawnedLaunch`` — frozen dataclass with ``component_id``, ``pid``,
+  optional ``executable`` and ``command`` tuple.
+* ``spawn_launch_plan(plan, *, env_overrides=None, stdin=None,
+  stdout=None, stderr=None)`` — calls ``subprocess.Popen`` with
+  ``shell=False`` and a structured list command.  Returns immediately
+  with a ``SpawnedLaunch``.  Wraps ``OSError`` as ``LaunchError``.
+
+**Service layer** (``ZeAlfieService``):
+
+* ``spawn_component(component_id, *, env_overrides=None, stdin=None,
+  stdout=None, stderr=None)`` — prepares a launch plan then spawns it.
+  Returns a ``SpawnedLaunch`` handle immediately.
+
+**Application layer** (``zealfie.app``):
+
+* Re-exports ``SpawnedLaunch`` so GUI consumers import from the
+  application layer.
+
+### Stdout / Stderr Policy
+
+* Default: ``stdin=None``, ``stdout=None``, ``stderr=None``
+  (inherit parent fds).
+* ``stdout=PIPE`` and ``stderr=PIPE`` are **not** default and are
+  documented as dangerous without dedicated reader threads.
+* Callers may pass ``stdin=subprocess.DEVNULL`` to suppress child stdin,
+  or ``stdout=subprocess.DEVNULL`` / ``stderr=subprocess.DEVNULL`` for
+  silent processes.
+
+### Environment Policy
+
+* ``os.environ`` is **never** mutated globally.
+* When ``env_overrides`` is provided, ``os.environ.copy()`` is taken
+  inside the spawn function and overrides are merged into the copy;
+  this becomes the child's ``env`` argument to ``Popen``.
+* When ``env_overrides`` is ``None`` or empty, the child inherits the
+  parent environment directly (``env=None`` passed to ``Popen``).
+
+### ZeSolver Embedded-Host Rule
+
+When ``spawn_component`` is called with ``component_id="zesolver"``, the
+child environment automatically receives ``ZESOLVER_EMBEDDED_HOST=1``.
+This override:
+
+1. Is scoped to the child ``Popen`` call — ZeAlfie's own process never
+   becomes an embedded host.
+2. Is applied *before* caller-supplied ``env_overrides``, so a caller can
+   override it intentionally (e.g. ``ZESOLVER_EMBEDDED_HOST=0``).
+3. Applies only when ``component_id`` equals ``"zesolver"`` (exact match).
+   Other components receive no implicit environment overrides.
+
+### No Global Environment Mutation
+
+At no point is ``os.environ`` modified — not for the embedded-host rule,
+not for caller overrides, not for any default.  The child environment is
+always constructed from a copy or inherited via the ``Popen`` ``env``
+parameter.
+
+### Module Responsibility
+
+* ``zealfie.launching.executor`` — ``SpawnedLaunch`` + ``spawn_launch_plan``.
+* ``zealfie.launching.__init__`` — re-exports both.
+* ``zealfie.app.service.ZeAlfieService`` — ``spawn_component`` with
+  ZeSolver policy.
+* ``zealfie.app.__init__`` — re-exports ``SpawnedLaunch``.
+
+### Explicit Non-Goals for M1-2B
+
+* No GUI integration or PySide6 dependency.
+* No process lifecycle management, polling daemon, or job registry.
+* No cross-platform OS-level daemonisation.
+* No CLI surface for non-blocking launch (the ``launch`` command remains
+  synchronous; a future ``launch --detach`` flag may be added in M1-2C if
+  needed).
+* No changes to the ZeSolver repository or its resolver/deployment code.
+* No GPU provisioning, installation, or selective deployment changes.
+* No replacement of ``execute_launch_plan`` / ``launch_component`` — both
+  remain for synchronous use cases.

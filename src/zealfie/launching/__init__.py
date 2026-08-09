@@ -7,8 +7,10 @@ from .executor import (
     InvalidEntryPointScriptNameError,
     LaunchError,
     LaunchResult,
+    SpawnedLaunch,
     execute_launch_plan,
     resolve_script,
+    spawn_launch_plan,
 )
 from .plan import LaunchPlan
 
@@ -18,6 +20,8 @@ __all__ = [
     "LaunchError",
     "LaunchPlan",
     "LaunchResult",
+    "SpawnedLaunch",
     "execute_launch_plan",
     "resolve_script",
+    "spawn_launch_plan",
 ]

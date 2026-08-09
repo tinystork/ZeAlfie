@@ -34,6 +34,10 @@ from zealfie.products.state import (
     ProductStateReasonCode,
 )
 
+# M1-2B: SpawnedLaunch re-exported so that GUI consumers import from the
+# application layer.
+from zealfie.launching import SpawnedLaunch
+
 __all__ = [
     "ComponentNotInstalledError",
     "FULL_NAME",
@@ -48,6 +52,7 @@ __all__ = [
     "ProductState",
     "ProductStateReasonCode",
     "RuntimeStatus",
+    "SpawnedLaunch",
     "UnknownProductError",
     "ZeAlfieService",
     "collect_status",

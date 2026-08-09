@@ -5,6 +5,7 @@ M0-9.2: apply + rollback orchestration using existing runtime primitives.
 M0-9.3: CLI commands delegate to this service.
 M1-0A: runtime component launch (prepare_launch_plan, launch_component).
 M1-1C: shared runtime dependency resolution wired into plan_offline_deployment.
+M1-2B: non-blocking managed product launch (spawn_component).
 M1-2A: product catalog and product-shell read model (list_products, collect_product_state, get_product_state).
 """
 
@@ -23,8 +24,10 @@ from zealfie.launching import (
     EntryPointScriptNotFoundError,
     LaunchPlan,
     LaunchResult,
+    SpawnedLaunch,
     execute_launch_plan,
     resolve_script,
+    spawn_launch_plan,
 )
 from zealfie.products.catalog import (
     ProductCatalog,
@@ -109,6 +112,7 @@ class ZeAlfieService:
     ``prepare_launch_plan`` / ``launch_component`` for runtime launch
     (M1-0A).
 
+    M1-2B adds ``spawn_component`` for non-blocking launch.
     M1-2A adds ``list_products``, ``collect_product_state``, and
     ``get_product_state`` for the product-shell read model.
 
@@ -486,6 +490,78 @@ class ZeAlfieService:
         """
         plan = self.prepare_launch_plan(component_id)
         return execute_launch_plan(plan, timeout_seconds=timeout_seconds)
+
+    # ------------------------------------------------------------------
+    # M1-2B: spawn_component (non-blocking launch)
+    # ------------------------------------------------------------------
+
+    def spawn_component(
+        self,
+        component_id: str,
+        *,
+        env_overrides: dict[str, str] | None = None,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+    ) -> "SpawnedLaunch":
+        """Prepare and spawn *component_id* as a non-blocking subprocess.
+
+        Calls :meth:`prepare_launch_plan` then
+        :func:`~zealfie.launching.spawn_launch_plan`.  Returns
+        immediately with a :class:`SpawnedLaunch` handle; does **not**
+        wait for the child process to complete.
+
+        The child process inherits the parent environment.  Callers may
+        pass *env_overrides* to add extra variables scoped to the child.
+
+        **ZeSolver embedded-host rule:**
+        When *component_id* is ``"zesolver"``, the child environment
+        automatically receives ``ZESOLVER_EMBEDDED_HOST=1``.  This
+        override is scoped to the child ``Popen`` call.  ZeAlfie's own
+        process never becomes an embedded host.  The override is applied
+        *before* any caller-supplied *env_overrides*, so a caller can
+        override it intentionally.
+
+        Parameters
+        ----------
+        component_id:
+            The trusted component to spawn.
+        env_overrides:
+            Extra environment variables for the child process.
+        stdin:
+            Child stdin fd.  ``None`` inherits the parent stdin.
+        stdout:
+            Child stdout fd.  ``None`` inherits the parent stdout.
+        stderr:
+            Child stderr fd.  ``None`` inherits the parent stderr.
+
+        Returns
+        -------
+        SpawnedLaunch
+
+        Raises
+        ------
+        UnknownComponentError
+            If *component_id* is not in the trusted registry.
+        LaunchPreparationError
+            (or subclass) If preparation fails.
+        """
+        plan = self.prepare_launch_plan(component_id)
+
+        # Build env overrides, starting with the ZeSolver rule.
+        merged: dict[str, str] = {}
+        if component_id == "zesolver":
+            merged["ZESOLVER_EMBEDDED_HOST"] = "1"
+        if env_overrides:
+            merged.update(env_overrides)
+
+        return spawn_launch_plan(
+            plan,
+            env_overrides=merged if merged else None,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     # ------------------------------------------------------------------
     # M1-2A: Product Shell — read model
