@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from zealfie.building import build_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.runtime import (
@@ -38,19 +40,6 @@ WITNESS_DEF = ComponentDefinition(
     launch_entry_points=(EntryPointContract("console_scripts", "zewitness"),),
 )
 
-
-@pytest.fixture(scope="session")
-def witness_v1(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parents[1] / "fixtures" / "witness_component"
-    t = tmp_path_factory.mktemp("v1-wheel")
-    return build_wheel(d, output_dir=t)
-
-
-@pytest.fixture(scope="session")
-def witness_v2(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parents[1] / "fixtures" / "witness_component_v2"
-    t = tmp_path_factory.mktemp("v2-wheel")
-    return build_wheel(d, output_dir=t)
 
 
 # ---------------------------------------------------------------------------

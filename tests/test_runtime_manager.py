@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.zealfie_slow
+
 from zealfie.building import build_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.runtime import (
@@ -45,7 +47,6 @@ def witness_wheel(tmp_path_factory) -> Path:
     d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
     t = tmp_path_factory.mktemp("mgr-wheel")
     return build_wheel(d, output_dir=t)
-
 
 # -- create --------------------------------------------------------------
 

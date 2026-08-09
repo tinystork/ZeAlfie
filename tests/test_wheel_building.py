@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.zealfie_slow
+
 from zealfie.building import (
     InspectedWheel,
     build_wheel,

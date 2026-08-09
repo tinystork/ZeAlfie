@@ -84,12 +84,6 @@ platform_tag = "{platform_tag2}"
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def witness_wheel(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
-    t = tmp_path_factory.mktemp("7b-wheel")
-    return build_wheel(d, output_dir=t)
-
 
 @pytest.fixture()
 def witness_registry() -> ComponentRegistry:
@@ -1049,6 +1043,7 @@ def test_verify_correct_artifact_index_multi(witness_wheel, witness_registry):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_contract_failure_preserves_runtime(tmp_path, witness_wheel, witness_registry):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -1075,6 +1070,7 @@ def test_contract_failure_preserves_runtime(tmp_path, witness_wheel, witness_reg
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_release_to_transaction_with_candidate_slot(tmp_path, witness_wheel, witness_registry):
     """Full cycle using explicit candidate slot (never active)."""
     layout = RuntimeLayout(root=tmp_path / "rt")
@@ -1175,7 +1171,7 @@ def test_multi_artifact_with_explicit_index_works(witness_wheel, witness_registr
     assert va.component_id == "zewitness"
 
 
-def test_adversarial_artifact0_wrong_host_bypassed_default(witness_wheel, witness_registry):
+def test_adversarial_artifact0_wrong_host_bypassed_default(tmp_path, witness_wheel, witness_registry):
     """Adversarial: artifact 0 tagged win_amd64, no index → reject.
 
     Even though artifact 0 would be valid on Windows, on Linux the
@@ -1185,6 +1181,8 @@ def test_adversarial_artifact0_wrong_host_bypassed_default(witness_wheel, witnes
     sha = _sha256(witness_wheel)
     size = witness_wheel.stat().st_size
     fn = witness_wheel.name
+    root = tmp_path / "release"
+    _copy_wheel_as(witness_wheel, root, fn)
 
     # Artifact 0 is tagged win_amd64 (incompatible on Linux).
     # Artifact 1 is tagged linux_x86_64 (correct for Linux).
@@ -1213,17 +1211,16 @@ def test_adversarial_artifact0_wrong_host_bypassed_default(witness_wheel, witnes
 
     # Without explicit index → MUST reject.
     with pytest.raises(ArtifactRejectionError, match="explicit artifact_index required"):
-        verify_artifact(manifest, registry=witness_registry, artifact_root=witness_wheel.parent)
+        verify_artifact(manifest, registry=witness_registry, artifact_root=root)
 
-    import shutil
-    shutil.copy2(witness_wheel, witness_wheel.parent / "adversarial-copy.whl")
+    _copy_wheel_as(witness_wheel, root, "adversarial-copy.whl")
     # With explicit index 1 (correct for Linux host) → succeeds.
     host = HostTarget.from_current_host()
     idx = select_artifact(manifest, host)
     assert idx == 1  # the linux one
     va = verify_artifact(
         manifest, registry=witness_registry,
-        artifact_root=witness_wheel.parent, artifact_index=idx,
+        artifact_root=root, artifact_index=idx,
     )
     assert va.component_id == "zewitness"
 

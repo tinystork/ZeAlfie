@@ -30,7 +30,6 @@ def witness_wheel(tmp_path_factory) -> Path:
     t = tmp_path_factory.mktemp("6b2-wheel")
     return build_wheel(d, output_dir=t)
 
-
 # ===================================================================
 # 1. active_slot mandatory when file exists
 # ===================================================================
@@ -68,6 +67,7 @@ def test_active_slot_valid_is_readable(tmp_path):
     assert st.active_slot_id == "rt-abc"
 
 
+@pytest.mark.zealfie_slow
 def test_transaction_with_null_active_slot_rejected(tmp_path, witness_wheel):
     """Activation must refuse when active.json has active_slot=null."""
     layout = RuntimeLayout(root=tmp_path / "rt")

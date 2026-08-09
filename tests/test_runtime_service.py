@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.zealfie_slow
+
 from zealfie.app import OfflineReleaseError, ZeAlfieService
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.components.registry import ComponentRegistry
@@ -75,32 +77,6 @@ def _absent_status() -> RuntimeStatus:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-
-@pytest.fixture(scope="session")
-def witness_wheel(tmp_path_factory) -> Path:
-    """Build the zealfie-witness wheel once per session."""
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
-    t = tmp_path_factory.mktemp("svc-wheel")
-    from zealfie.building import build_wheel
-    return build_wheel(d, output_dir=t)
-
-
-@pytest.fixture(scope="session")
-def witness2_wheel(tmp_path_factory) -> Path:
-    """Build the zealfie-witness2 wheel once per session."""
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_second"
-    t = tmp_path_factory.mktemp("svc-wheel2")
-    from zealfie.building import build_wheel
-    return build_wheel(d, output_dir=t)
-
-
-@pytest.fixture(scope="session")
-def witness_v2_wheel(tmp_path_factory) -> Path:
-    """Build the zealfie-witness v0.0.2 wheel once per session."""
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component_v2"
-    t = tmp_path_factory.mktemp("svc-wheel-v2")
-    from zealfie.building import build_wheel
-    return build_wheel(d, output_dir=t)
 
 
 WITNESS_DEF = ComponentDefinition(

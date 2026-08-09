@@ -32,12 +32,12 @@ def witness_wheel(tmp_path_factory) -> Path:
     t = tmp_path_factory.mktemp("6b-wheel")
     return build_wheel(d, output_dir=t)
 
-
 # ===================================================================
 # 1. TOCTOU: revalidate at activation time
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_candidate_python_removed_after_validation_blocks_activation(
     tmp_path, witness_wheel
 ):
@@ -64,6 +64,7 @@ def test_candidate_python_removed_after_validation_blocks_activation(
     assert layout.active_pointer.read_bytes() == pointer_before
 
 
+@pytest.mark.zealfie_slow
 def test_candidate_component_removed_after_validation_blocks_activation(
     tmp_path, witness_wheel
 ):
@@ -93,6 +94,7 @@ def test_candidate_component_removed_after_validation_blocks_activation(
     assert layout.active_pointer.read_bytes() == pointer_before
 
 
+@pytest.mark.zealfie_slow
 def test_create_uses_validation_path(tmp_path):
     """create() must use the same prepare → validate → activate flow."""
     layout = RuntimeLayout(root=tmp_path / "rt")
@@ -185,6 +187,7 @@ def test_validate_slot_id_accepts_valid():
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_broken_state_forbids_discard(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -200,6 +203,7 @@ def test_broken_state_forbids_discard(tmp_path, witness_wheel):
     assert layout.slot_path(slot_a).is_dir()
 
 
+@pytest.mark.zealfie_slow
 def test_broken_state_forbids_discard_orphan(tmp_path):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -222,6 +226,7 @@ def test_broken_state_forbids_discard_orphan(tmp_path):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_pointer_unchanged_on_toctou_python_removed(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)

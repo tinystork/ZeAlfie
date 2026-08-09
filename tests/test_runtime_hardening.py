@@ -22,6 +22,7 @@ from zealfie.runtime import (
     probe_runtime_distribution,
 )
 
+
 WITNESS_DEF = ComponentDefinition(
     "zewitness", "ZeWitness", "zealfie-witness",
     (EntryPointContract("console_scripts", "zewitness"),),
@@ -47,18 +48,13 @@ MULTI_DEF = ComponentDefinition(
 )
 
 
-@pytest.fixture(scope="session")
-def witness_wheel(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
-    t = tmp_path_factory.mktemp("harden-wheel")
-    return build_wheel(d, output_dir=t)
-
 
 # ===================================================================
 # 1. Contract propagation (M0-5B regression)
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_wrong_distribution_rejected_before_pip(tmp_path, witness_wheel, monkeypatch):
     """Wheel with wrong distribution name -> CONTRACT_MISMATCH, pip not called."""
     import subprocess as sp_mod
@@ -80,6 +76,7 @@ def test_wrong_distribution_rejected_before_pip(tmp_path, witness_wheel, monkeyp
     assert not pip_called
 
 
+@pytest.mark.zealfie_slow
 def test_wrong_entry_point_group_rejected(tmp_path, witness_wheel, monkeypatch):
     import subprocess as sp_mod
     pip_called = False
@@ -100,6 +97,7 @@ def test_wrong_entry_point_group_rejected(tmp_path, witness_wheel, monkeypatch):
     assert not pip_called
 
 
+@pytest.mark.zealfie_slow
 def test_wrong_entry_point_name_rejected(tmp_path, witness_wheel, monkeypatch):
     import subprocess as sp_mod
     pip_called = False
@@ -120,6 +118,7 @@ def test_wrong_entry_point_name_rejected(tmp_path, witness_wheel, monkeypatch):
     assert not pip_called
 
 
+@pytest.mark.zealfie_slow
 def test_multi_contract_at_least_one_match(tmp_path, witness_wheel):
     rt = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
     rt.create()
@@ -127,6 +126,7 @@ def test_multi_contract_at_least_one_match(tmp_path, witness_wheel):
     assert r.outcome == InstallOutcome.INSTALLED
 
 
+@pytest.mark.zealfie_slow
 def test_probe_error_fail_closed(tmp_path, witness_wheel, monkeypatch):
     rt = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
     rt.create()
@@ -138,6 +138,7 @@ def test_probe_error_fail_closed(tmp_path, witness_wheel, monkeypatch):
     assert r.outcome == InstallOutcome.FAILED
 
 
+@pytest.mark.zealfie_slow
 def test_probe_timeout_fail_closed(tmp_path, witness_wheel, monkeypatch):
     import subprocess as sp
     rt = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
@@ -149,6 +150,7 @@ def test_probe_timeout_fail_closed(tmp_path, witness_wheel, monkeypatch):
     assert r.outcome == InstallOutcome.FAILED
 
 
+@pytest.mark.zealfie_slow
 def test_version_mismatch_reported(tmp_path, witness_wheel, monkeypatch):
     rt = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
     rt.create()
@@ -224,6 +226,7 @@ def test_slot_path_symlink_escape(tmp_path):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_rollback_no_previous(tmp_path, witness_wheel):
     rt = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
     rt.create()
@@ -232,6 +235,7 @@ def test_rollback_no_previous(tmp_path, witness_wheel):
     assert rb.reason_code == RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND
 
 
+@pytest.mark.zealfie_slow
 def test_rollback_target_missing(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -258,6 +262,7 @@ def test_rollback_target_missing(tmp_path, witness_wheel):
     assert rt.status().active_slot_id == slot_b  # unchanged
 
 
+@pytest.mark.zealfie_slow
 def test_rollback_target_broken(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -288,6 +293,7 @@ def test_rollback_target_broken(tmp_path, witness_wheel):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_broken_state_blocks_activation(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -311,6 +317,7 @@ def test_broken_state_blocks_activation(tmp_path, witness_wheel):
     assert layout.active_pointer.read_text() == "not json"
 
 
+@pytest.mark.zealfie_slow
 def test_corrupt_state_during_transaction_rejected(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -338,6 +345,7 @@ def test_corrupt_state_during_transaction_rejected(tmp_path, witness_wheel):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_pointer_unchanged_on_contract_mismatch(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -348,6 +356,7 @@ def test_pointer_unchanged_on_contract_mismatch(tmp_path, witness_wheel):
     assert layout.active_pointer.read_bytes() == pointer_before
 
 
+@pytest.mark.zealfie_slow
 def test_pointer_unchanged_on_discard_active(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -359,6 +368,7 @@ def test_pointer_unchanged_on_discard_active(tmp_path, witness_wheel):
     assert layout.active_pointer.read_bytes() == pointer_before
 
 
+@pytest.mark.zealfie_slow
 def test_pointer_unchanged_on_bad_slot_id(tmp_path):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -375,6 +385,7 @@ def test_pointer_unchanged_on_bad_slot_id(tmp_path):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_bad_candidate_preserves_active(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)

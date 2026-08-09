@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+
 from zealfie.runtime import (
     RuntimeLayout,
     RuntimeReasonCode,
@@ -23,6 +24,7 @@ def test_status_absent_no_pointer(tmp_path: Path) -> None:
     assert s.state == RuntimeState.ABSENT
 
 
+@pytest.mark.zealfie_slow
 def test_status_ready_after_create(tmp_path: Path) -> None:
     rt = SharedRuntime(layout=RuntimeLayout(root=tmp_path / "rt"))
     rt.create()
@@ -35,6 +37,7 @@ def test_status_ready_after_create(tmp_path: Path) -> None:
     assert s.python_version is not None
 
 
+@pytest.mark.zealfie_slow
 def test_create_idempotent(tmp_path: Path) -> None:
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -87,6 +90,7 @@ def test_create_on_broken_raises(tmp_path: Path) -> None:
         rt.create()
 
 
+@pytest.mark.zealfie_slow
 def test_rollback_no_target(tmp_path: Path) -> None:
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -95,6 +99,7 @@ def test_rollback_no_target(tmp_path: Path) -> None:
     assert rb.reason_code == RuntimeReasonCode.ROLLBACK_TARGET_NOT_FOUND
 
 
+@pytest.mark.zealfie_slow
 def test_discard_active_refused(tmp_path: Path) -> None:
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -104,6 +109,7 @@ def test_discard_active_refused(tmp_path: Path) -> None:
     assert result.reason_code == RuntimeReasonCode.SLOT_DISCARD_REFUSED
 
 
+@pytest.mark.zealfie_slow
 def test_discard_previous_refused(tmp_path: Path) -> None:
     """After a rollback, previous slot cannot be discarded."""
     layout = RuntimeLayout(root=tmp_path / "rt")

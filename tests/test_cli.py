@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+
 import zealfie.cli as cli
 from zealfie import get_version
 from zealfie.components.model import ComponentDefinition, ComponentStatus, EntryPointContract, ReasonCode
@@ -441,6 +442,7 @@ def test_runtime_plan_offline_error_to_stderr(monkeypatch):
         sys.stderr = backup
 
 
+@pytest.mark.zealfie_slow
 def test_runtime_plan_invalid_utf8_manifest_to_stderr_no_traceback(
     tmp_path, monkeypatch, witness_wheel_cli
 ):
@@ -693,30 +695,6 @@ def test_plan_does_not_create_runtime(tmp_path, monkeypatch):
 # ===========================================================================
 
 
-# Session-scoped witness wheels
-@pytest.fixture(scope="session")
-def witness_wheel_cli(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
-    t = tmp_path_factory.mktemp("cli-wheel")
-    from zealfie.building import build_wheel
-    return build_wheel(d, output_dir=t)
-
-
-@pytest.fixture(scope="session")
-def witness_v2_wheel_cli(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component_v2"
-    t = tmp_path_factory.mktemp("cli-wheel-v2")
-    from zealfie.building import build_wheel
-    return build_wheel(d, output_dir=t)
-
-
-@pytest.fixture(scope="session")
-def witness2_wheel_cli(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_second"
-    t = tmp_path_factory.mktemp("cli-wheel2")
-    from zealfie.building import build_wheel
-    return build_wheel(d, output_dir=t)
-
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -797,6 +775,7 @@ def _registry_for_ids(*component_ids: str) -> ComponentRegistry:
     return ComponentRegistry(defs)
 
 
+@pytest.mark.zealfie_slow
 def test_witness_e2e_plan_apply_rollback_via_cli(
     tmp_path, witness_wheel_cli, witness_v2_wheel_cli, monkeypatch
 ):
@@ -900,6 +879,7 @@ def test_witness_e2e_plan_apply_rollback_via_cli(
     assert probe["version"] == "0.0.1"
 
 
+@pytest.mark.zealfie_slow
 def test_witness_e2e_plan_then_apply_fresh_not_persisted(
     tmp_path, witness_wheel_cli, monkeypatch
 ):
@@ -943,6 +923,7 @@ def test_witness_e2e_plan_then_apply_fresh_not_persisted(
     assert probe["version"] == "0.0.1"
 
 
+@pytest.mark.zealfie_slow
 def test_witness_e2e_multi_component_plan(
     tmp_path, witness_wheel_cli, witness2_wheel_cli, monkeypatch
 ):
@@ -992,6 +973,7 @@ def test_runtime_status_absent(tmp_path, monkeypatch):
     assert str(layout.root) in output
 
 
+@pytest.mark.zealfie_slow
 def test_runtime_status_ready(tmp_path, monkeypatch):
     """CLI runtime status on a READY runtime."""
     layout = RuntimeLayout(root=tmp_path / "rt")
@@ -1005,6 +987,7 @@ def test_runtime_status_ready(tmp_path, monkeypatch):
     assert "State: READY" in output
 
 
+@pytest.mark.zealfie_slow
 def test_runtime_create_idempotent(tmp_path, monkeypatch):
     """CLI runtime create is idempotent."""
     layout = RuntimeLayout(root=tmp_path / "rt")

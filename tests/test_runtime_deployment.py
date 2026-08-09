@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.zealfie_slow
+
 from zealfie.building import build_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.components.registry import ComponentRegistry
@@ -63,26 +65,6 @@ WITNESS2_DEF = ComponentDefinition(
 # Session-scoped wheel fixtures
 # ---------------------------------------------------------------------------
 
-
-@pytest.fixture(scope="session")
-def witness_v1(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component"
-    t = tmp_path_factory.mktemp("dep-v1-wheel")
-    return build_wheel(d, output_dir=t)
-
-
-@pytest.fixture(scope="session")
-def witness_v2(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_component_v2"
-    t = tmp_path_factory.mktemp("dep-v2-wheel")
-    return build_wheel(d, output_dir=t)
-
-
-@pytest.fixture(scope="session")
-def witness_second(tmp_path_factory) -> Path:
-    d = Path(__file__).resolve().parent / "fixtures" / "witness_second"
-    t = tmp_path_factory.mktemp("dep-w2-wheel")
-    return build_wheel(d, output_dir=t)
 
 
 # ---------------------------------------------------------------------------

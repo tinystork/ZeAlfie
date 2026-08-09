@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from zealfie.building import build_wheel
 from zealfie.components.manifest import load_component_definitions_from_text
 from zealfie.components.model import ComponentDefinition
@@ -54,12 +56,6 @@ def zealfie_wheel(tmp_path_factory) -> Path:
     tmp = tmp_path_factory.mktemp("int-zealfie-wheel")
     return build_wheel(project_root, output_dir=tmp)
 
-
-@pytest.fixture(scope="session")
-def witness_wheel(tmp_path_factory) -> Path:
-    witness_dir = Path(__file__).resolve().parents[1] / "fixtures" / "witness_component"
-    tmp = tmp_path_factory.mktemp("int-witness-wheel")
-    return build_wheel(witness_dir, output_dir=tmp)
 
 
 @pytest.fixture(scope="session")

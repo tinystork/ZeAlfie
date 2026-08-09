@@ -30,7 +30,6 @@ def witness_wheel(tmp_path_factory) -> Path:
     t = tmp_path_factory.mktemp("6b1-wheel")
     return build_wheel(d, output_dir=t)
 
-
 # ===================================================================
 # 1. Non-object JSON roots → BROKEN
 # ===================================================================
@@ -83,6 +82,7 @@ def test_state_json_bool_root_is_broken(tmp_path):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_rollback_on_corrupted_state_is_broken(tmp_path, witness_wheel):
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
@@ -113,6 +113,7 @@ def test_rollback_on_absent_state_is_absent_not_broken(tmp_path):
 # ===================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_create_passes_validation(tmp_path):
     """create() must succeed via the validate_candidate path."""
     layout = RuntimeLayout(root=tmp_path / "rt")
@@ -124,6 +125,7 @@ def test_create_passes_validation(tmp_path):
     assert layout.active_pointer.is_file()
 
 
+@pytest.mark.zealfie_slow
 def test_create_validation_failure_no_active_pointer(tmp_path, monkeypatch):
     """If validation fails during create(), no active pointer is written."""
     layout = RuntimeLayout(root=tmp_path / "rt")
