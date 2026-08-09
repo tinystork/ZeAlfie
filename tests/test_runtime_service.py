@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import textwrap
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -1607,3 +1608,469 @@ def test_prepare_launch_plan_installed_true_valid_probe_passes(monkeypatch, tmp_
 
     plan = service.prepare_launch_plan("zewitness")
     assert plan.component_id == "zewitness"
+
+
+# ===========================================================================
+# M1-1C: Shared runtime dependency resolution in offline release flow
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_test_wheel(
+    output: Path,
+    name: str,
+    version: str,
+    *,
+    requires_dist: list[str] | None = None,
+    provides_extra: list[str] | None = None,
+) -> Path:
+    """Build a minimal test wheel with optional Requires-Dist and Provides-Extra."""
+    safe_name = name.replace("-", "_").replace(".", "_")
+    wheel_name = f"{safe_name}-{version}-py3-none-any.whl"
+    wheel_path = output / wheel_name
+    dist_info = f"{safe_name}-{version}.dist-info"
+
+    wheelfile = (
+        "Wheel-Version: 1.0\n"
+        "Generator: test\n"
+        "Root-Is-Purelib: true\n"
+        "Tag: py3-none-any\n"
+    )
+    metadata = f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n"
+    if requires_dist:
+        for req in requires_dist:
+            metadata += f"Requires-Dist: {req}\n"
+    if provides_extra:
+        for extra in provides_extra:
+            metadata += f"Provides-Extra: {extra}\n"
+    record = (
+        f"{dist_info}/WHEEL,,\n"
+        f"{dist_info}/METADATA,,\n"
+        f"{dist_info}/RECORD,,\n"
+    )
+    with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{dist_info}/WHEEL", wheelfile)
+        zf.writestr(f"{dist_info}/METADATA", metadata)
+        zf.writestr(f"{dist_info}/RECORD", record)
+    return wheel_path
+
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_manifest_entry(
+    release_dir: Path,
+    component_id: str,
+    version: str,
+    filename: str,
+    sha256_val: str,
+    size_val: int,
+    *,
+    python_tag: str = "py3",
+    abi_tag: str = "none",
+    platform_tag: str = "any",
+) -> None:
+    """Write a single-artifact component release manifest."""
+    toml_text = textwrap.dedent(f"""\
+        schema_version = 1
+        component_id = "{component_id}"
+        version = "{version}"
+
+        [[artifacts]]
+        filename = "{filename}"
+        size = {size_val}
+        sha256 = "{sha256_val}"
+        python_tag = "{python_tag}"
+        abi_tag = "{abi_tag}"
+        platform_tag = "{platform_tag}"
+    """)
+    (release_dir / f"{component_id}.toml").write_text(toml_text)
+
+
+def _make_component_def(
+    component_id: str,
+    distribution_name: str,
+    *,
+    launch_entry_points: tuple[EntryPointContract, ...] = (),
+    required_extras: tuple[str, ...] = (),
+) -> ComponentDefinition:
+    """Create a ComponentDefinition with optional entry points and extras."""
+    return ComponentDefinition(
+        component_id=component_id,
+        display_name=component_id.title(),
+        distribution_name=distribution_name,
+        launch_entry_points=launch_entry_points,
+        required_extras=required_extras,
+    )
+
+
+# ---------------------------------------------------------------------------
+# M1-1C Test 1: Plan with dependency lock
+# ---------------------------------------------------------------------------
+
+@pytest.mark.zealfie_slow
+def test_plan_with_dependency_lock_resolves_primary_and_dependency(
+    tmp_path,
+) -> None:
+    """Planning a release dir with a component wheel declaring Requires-Dist
+    and a local dependency wheel produces a DeploymentPlan with a non-None
+    dependency_lock containing both primary and dependency entries."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    # Build a dependency wheel
+    dep_wheel = _build_test_wheel(rd, "py-lib", "2.0.0")
+
+    # Build a component wheel that depends on py-lib
+    comp_wheel = _build_test_wheel(
+        rd, "test-comp", "1.0.0", requires_dist=["py-lib>=2.0"],
+    )
+
+    # Write manifest for the component
+    sha = _sha256_of(comp_wheel)
+    size = comp_wheel.stat().st_size
+    _write_manifest_entry(
+        rd, "testcomp", "1.0.0", comp_wheel.name, sha, size,
+    )
+
+    comp_def = _make_component_def("testcomp", "test-comp")
+    registry = ComponentRegistry([comp_def])
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    plan = service.plan_offline_deployment(rd)
+
+    # The plan must carry a dependency_lock.
+    assert plan.dependency_lock is not None, (
+        "Expected a non-None dependency_lock"
+    )
+    lock = plan.dependency_lock
+
+    # The lock must contain both the primary component and its dependency.
+    assert len(lock) == 2, f"Expected 2 locked entries, got {len(lock)}"
+
+    # Primary names: entries with no required_by
+    primaries = lock.primary_names
+    assert "test-comp" in primaries, f"Expected test-comp in primaries, got {primaries}"
+
+    # Dependency names
+    deps = lock.dependency_names
+    assert "py-lib" in deps, f"Expected py-lib in dependencies, got {deps}"
+
+    # The primary entry has the right version and wheel path.
+    primary_dep = lock["test-comp"]
+    assert primary_dep.version == "1.0.0"
+    assert primary_dep.wheel_path.resolve() == comp_wheel.resolve()
+
+    # The dependency entry has the right version and references the primary.
+    dep_dep = lock["py-lib"]
+    assert dep_dep.version == "2.0.0"
+    assert dep_dep.wheel_path.resolve() == dep_wheel.resolve()
+    assert "test-comp" in dep_dep.required_by
+
+
+# ---------------------------------------------------------------------------
+# M1-1C Test 2: Apply with dependency lock installs both
+# ---------------------------------------------------------------------------
+
+@pytest.mark.zealfie_slow
+def test_apply_with_dependency_lock_installs_both(tmp_path) -> None:
+    """Applying a release dir with a component + dependency wheel installs
+    both the component and the dependency into the active shared runtime."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    # Build wheels
+    dep_wheel = _build_test_wheel(rd, "py-lib", "2.0.0")
+    comp_wheel = _build_test_wheel(
+        rd, "test-comp", "1.0.0", requires_dist=["py-lib>=2.0"],
+    )
+    sha = _sha256_of(comp_wheel)
+    size = comp_wheel.stat().st_size
+    _write_manifest_entry(
+        rd, "testcomp", "1.0.0", comp_wheel.name, sha, size,
+    )
+
+    comp_def = _make_component_def("testcomp", "test-comp")
+    registry = ComponentRegistry([comp_def])
+
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    runtime = SharedRuntime(layout=layout)
+    runtime.create()
+
+    service = ZeAlfieService(registry=registry, runtime=runtime)
+    result = service.apply_offline_deployment(rd)
+
+    assert result.success is True, f"Apply failed: {result.reason}"
+    assert result.active_slot_id is not None
+
+    # Verify both component and dependency are installed.
+    active_python = runtime.python()
+    assert active_python is not None
+
+    probe_comp = probe_runtime_distribution(active_python, "test-comp")
+    assert probe_comp["installed"] is True
+    assert probe_comp["version"] == "1.0.0"
+
+    probe_dep = probe_runtime_distribution(active_python, "py-lib")
+    assert probe_dep["installed"] is True
+    assert probe_dep["version"] == "2.0.0"
+
+
+# ---------------------------------------------------------------------------
+# M1-1C Test 3: Missing dependency wheel → OfflineReleaseError
+# ---------------------------------------------------------------------------
+
+def test_missing_dependency_wheel_raises_offline_release_error(
+    tmp_path,
+) -> None:
+    """When a component wheel Requires-Dist a package not present in the
+    release directory, plan_offline_deployment raises OfflineReleaseError
+    before any runtime mutation."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    # Component wheel depends on py-lib, but only the component wheel is present
+    comp_wheel = _build_test_wheel(
+        rd, "test-comp", "1.0.0", requires_dist=["py-lib>=2.0"],
+    )
+    sha = _sha256_of(comp_wheel)
+    size = comp_wheel.stat().st_size
+    _write_manifest_entry(
+        rd, "testcomp", "1.0.0", comp_wheel.name, sha, size,
+    )
+
+    comp_def = _make_component_def("testcomp", "test-comp")
+    registry = ComponentRegistry([comp_def])
+
+    # Use a real runtime to verify active state is unchanged
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    runtime = SharedRuntime(layout=layout)
+    runtime.create()
+    active_before = runtime.status().active_slot_id
+
+    service = ZeAlfieService(registry=registry, runtime=runtime)
+
+    # Plan should fail
+    with pytest.raises(
+        OfflineReleaseError,
+        match="shared runtime dependency resolution failed",
+    ):
+        service.plan_offline_deployment(rd)
+
+    # Apply should also fail (it re-plans internally)
+    with pytest.raises(
+        OfflineReleaseError,
+        match="shared runtime dependency resolution failed",
+    ):
+        service.apply_offline_deployment(rd)
+
+    # Active slot must be unchanged — no mutation occurred.
+    assert runtime.status().active_slot_id == active_before
+
+
+# ---------------------------------------------------------------------------
+# M1-1C Test 4: Required extras flow to resolver
+# ---------------------------------------------------------------------------
+
+def test_required_extras_passed_to_resolver(monkeypatch) -> None:
+    """Required extras from ComponentDefinition.required_extras are passed
+    to resolve_runtime_dependencies as part of the primary_wheels extras."""
+    from zealfie.app import service as svc_mod
+    from zealfie.dependencies import RuntimeLock
+
+    # Build a synthetic empty lock to return from the monkeypatched resolver.
+    fake_lock = RuntimeLock(locked={})
+
+    captured_primary_wheels: list[tuple[Path, frozenset[str]]] = []
+
+    def fake_resolve(primary_wheels, wheelhouse, **kwargs):
+        nonlocal captured_primary_wheels
+        captured_primary_wheels = list(primary_wheels)
+        return fake_lock
+
+    monkeypatch.setattr(svc_mod, "resolve_runtime_dependencies", fake_resolve)
+
+    # Create component with required_extras.
+    comp_def = ComponentDefinition(
+        component_id="testcomp",
+        display_name="TestComp",
+        distribution_name="test-comp",
+        launch_entry_points=(),
+        required_extras=("feature", "gpu"),
+    )
+
+    # Monkeypatch resolve_offline_release_set below so this focused test
+    # avoids real release-dir filesystem setup.
+    rd = Path("/fake/rd")
+    service = ZeAlfieService(
+        registry=ComponentRegistry([comp_def]),
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    # Monkeypatch resolve_offline_release_set to return a synthetic state
+    # with the extras flowing from the definition.  This avoids needing a real
+    # release directory with manifests/wheels for this focused test.
+    from zealfie.releases.model import VerifiedArtifact
+    from zealfie.runtime.planning import DesiredComponent, DesiredRuntimeState
+
+    fake_artifact = VerifiedArtifact(
+        component_id="testcomp",
+        version="1.0.0",
+        path=Path("/fake/rd/test_comp-1.0.0-py3-none-any.whl"),
+        size=1234,
+        sha256="a" * 64,
+        distribution_name="test-comp",
+        wheel_version="1.0.0",
+    )
+    fake_state = DesiredRuntimeState(
+        components=(DesiredComponent("testcomp", "1.0.0", fake_artifact),)
+    )
+
+    monkeypatch.setattr(
+        svc_mod.ZeAlfieService,
+        "resolve_offline_release_set",
+        lambda self, rd: fake_state,
+    )
+
+    plan = service.plan_offline_deployment(rd)
+    assert plan.dependency_lock is fake_lock
+
+    # Verify the primary_wheels extras match required_extras
+    assert len(captured_primary_wheels) == 1
+    _, extras = captured_primary_wheels[0]
+    assert extras == frozenset({"feature", "gpu"}), (
+        f"Expected extras {{'feature','gpu'}}, got {extras}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M1-1C Test 5: Component with no dependencies (backward compatibility)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.zealfie_slow
+def test_component_with_no_dependencies_plans_and_applies_successfully(
+    tmp_path, witness_wheel,
+) -> None:
+    """A component with no external dependencies still plans/applies
+    successfully, and the plan has a RuntimeLock with only primary entries."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    fn = "zealfie_witness-0.0.1-py3-none-any.whl"
+    w1 = _copy_wheel_as(witness_wheel, rd, fn)
+    _write_manifest(rd, "zewitness", "0.0.1", fn, _sha256(w1), w1.stat().st_size)
+
+    registry = ComponentRegistry([WITNESS_DEF])
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    runtime = SharedRuntime(layout=layout)
+    runtime.create()
+
+    service = ZeAlfieService(registry=registry, runtime=runtime)
+
+    # Plan: must produce a non-None dependency_lock.
+    plan = service.plan_offline_deployment(rd)
+    assert plan.dependency_lock is not None, (
+        "Expected a non-None dependency_lock even with no dependencies"
+    )
+    lock = plan.dependency_lock
+    assert len(lock) >= 1
+    # No dependency entries — only primary entries.
+    assert lock.dependency_names == frozenset(), (
+        f"Expected no dependency entries, got {lock.dependency_names}"
+    )
+    # The witness component must be a primary.
+    assert "zealfie-witness" in lock.primary_names
+
+    # Apply: must succeed.
+    result = service.apply_offline_deployment(rd)
+    assert result.success is True, f"Apply failed: {result.reason}"
+
+    active_python = runtime.python()
+    assert active_python is not None
+    probe = probe_runtime_distribution(active_python, "zealfie-witness")
+    assert probe["installed"] is True
+    assert probe["version"] == "0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# M1-1C Test 6: Plan with dependency_lock is present for ABSENT runtime
+# ---------------------------------------------------------------------------
+
+@pytest.mark.zealfie_slow
+def test_plan_with_lock_for_absent_runtime_carries_lock(tmp_path) -> None:
+    """When the runtime is ABSENT, the plan still carries a dependency_lock
+    with resolved dependencies ready for materialization."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    dep_wheel = _build_test_wheel(rd, "py-lib", "2.0.0")
+    comp_wheel = _build_test_wheel(
+        rd, "test-comp", "1.0.0", requires_dist=["py-lib"],
+    )
+    sha = _sha256_of(comp_wheel)
+    size = comp_wheel.stat().st_size
+    _write_manifest_entry(
+        rd, "testcomp", "1.0.0", comp_wheel.name, sha, size,
+    )
+
+    comp_def = _make_component_def("testcomp", "test-comp")
+    registry = ComponentRegistry([comp_def])
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    plan = service.plan_offline_deployment(rd)
+    assert plan.runtime_state == RuntimeState.ABSENT
+    assert plan.dependency_lock is not None
+    lock = plan.dependency_lock
+    assert "test-comp" in lock.primary_names
+    assert "py-lib" in lock.dependency_names
+
+
+# ---------------------------------------------------------------------------
+# M1-1C Test 7: Dependency resolution error includes original resolver detail
+# ---------------------------------------------------------------------------
+
+def test_dependency_resolution_error_preserves_original_detail(
+    tmp_path,
+) -> None:
+    """When dependency resolution fails, the OfflineReleaseError message
+    includes the original error detail."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    comp_wheel = _build_test_wheel(
+        rd, "test-comp", "1.0.0", requires_dist=["unobtainium>=99"],
+    )
+    sha = _sha256_of(comp_wheel)
+    size = comp_wheel.stat().st_size
+    _write_manifest_entry(
+        rd, "testcomp", "1.0.0", comp_wheel.name, sha, size,
+    )
+
+    comp_def = _make_component_def("testcomp", "test-comp")
+    registry = ComponentRegistry([comp_def])
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    with pytest.raises(OfflineReleaseError) as exc_info:
+        service.plan_offline_deployment(rd)
+
+    msg = str(exc_info.value)
+    assert "shared runtime dependency resolution failed" in msg
+    assert "unobtainium" in msg

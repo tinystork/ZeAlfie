@@ -4,6 +4,7 @@ M0-9.1: read-only offline deployment planning (plan_offline_deployment).
 M0-9.2: apply + rollback orchestration using existing runtime primitives.
 M0-9.3: CLI commands delegate to this service.
 M1-0A: runtime component launch (prepare_launch_plan, launch_component).
+M1-1C: shared runtime dependency resolution wired into plan_offline_deployment.
 """
 
 from __future__ import annotations
@@ -13,6 +14,10 @@ from pathlib import Path
 
 from zealfie.components.model import ComponentDefinition
 from zealfie.components.registry import ComponentRegistry, UnknownComponentError, default_registry
+from zealfie.dependencies import (
+    DependencyResolutionError,
+    resolve_runtime_dependencies,
+)
 from zealfie.launching import (
     EntryPointScriptNotFoundError,
     LaunchPlan,
@@ -132,6 +137,10 @@ class ZeAlfieService:
     #    component id → fail closed.
     #
     # 5. No recursive scan, no fallback names, no heuristic discovery.
+    #
+    # 6. (M1-1C) The release directory serves as the local dependency
+    #    wheelhouse.  Dependency ``.whl`` files live in the same
+    #    top-level directory as component manifests and wheel artifacts.
 
     # ------------------------------------------------------------------
     # resolve_offline_release_set
@@ -232,17 +241,48 @@ class ZeAlfieService:
         """Plan a full offline deployment from *release_dir*.
 
         Resolves the complete release set for all registry components,
-        builds the desired runtime state, then builds a read-only
-        deployment plan from the current runtime status.
+        builds the desired runtime state, then resolves shared runtime
+        dependencies from the local wheelhouse (the release directory)
+        and builds a read-only deployment plan from the current runtime
+        status.
 
         This is a read-only operation.  No filesystem mutation.
         """
         desired_state = self.resolve_offline_release_set(release_dir)
         runtime_status = self._runtime.status()
+
+        # M1-1C: Resolve shared runtime dependencies from the local
+        # wheelhouse.  The wheelhouse is the release directory itself
+        # (manifests + wheels coexist at the top level).
+        # Primary wheels come from already-verified component artifacts.
+        # Active extras come from the trusted component registry's
+        # ``required_extras`` (already canonicalised by the model).
+        try:
+            primary_wheels: list[tuple[Path, frozenset[str]]] = []
+            for dc in desired_state.components:
+                definition = self._registry.get(dc.component_id)
+                primary_wheels.append(
+                    (
+                        dc.artifact.path,
+                        frozenset(definition.required_extras),
+                    )
+                )
+            if primary_wheels:
+                lock = resolve_runtime_dependencies(
+                    primary_wheels, wheelhouse=release_dir,
+                )
+            else:
+                lock = None
+        except DependencyResolutionError as exc:
+            raise OfflineReleaseError(
+                f"shared runtime dependency resolution failed: {exc}"
+            ) from exc
+
         return build_deployment_plan(
             desired_state,
             registry=self._registry,
             runtime_status=runtime_status,
+            dependency_lock=lock,
         )
 
     # ------------------------------------------------------------------
