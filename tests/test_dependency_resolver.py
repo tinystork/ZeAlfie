@@ -1112,3 +1112,347 @@ def _build_identity_mismatch_wheel(
         zf.writestr(f"{dist_info}/METADATA", metadata)
         zf.writestr(f"{dist_info}/RECORD", record)
     return wheel_path
+
+
+# ===========================================================================
+# M1-1D Hash 1: primary wheel order independence
+# ===========================================================================
+
+
+def test_primary_order_independence_both_permutations_raise(
+    tmp_path: Path,
+) -> None:
+    """BLOCKER reproducer: app-a Requires-Dist app-b>=2, app-b is also
+    a primary at version 1.0.  Both [app-a, app-b] and [app-b, app-a]
+    must raise ConstraintConflict — the result is independent of
+    primary wheel ordering.
+    """
+    wh = tmp_path / "wh"
+    wh.mkdir()
+
+    # app-a 1.0 has Requires-Dist: app-b>=2
+    _build_metadata_wheel("app-a", "1.0.0", ["app-b>=2"], wh)
+    # app-b 1.0 (does NOT satisfy >=2)
+    _build_metadata_wheel("app-b", "1.0.0", [], wh)
+
+    wheel_a = wh / "app_a-1.0.0-py3-none-any.whl"
+    wheel_b = wh / "app_b-1.0.0-py3-none-any.whl"
+
+    # Permutation 1: [app-a, app-b]
+    with pytest.raises(ConstraintConflict, match="app-b"):
+        resolve_runtime_dependencies(
+            primary_wheels=[
+                (wheel_a, frozenset()),
+                (wheel_b, frozenset()),
+            ],
+            wheelhouse=wh,
+        )
+
+    # Permutation 2: [app-b, app-a] — must produce SAME result
+    with pytest.raises(ConstraintConflict, match="app-b"):
+        resolve_runtime_dependencies(
+            primary_wheels=[
+                (wheel_b, frozenset()),
+                (wheel_a, frozenset()),
+            ],
+            wheelhouse=wh,
+        )
+
+
+def test_primary_order_independence_both_permutations_accept(
+    tmp_path: Path,
+) -> None:
+    """When the primary cross-constraint is satisfiable, both permutations
+    produce the same successful lock."""
+    wh = tmp_path / "wh"
+    wh.mkdir()
+
+    # app-a 1.0 has Requires-Dist: app-b>=1.0
+    _build_metadata_wheel("app-a", "1.0.0", ["app-b>=1.0"], wh)
+    # app-b 2.0 satisfies >=1.0
+    _build_metadata_wheel("app-b", "2.0.0", [], wh)
+
+    wheel_a = wh / "app_a-1.0.0-py3-none-any.whl"
+    wheel_b = wh / "app_b-2.0.0-py3-none-any.whl"
+
+    lock_a_first = resolve_runtime_dependencies(
+        primary_wheels=[
+            (wheel_a, frozenset()),
+            (wheel_b, frozenset()),
+        ],
+        wheelhouse=wh,
+    )
+
+    lock_b_first = resolve_runtime_dependencies(
+        primary_wheels=[
+            (wheel_b, frozenset()),
+            (wheel_a, frozenset()),
+        ],
+        wheelhouse=wh,
+    )
+
+    # Both permutations must produce the same lock structure.
+    assert lock_a_first.primary_names == lock_b_first.primary_names
+    assert set(lock_a_first.locked.keys()) == set(lock_b_first.locked.keys())
+
+    for name in lock_a_first.locked:
+        dep_a = lock_a_first[name]
+        dep_b = lock_b_first[name]
+        assert dep_a.name == dep_b.name
+        assert dep_a.version == dep_b.version
+        assert dep_a.wheel_path == dep_b.wheel_path
+        assert dep_a.size == dep_b.size
+        assert dep_a.sha256 == dep_b.sha256
+
+    # app-b at 2.0 wins (primary version takes precedence).
+    assert lock_a_first["app-b"].version == "2.0.0"
+
+
+def test_three_primary_permutation_stability(tmp_path: Path) -> None:
+    """Three primaries with cross-dependencies: all 6 permutations produce
+    the same result."""
+    wh = tmp_path / "wh"
+    wh.mkdir()
+
+    # a: depends on b>=1.0, c>=1.0
+    _build_metadata_wheel("a", "1.0.0", ["b>=1.0", "c>=1.0"], wh)
+    # b: depends on c>=1.0
+    _build_metadata_wheel("b", "2.0.0", ["c>=1.0"], wh)
+    # c: no deps
+    _build_metadata_wheel("c", "3.0.0", [], wh)
+
+    w_a = wh / "a-1.0.0-py3-none-any.whl"
+    w_b = wh / "b-2.0.0-py3-none-any.whl"
+    w_c = wh / "c-3.0.0-py3-none-any.whl"
+
+    import itertools
+    lock_versions: list[set[tuple[str, str]]] = []
+
+    for perm in itertools.permutations([(w_a, "a"), (w_b, "b"), (w_c, "c")]):
+        primary_wheels = [(w, frozenset()) for w, _ in perm]
+        lock = resolve_runtime_dependencies(
+            primary_wheels=primary_wheels,
+            wheelhouse=wh,
+        )
+        # Collect (name, version) pairs for comparison
+        lock_versions.append(
+            set((n, d.version) for n, d in lock.locked.items())
+        )
+
+    # All permutations must have identical version sets
+    assert all(v == lock_versions[0] for v in lock_versions), (
+        f"Permutation mismatch: {lock_versions}"
+    )
+
+
+# ===========================================================================
+# M1-1D Hash 2: explicit primary names — not inferred from required_by
+# ===========================================================================
+
+
+def test_primary_names_explicit_not_inferred(tmp_path: Path) -> None:
+    """Primary names are explicitly tracked by the resolver, not inferred
+    from required_by being empty.
+
+    When both A and B are primaries AND A depends on B, B is still a
+    primary even though it has required_by={"a"}.
+    """
+    wh = tmp_path / "wh"
+    wh.mkdir()
+
+    # a: depends on b>=1.0
+    _build_metadata_wheel("a", "1.0.0", ["b>=1.0"], wh)
+    # b: version 2.0.0
+    _build_metadata_wheel("b", "2.0.0", [], wh)
+
+    w_a = wh / "a-1.0.0-py3-none-any.whl"
+    w_b = wh / "b-2.0.0-py3-none-any.whl"
+
+    lock = resolve_runtime_dependencies(
+        primary_wheels=[
+            (w_a, frozenset()),
+            (w_b, frozenset()),
+        ],
+        wheelhouse=wh,
+    )
+
+    # Lock structure
+    assert lock.primary_names == frozenset({"a", "b"})
+    # B has required_by={"a"} but is STILL a primary
+    assert "a" in lock["b"].required_by
+    # dependency_names is everything NOT primary
+    assert lock.dependency_names == frozenset()
+
+
+def test_runtime_lock_construction_with_explicit_primary_names() -> None:
+    """RuntimeLock constructed with explicit primary_names preserves them
+    regardless of required_by edges."""
+    dep_a = LockedDependency("a", "1.0", Path("/a.whl"), 1, "a" * 64,
+                              required_by=frozenset({"b"}))
+    dep_b = LockedDependency("b", "1.0", Path("/b.whl"), 1, "b" * 64)
+
+    # a has required_by={"b"} — legacy inference would demote it.
+    lock = RuntimeLock(
+        locked={"a": dep_a, "b": dep_b},
+        primary_names=frozenset({"a", "b"}),
+    )
+    assert lock.primary_names == frozenset({"a", "b"})
+    assert lock.dependency_names == frozenset()
+    assert len(lock) == 2
+
+    # Without explicit primary_names, the legacy fallback still works.
+    lock_legacy = RuntimeLock(locked={"a": dep_a, "b": dep_b})
+    assert lock_legacy.primary_names == frozenset({"b"})  # b has no required_by
+    assert lock_legacy.dependency_names == frozenset({"a"})  # a has required_by
+
+
+def test_runtime_lock_primary_overrides_required_by() -> None:
+    """Explicit primary_names takes precedence over required_by edges for
+    determining primary vs dependency status."""
+    # a is a component but also a dependency of b
+    dep_a = LockedDependency("a", "1.0", Path("/a.whl"), 1, "a" * 64,
+                              required_by=frozenset({"b"}))
+    dep_b = LockedDependency("b", "1.0", Path("/b.whl"), 1, "b" * 64)
+
+    lock = RuntimeLock(
+        locked={"a": dep_a, "b": dep_b},
+        primary_names=frozenset({"a"}),
+    )
+    assert lock.primary_names == frozenset({"a"})
+    assert lock.dependency_names == frozenset({"b"})
+
+
+# ===========================================================================
+# M1-1D Hash 3: activation-time dependency revalidation tests in
+# test_runtime_dependency_deployment.py (integration-level).
+# Unit-level test here: _revalidate_dependency_distributions helper.
+# ===========================================================================
+
+
+def test_revalidate_dependency_distributions_helper(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Unit test for the _revalidate_dependency_distributions helper
+    used by RuntimeTransaction.activate() for M1-1D dependency TOCTOU."""
+    from zealfie.runtime.transaction import _revalidate_dependency_distributions
+    from zealfie.dependencies.models import RuntimeLock, LockedDependency
+
+    # Build a lock with one dependency (non-primary).
+    dep_a = LockedDependency("a", "1.0", Path("/a.whl"), 1, "a" * 64)
+    dep_b = LockedDependency(
+        "b", "2.0", Path("/b.whl"), 1, "b" * 64,
+        required_by=frozenset({"a"}),
+    )
+    lock = RuntimeLock(
+        locked={"a": dep_a, "b": dep_b},
+        primary_names=frozenset({"a"}),
+    )
+
+    # Mock the probe function to simulate installed dependencies.
+    def fake_probe(python: str, dist_name: str) -> dict:
+        if dist_name == "b":
+            return {"installed": True, "version": "2.0"}
+        return {"installed": False, "version": None}
+
+    import zealfie.runtime.probe as probe_mod
+    monkeypatch.setattr(
+        probe_mod,
+        "probe_runtime_distribution",
+        fake_probe,
+    )
+
+    # Should succeed — b is installed at correct version.
+    result = _revalidate_dependency_distributions(Path("/fake/python"), lock)
+    assert result is None
+
+
+def test_revalidate_dependency_distributions_version_mismatch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """_revalidate_dependency_distributions blocks when dependency version
+    differs from lock."""
+    from zealfie.runtime.transaction import _revalidate_dependency_distributions
+    from zealfie.dependencies.models import RuntimeLock, LockedDependency
+
+    dep_a = LockedDependency("a", "1.0", Path("/a.whl"), 1, "a" * 64)
+    dep_b = LockedDependency(
+        "b", "2.0", Path("/b.whl"), 1, "b" * 64,
+        required_by=frozenset({"a"}),
+    )
+    lock = RuntimeLock(
+        locked={"a": dep_a, "b": dep_b},
+        primary_names=frozenset({"a"}),
+    )
+
+    # b is installed at wrong version.
+    def fake_probe(python: str, dist_name: str) -> dict:
+        if dist_name == "b":
+            return {"installed": True, "version": "1.0"}  # WRONG
+        return {"installed": False, "version": None}
+
+    import zealfie.runtime.probe as probe_mod
+    monkeypatch.setattr(
+        probe_mod,
+        "probe_runtime_distribution",
+        fake_probe,
+    )
+
+    result = _revalidate_dependency_distributions(Path("/fake/python"), lock)
+    assert result is not None
+    assert "b" in result
+    assert "2.0" in result
+    assert "1.0" in result
+
+
+def test_revalidate_dependency_distributions_not_installed(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """_revalidate_dependency_distributions blocks when dependency is
+    not installed."""
+    from zealfie.runtime.transaction import _revalidate_dependency_distributions
+    from zealfie.dependencies.models import RuntimeLock, LockedDependency
+
+    dep_a = LockedDependency("a", "1.0", Path("/a.whl"), 1, "a" * 64)
+    dep_b = LockedDependency(
+        "b", "2.0", Path("/b.whl"), 1, "b" * 64,
+        required_by=frozenset({"a"}),
+    )
+    lock = RuntimeLock(
+        locked={"a": dep_a, "b": dep_b},
+        primary_names=frozenset({"a"}),
+    )
+
+    # b is NOT installed.
+    def fake_probe(python: str, dist_name: str) -> dict:
+        if dist_name == "b":
+            return {"installed": False, "version": None}
+        return {"installed": False, "version": None}
+
+    import zealfie.runtime.probe as probe_mod
+    monkeypatch.setattr(
+        probe_mod,
+        "probe_runtime_distribution",
+        fake_probe,
+    )
+
+    result = _revalidate_dependency_distributions(Path("/fake/python"), lock)
+    assert result is not None
+    assert "not installed" in result
+    assert "b" in result
+
+
+def test_revalidate_dependency_distributions_no_deps(tmp_path: Path) -> None:
+    """When the lock has no non-component dependencies, revalidation trivially
+    succeeds."""
+    from zealfie.runtime.transaction import _revalidate_dependency_distributions
+    from zealfie.dependencies.models import RuntimeLock, LockedDependency
+
+    # All entries are primary — no dependencies to revalidate.
+    dep_a = LockedDependency("a", "1.0", Path("/a.whl"), 1, "a" * 64)
+    lock = RuntimeLock(
+        locked={"a": dep_a},
+        primary_names=frozenset({"a"}),
+    )
+
+    result = _revalidate_dependency_distributions(Path("/fake/python"), lock)
+    assert result is None

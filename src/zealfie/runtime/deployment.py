@@ -35,6 +35,7 @@ from .planning import (
     PlanningError,
     check_desired_state_conflicts,
 )
+from .transaction import RuntimeTransaction
 
 
 def apply_deployment_plan(
@@ -50,8 +51,9 @@ def apply_deployment_plan(
 
     1. **Preflight** — validate the plan against the current runtime state
        and reject before any filesystem mutation.
-    2. **Dependency lock coherence** — validate RuntimeLock primary
-       entries against desired component artifacts (no mutation).
+    2. **Dependency lock coherence** — validate every DesiredComponent
+       against the RuntimeLock (M1-1D: no component escapes coherence
+       because of ``required_by`` edges).  No mutation.
     3. **Candidate creation** — begin an M0-6 transaction and create a
        fresh venv directly at the final slot path.
     4. **Dependency materialization** — install locked non-component
@@ -63,7 +65,8 @@ def apply_deployment_plan(
        before pip handoff.
     6. **Candidate validation** — verify every component is installed
        correctly within the candidate.
-    7. **Activation** — atomically switch the active pointer (M0-6).
+    7. **Activation** — atomically switch the active pointer (M0-6),
+       including M1-1D dependency distribution TOCTOU revalidation.
 
     The active pointer is never modified before step 7.  On failure at
     any stage, the partially-created candidate is left for diagnostics
@@ -139,7 +142,7 @@ def apply_deployment_plan(
             reason=f"shared-runtime conflict detected at apply time: {exc}",
         )
 
-    # ---- 5. Preflight: dependency lock coherence (no mutation) --------------
+    # ---- 5. Preflight: dependency lock coherence (M1-1D: all components) ---
     if plan.dependency_lock is not None:
         coh_err = _validate_dependency_lock_coherence(plan)
         if coh_err is not None:
@@ -153,6 +156,10 @@ def apply_deployment_plan(
             success=False,
             reason=f"failed to begin transaction: {exc}",
         )
+
+    # Attach the dependency lock to the transaction for activation-time
+    # TOCTOU revalidation (M1-1D hardening).
+    txn.set_dependency_lock(plan.dependency_lock)
 
     # Create the candidate venv directly at the final slot path.
     candidate_path = txn.candidate_path
@@ -306,26 +313,28 @@ def _revalidate_artifact(
 
 
 # ---------------------------------------------------------------------------
-# M1-1B dependency materialization helpers
+# M1-1B / M1-1D dependency materialization helpers
 # ---------------------------------------------------------------------------
 
 
 def _validate_dependency_lock_coherence(plan: DeploymentPlan) -> str | None:
-    """Validate that every RuntimeLock primary entry agrees with its
-    corresponding DesiredComponent/VerifiedArtifact on all stable
-    identity and artifact fields.
+    """Validate that EVERY DesiredComponent has a corresponding
+    RuntimeLock entry agreeing on all stable identity and artifact
+    fields (M1-1D hardened — no component escapes coherence).
 
-    Fields checked (fail-closed — any mismatch blocks deployment):
+    Fields checked per component (fail-closed — any mismatch blocks
+    deployment):
 
-    * Normalised distribution name (primary → desired component lookup)
+    * Normalised distribution name (component → lock entry lookup)
     * Version (wheel_version)
     * Wheel path (resolved)
     * Size
     * SHA256
 
-    Every RuntimeLock primary must match a desired component; the
-    reverse direction (every desired component must be a primary) is
-    NOT enforced — users may omit certain components from the lock.
+    Every DesiredComponent MUST have an exact matching entry in the
+    RuntimeLock.  The reverse direction (lock entries that are NOT
+    desired components) is expected — those are non-component
+    dependencies and no coherence check is needed for them.
 
     This is a pure plan-inspection check that runs before any filesystem
     mutation (before ``begin_transaction``).
@@ -345,58 +354,61 @@ def _validate_dependency_lock_coherence(plan: DeploymentPlan) -> str | None:
             )
         component_dists[norm] = dc
 
-    # Validate every primary entry against its corresponding desired component.
-    for primary_name in lock.primary_names:
-        if primary_name not in component_dists:
+    # M1-1D: Validate EVERY DesiredComponent — not just RuntimeLock
+    # primary_names.  A component that also happens to be a dependency
+    # of another component must still pass coherence.
+    for dc in plan.desired_state.components:
+        norm = normalise_distribution_name(dc.artifact.distribution_name)
+
+        if norm not in lock.locked:
             return (
-                f"RuntimeLock primary entry {primary_name!r} does not match "
-                f"any desired component distribution"
+                f"DesiredComponent {dc.component_id!r} "
+                f"(distribution {norm!r}) does not have an entry in "
+                f"the RuntimeLock"
             )
 
-        locked_dep = lock[primary_name]
+        locked_dep = lock[norm]
 
-        if locked_dep.name != primary_name:
+        if locked_dep.name != norm:
             return (
-                f"RuntimeLock primary key {primary_name!r} does not match "
+                f"RuntimeLock entry key {norm!r} does not match "
                 f"locked dependency name {locked_dep.name!r}"
             )
-
-        dc = component_dists[primary_name]
 
         # --- Version (wheel_version) ---
         if locked_dep.version != dc.artifact.wheel_version:
             return (
-                f"RuntimeLock primary {primary_name!r} version "
-                f"{locked_dep.version!r} does not match desired component "
-                f"{dc.component_id!r} wheel_version "
-                f"{dc.artifact.wheel_version!r}"
+                f"DesiredComponent {dc.component_id!r} "
+                f"(distribution {norm!r}) version mismatch: "
+                f"lock has {locked_dep.version!r}, "
+                f"desired component has {dc.artifact.wheel_version!r}"
             )
 
         # --- Wheel path (resolve for equivalent-path detection) ---
         if locked_dep.wheel_path.resolve() != dc.artifact.path.resolve():
             return (
-                f"RuntimeLock primary {primary_name!r} wheel_path "
-                f"{locked_dep.wheel_path} does not match desired component "
-                f"{dc.component_id!r} artifact path "
-                f"{dc.artifact.path}"
+                f"DesiredComponent {dc.component_id!r} "
+                f"(distribution {norm!r}) wheel_path mismatch: "
+                f"lock has {locked_dep.wheel_path}, "
+                f"desired component has {dc.artifact.path}"
             )
 
         # --- Size ---
         if locked_dep.size != dc.artifact.size:
             return (
-                f"RuntimeLock primary {primary_name!r} size "
-                f"{locked_dep.size} does not match desired component "
-                f"{dc.component_id!r} artifact size "
-                f"{dc.artifact.size}"
+                f"DesiredComponent {dc.component_id!r} "
+                f"(distribution {norm!r}) size mismatch: "
+                f"lock has {locked_dep.size}, "
+                f"desired component has {dc.artifact.size}"
             )
 
         # --- SHA256 ---
         if locked_dep.sha256 != dc.artifact.sha256:
             return (
-                f"RuntimeLock primary {primary_name!r} sha256 "
-                f"{locked_dep.sha256[:16]}... does not match desired component "
-                f"{dc.component_id!r} artifact sha256 "
-                f"{dc.artifact.sha256[:16]}..."
+                f"DesiredComponent {dc.component_id!r} "
+                f"(distribution {norm!r}) sha256 mismatch: "
+                f"lock has {locked_dep.sha256[:16]}..., "
+                f"desired component has {dc.artifact.sha256[:16]}..."
             )
 
     return None
@@ -532,11 +544,14 @@ def _validate_exact_dependency_versions(
     return None
 
 
-def _iter_locked_dependencies(lock: RuntimeLock):
-    """Yield non-primary dependencies in RuntimeLock insertion order."""
-    for dep in lock.locked.values():
-        if dep.required_by:
-            yield dep
+def _iter_locked_dependencies(lock: RuntimeLock) -> list[LockedDependency]:
+    """Yield non-primary dependencies in RuntimeLock insertion order.
+
+    M1-1D: uses explicit ``lock.dependency_names`` (NOT ``required_by``)
+    to decide which entries are non-component dependencies.
+    """
+    return [dep for name, dep in lock.locked.items()
+            if name in lock.dependency_names]
 
 
 def _sha256_of_path(path: _Path) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING
 
 from .layout import RuntimeLayout, validate_slot_id
 from .model import (
@@ -13,6 +14,9 @@ from .model import (
     RuntimeStatus,
 )
 from .state import load_active_state, save_active_state
+
+if TYPE_CHECKING:
+    from zealfie.dependencies.models import RuntimeLock
 
 
 def generate_slot_id() -> str:
@@ -33,6 +37,11 @@ class RuntimeTransaction:
     For multi-component deployments, :meth:`set_component_expectations`
     stores a map of ``component_id → version`` and the full list of
     definitions, which :meth:`activate` rechecks.
+
+    M1-1D: :meth:`set_dependency_lock` stores the entire RuntimeLock
+    so that :meth:`activate` also revalidates all non-component
+    dependency distributions against the lock immediately before
+    switching the active pointer.
     """
 
     def __init__(
@@ -56,6 +65,8 @@ class RuntimeTransaction:
         # Multi-component support.
         self._component_definitions: "tuple[ComponentDefinition, ...]" = ()
         self._expected_versions: dict[str, str] = {}
+        # M1-1D: dependency lock for activation-time TOCTOU revalidation.
+        self._dependency_lock: RuntimeLock | None = None
 
     @property
     def candidate_slot_id(self) -> str:
@@ -101,6 +112,19 @@ class RuntimeTransaction:
         self._component_definitions = definitions
         self._expected_versions = dict(versions)
 
+    def set_dependency_lock(
+        self,
+        dependency_lock: RuntimeLock | None,
+    ) -> None:
+        """Record the RuntimeLock for activation-time dependency TOCTOU
+        revalidation (M1-1D hardening).
+
+        Called by :func:`apply_deployment_plan` before candidate creation.
+        :meth:`activate` probes every non-component dependency distribution
+        from the lock immediately before switching the active pointer.
+        """
+        self._dependency_lock = dependency_lock
+
     def activate(self) -> RuntimeStatus:
         """Activate this candidate, making it the active slot.
 
@@ -110,6 +134,11 @@ class RuntimeTransaction:
         2. The current active state is reloaded from disk.
         3. If the active slot has changed since the transaction began,
            activation is refused (stale transaction).
+        4. All component distributions are TOCTOU-reprobed for
+           installed status, version, and launch contract.
+        5. (M1-1D) All non-component dependency distributions from the
+           RuntimeLock are TOCTOU-reprobed for installed status and
+           exact version.
 
         On success the previous active slot becomes ``previous_slot`` and
         the candidate becomes ``active_slot``.
@@ -248,6 +277,19 @@ class RuntimeTransaction:
                         reason_code=RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED,
                         reason="candidate no longer satisfies launch contract at activation time",
                     )
+
+        # -- M1-1D: Dependency TOCTOU revalidation -------------------------
+        if self._dependency_lock is not None:
+            dep_error = _revalidate_dependency_distributions(
+                python, self._dependency_lock
+            )
+            if dep_error is not None:
+                return RuntimeStatus(
+                    state=RuntimeState.BROKEN,
+                    runtime_root=self._layout.root,
+                    reason_code=RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED,
+                    reason=dep_error,
+                )
 
         # -- Atomically write the new pointer. ---------------------------------
         new_previous = self._base_active if self._base_active is not None else current.previous_slot_id
@@ -487,5 +529,48 @@ def _revalidate_multi_component(
                     f"candidate no longer satisfies launch contract "
                     f"for {cd.component_id!r} at activation time"
                 )
+
+    return None
+
+
+def _revalidate_dependency_distributions(
+    python: "pathlib.Path",
+    dependency_lock: RuntimeLock,
+) -> str | None:
+    """M1-1D: TOCTOU revalidate all non-component dependency distributions
+    from the RuntimeLock immediately before activation.
+
+    Every locked dependency that is NOT a primary must be installed in
+    the candidate at the exact version recorded in the lock.
+
+    Returns ``None`` on success, or an error string on the first failure.
+    """
+    from .probe import probe_runtime_distribution
+
+    lock = dependency_lock
+    for dep_name in lock.dependency_names:
+        locked_dep = lock[dep_name]
+
+        try:
+            probe = probe_runtime_distribution(python, dep_name)
+        except Exception as exc:
+            return (
+                f"dependency TOCTOU probe failed for {dep_name!r} "
+                f"at activation time: {exc}"
+            )
+
+        if not probe.get("installed"):
+            return (
+                f"dependency {dep_name!r} not installed in candidate "
+                f"at activation time"
+            )
+
+        installed_version = probe.get("version")
+        if installed_version != locked_dep.version:
+            return (
+                f"dependency {dep_name!r} version changed at activation "
+                f"time: expected {locked_dep.version!r}, "
+                f"got {installed_version!r}"
+            )
 
     return None

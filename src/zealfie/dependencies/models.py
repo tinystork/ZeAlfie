@@ -54,29 +54,61 @@ class LockedDependency:
 class RuntimeLock:
     """Complete resolved transitive dependency closure.
 
-    *locked* maps normalised distribution name → :class:`LockedDependency`.
-    The order of insertion is the resolution order (topological, roughly
-    breadth-first).  Callers may iterate ``locked.values()`` for a
-    deterministic processing order.
+    *locked* maps normalised distribution name → :class:`LockedDependency`
+    and must include entries for every *primary_name*.  The
+    deterministic insertion order is roughly breadth-first topological.
+    Callers may iterate ``locked.values()`` for a
+    deterministic processing order; primary entries always appear before
+    dependency entries.
+
+    *primary_names* is the explicit set of resolved primary (root)
+    distribution names.  M1-1D hardened: primaries are no longer inferred
+    from ``required_by == empty``; a component that is also a dependency
+    of another component must still be recognised as primary.  The
+    resolver always supplies this argument; callers that construct
+    ``RuntimeLock`` by hand for test purposes may omit it, in which case
+    the legacy-inference fallback (based on empty ``required_by``) is
+    applied.
 
     This lock is a planning artifact only.  M1-1B will consume it for
     materialization (slot creation, wheel installation, activation).
     """
 
     locked: dict[str, LockedDependency]
+    _primary_names: frozenset[str]
+
+    def __init__(
+        self,
+        locked: dict[str, LockedDependency],
+        *,
+        primary_names: frozenset[str] | None = None,
+    ) -> None:
+        object.__setattr__(self, "locked", locked)
+        if primary_names is not None:
+            object.__setattr__(self, "_primary_names", primary_names)
+        else:
+            # Legacy compat: infer from required_by (kept for tests that
+            # construct RuntimeLock by hand).
+            object.__setattr__(
+                self,
+                "_primary_names",
+                frozenset(
+                    name
+                    for name, dep in locked.items()
+                    if not dep.required_by
+                ),
+            )
 
     @property
     def primary_names(self) -> frozenset[str]:
-        """Distributions with no ``required_by`` entries — the roots."""
-        return frozenset(
-            name for name, dep in self.locked.items() if not dep.required_by
-        )
+        """Explicit primary (root) distributions — not inferred from edges."""
+        return self._primary_names
 
     @property
     def dependency_names(self) -> frozenset[str]:
-        """Distributions that are NOT primary (have at least one required_by)."""
+        """Distributions that are NOT primary components."""
         return frozenset(
-            name for name, dep in self.locked.items() if dep.required_by
+            name for name in self.locked if name not in self._primary_names
         )
 
     def __len__(self) -> int:

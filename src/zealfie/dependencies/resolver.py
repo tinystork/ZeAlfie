@@ -13,18 +13,20 @@ simplest integration surface for tests), but the contract is
 documented here so that the B product path cannot reasonably bypass
 ``VerifiedArtifact`` by accident.
 
-Algorithm (fail-closed):
+Algorithm (fail-closed, M1-1D hardened for order independence):
 
 1. Scan the wheelhouse and build a name→wheel index.
-2. Read METADATA for each primary component wheel.
-3. **Verify filename identity matches METADATA identity** for every
-   primary wheel and every resolved wheelhouse candidate
-   (canonical name ↔ METADATA Name, ``packaging.version.Version``
-   filename version ↔ METADATA Version).  Mismatch raises
-   :class:`WheelIdentityMismatch` before any lock creation.
+2. **Phase 1 — Lock primaries.**  Read METADATA for each primary
+   component wheel, verify filename↔METADATA identity, validate extras,
+   lock the entry, and **do NOT yet enqueue its Requires-Dist**.  Collect
+   the set of primary names.
+3. **Phase 2 — Enqueue primary requirements.**  Only after every
+   explicit primary version is known, traverse the Requires-Dist of each
+   primary.  Primary→primary constraints are now checked against the
+   already-known primary version — the resolution result is independent
+   of primary wheel ordering.
 4. Validate requested extras against ``Provides-Extra``.
-5. For each requirement (base + selected extras), resolve from the
-   wheelhouse:
+5. Resolve transitive closure from the wheelhouse:
    * match by normalised distribution name
    * filter by version specifier(s)
    * filter by environment markers
@@ -35,7 +37,7 @@ Algorithm (fail-closed):
 7. Aggregate version constraints for the same distribution;
    reject incompatibilities.
 8. Iterate until the dependency closure stabilises.
-9. Return a ``RuntimeLock``.
+9. Return a ``RuntimeLock`` with explicit ``primary_names``.
 """
 
 from __future__ import annotations
@@ -104,7 +106,8 @@ def resolve_runtime_dependencies(
     -------
     RuntimeLock
         The complete transitive closure, mapping normalised
-        distribution names to :class:`LockedDependency`.
+        distribution names to :class:`LockedDependency`, with
+        explicit ``primary_names``.
 
     Raises
     ------
@@ -143,8 +146,13 @@ def resolve_runtime_dependencies(
     seen_specs: dict[str, list[str]] = {}
     # Track active extras per dist (for transitive extra triggering)
     active_extras_per_dist: dict[str, set[str]] = {}
+    # Collect primary names explicitly (M1-1D hardened).
+    primary_names: set[str] = set()
+    # Collect post-primary enqueue work: (parent_name, req_strs, active_extras).
+    # Stored during phase 1, drained during phase 2.
+    _primary_reqs: list[tuple[str, list[str] | tuple[str, ...], frozenset[str]]] = []
 
-    # --- 3. Load primary components -----------------------------------------
+    # --- 3. PHASE 1 — Lock all primaries (M1-1D: order-independent) ---------
     for wheel_path, extras in primary_wheels:
         active_extras = frozenset(canonicalize_name(extra) for extra in extras)
 
@@ -160,8 +168,8 @@ def resolve_runtime_dependencies(
 
         raw_meta = _read_wheel_metadata(wheel_path)
         meta = parse_email(raw_meta)[0]
-        meta_name_raw = meta.get("name", "")
-        meta_version_raw = meta.get("version", "")
+        meta_name_raw: str = meta.get("name", "")
+        meta_version_raw: str = meta.get("version", "")
 
         # --- Identity verification (before any lock mutation) --------------
         _verify_wheel_identity(
@@ -183,14 +191,23 @@ def resolve_runtime_dependencies(
         active_extras_per_dist.setdefault(name, set()).update(active_extras)
 
         _lock_primary(locked, name, version, wheel_path, active_extras)
+        primary_names.add(name)
 
-        # Queue requirements
+        # --- Collect requirements for phase 2 (M1-1D hardening) ------------
         req_strs = meta.get("requires_dist", ())
+        _primary_reqs.append((name, req_strs, active_extras))
+
+    # --- 4. PHASE 2 — Enqueue primary requirements (all primaries known) ----
+    for parent_name, req_strs, active_extras in _primary_reqs:
         _enqueue_requirements(
-            name, req_strs, active_extras, marker_env, seen_specs, locked, pending,
+            parent_name, req_strs, active_extras, marker_env, seen_specs,
+            locked, pending,
         )
 
-    # --- 4. Resolve transitive closure --------------------------------------
+    # Clear intermediate storage now that phase 2 is done.
+    _primary_reqs.clear()
+
+    # --- 5. Resolve transitive closure --------------------------------------
     while pending:
         dep_name, dep_extras, parent_name = pending.popleft()
 
@@ -285,7 +302,7 @@ def resolve_runtime_dependencies(
             dep_name, req_strs, dep_extras, marker_env, seen_specs, locked, pending,
         )
 
-    return RuntimeLock(locked=locked)
+    return RuntimeLock(locked=locked, primary_names=frozenset(primary_names))
 
 
 # ---------------------------------------------------------------------------
@@ -412,8 +429,8 @@ def _verify_wheelhouse_candidate_identity(
     """
     raw_meta = _read_wheel_metadata(selected_path)
     meta = parse_email(raw_meta)[0]
-    meta_name_raw = meta.get("name", "")
-    meta_version_raw = meta.get("version", "")
+    meta_name_raw: str = meta.get("name", "")
+    meta_version_raw: str = meta.get("version", "")
 
     _verify_wheel_identity(
         selected_path,
@@ -424,6 +441,7 @@ def _verify_wheelhouse_candidate_identity(
     )
 
     return meta_version_raw
+
 
 def _canonical_set(values: list[str] | tuple[str, ...] | None) -> frozenset[str]:
     """Canonicalise a collection of extra/dependency names to a frozenset.

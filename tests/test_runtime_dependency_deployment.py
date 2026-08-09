@@ -438,6 +438,61 @@ def test_exact_dependency_validation_wrong_version_blocks(
     assert rt.status().active_slot_id == active_before
 
 
+@pytest.mark.zealfie_slow
+def test_activation_revalidates_dependencies_before_pointer_switch(
+    tmp_path: Path, witness_v1: Path, monkeypatch,
+) -> None:
+    """Activation must revalidate dependency distributions from the lock
+    immediately before moving the active pointer.
+
+    This exercises the transaction wiring separately from the lower-level
+    probe helper tests: dependency install and candidate validation succeed,
+    then the activation-time dependency revalidation hook rejects the
+    candidate and the active slot remains unchanged.
+    """
+    dep_dir = tmp_path / "deps"
+    dep_dir.mkdir()
+    py_lib = _build_minimal_wheel(dep_dir, "py-lib", "2.0.0")
+
+    witness_dep = _lock_dep(witness_v1)
+    py_dep = _lock_dep(py_lib)
+    lock = _make_dependency_lock(witness_dep, [py_dep])
+
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rt = SharedRuntime(layout=layout)
+    rt.create()
+    active_before = rt.status().active_slot_id
+
+    components = (_dc("zewitness", "0.0.1", witness_v1),)
+    registry = _registry(WITNESS_DEF)
+    plan = _plan_ready(
+        components,
+        active_slot_id=active_before,
+        dependency_lock=lock,
+    )
+
+    import zealfie.runtime.transaction as txn_mod
+
+    calls: list[RuntimeLock] = []
+
+    def fake_activation_revalidation(_python: Path, dependency_lock: RuntimeLock) -> str:
+        calls.append(dependency_lock)
+        return "dependency 'py-lib' not installed in candidate at activation time"
+
+    monkeypatch.setattr(
+        txn_mod,
+        "_revalidate_dependency_distributions",
+        fake_activation_revalidation,
+    )
+
+    result = apply_deployment_plan(plan, registry=registry, runtime=rt)
+    assert result.success is False
+    assert "activation failed" in (result.reason or "")
+    assert "py-lib" in (result.reason or "")
+    assert calls == [lock]
+    assert rt.status().active_slot_id == active_before
+
+
 # =============================================================================
 # Test 5: RuntimeLock primary/component mismatch -> fail before candidate
 # =============================================================================
@@ -476,7 +531,9 @@ def test_lock_primary_component_mismatch_fails_before_candidate_creation(
 
     result = apply_deployment_plan(plan, registry=registry, runtime=rt)
     assert result.success is False
-    assert "does not match" in (result.reason or ""), f"unexpected reason: {result.reason}"
+    assert (
+        "does not have an entry" in (result.reason or "")
+    ), f"unexpected reason: {result.reason}"
 
     # No new slots created (fail before candidate creation)
     slot_dirs_after = []
