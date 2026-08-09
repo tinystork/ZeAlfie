@@ -5,6 +5,7 @@ M0-9.2: apply + rollback orchestration using existing runtime primitives.
 M0-9.3: CLI commands delegate to this service.
 M1-0A: runtime component launch (prepare_launch_plan, launch_component).
 M1-1C: shared runtime dependency resolution wired into plan_offline_deployment.
+M1-2A: product catalog and product-shell read model (list_products, collect_product_state, get_product_state).
 """
 
 from __future__ import annotations
@@ -24,6 +25,17 @@ from zealfie.launching import (
     LaunchResult,
     execute_launch_plan,
     resolve_script,
+)
+from zealfie.products.catalog import (
+    ProductCatalog,
+    ProductDescriptor,
+    default_catalog,
+)
+from zealfie.products.state import (
+    ProductShellState,
+    ProductState,
+    collect_product_state,
+    get_product_state,
 )
 from zealfie.releases.manifest import (
     ReleaseManifestError,
@@ -97,8 +109,11 @@ class ZeAlfieService:
     ``prepare_launch_plan`` / ``launch_component`` for runtime launch
     (M1-0A).
 
-    Dependencies (registry, runtime, host) are injectable so tests
-    can supply synthetic instances.
+    M1-2A adds ``list_products``, ``collect_product_state``, and
+    ``get_product_state`` for the product-shell read model.
+
+    Dependencies (registry, runtime, catalog, host) are injectable so
+    tests can supply synthetic instances.
     """
 
     def __init__(
@@ -106,10 +121,12 @@ class ZeAlfieService:
         *,
         registry: ComponentRegistry | None = None,
         runtime: SharedRuntime | None = None,
+        catalog: ProductCatalog | None = None,
         host: HostTarget | None = None,
     ) -> None:
         self._registry = registry or default_registry()
         self._runtime = runtime or SharedRuntime()
+        self._catalog = catalog or default_catalog()
         self._host = host or HostTarget.from_current_host()
 
     # ------------------------------------------------------------------
@@ -469,6 +486,82 @@ class ZeAlfieService:
         """
         plan = self.prepare_launch_plan(component_id)
         return execute_launch_plan(plan, timeout_seconds=timeout_seconds)
+
+    # ------------------------------------------------------------------
+    # M1-2A: Product Shell — read model
+    # ------------------------------------------------------------------
+
+    @property
+    def catalog(self) -> ProductCatalog:
+        """The product catalog (all known products).
+
+        Distinct from the component registry which describes "what
+        the user chose to manage".
+        """
+        return self._catalog
+
+    def list_products(self) -> tuple[ProductDescriptor, ...]:
+        """Return all known product descriptors from the catalog.
+
+        This is the "what ZeAlfie knows" listing — distinct from
+        the component registry which describes "what the user chose
+        to manage".
+        """
+        return self._catalog.list()
+
+    def collect_product_state(
+        self,
+        *,
+        probe_fn: object = None,
+    ) -> ProductShellState:
+        """Collect product state for every known product against the
+        current managed runtime.
+
+        The *managed* set is derived from the current component registry
+        (deployment contract).  Products in the catalog but not in the
+        registry are ``UNMANAGED``.
+
+        This is a read-only operation.  No mutation, no installation,
+        no launch.
+        """
+        managed_ids = frozenset(self._registry.available_ids())
+        return collect_product_state(
+            self._catalog,
+            self._runtime.status(),
+            managed_component_ids=managed_ids,
+            probe_fn=probe_fn,
+        )
+
+    def get_product_state(
+        self,
+        product_id: str,
+        *,
+        probe_fn: object = None,
+    ) -> ProductState:
+        """Collect state for a single product against the current runtime.
+
+        Raises :class:`~zealfie.products.catalog.UnknownProductError` if
+        *product_id* is not in the product catalog.
+
+        This is a read-only operation.
+        """
+        managed_ids = frozenset(self._registry.available_ids())
+        return get_product_state(
+            self._catalog,
+            product_id,
+            self._runtime.status(),
+            managed_component_ids=managed_ids,
+            probe_fn=probe_fn,
+        )
+
+    @property
+    def managed_product_ids(self) -> frozenset[str]:
+        """Return the set of product ids currently selected for
+        management (deployment registry).
+
+        These are products the user has chosen to manage/install;
+        they correspond to the ``components.toml`` entries."""
+        return frozenset(self._registry.available_ids())
 
 
 # ---------------------------------------------------------------------------

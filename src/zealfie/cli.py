@@ -15,7 +15,11 @@ from .app import (
     LaunchContractNotSatisfiedError,
     LaunchPreparationError,
     LaunchScriptNotFoundError,
+    ManagedStatus,
     OfflineReleaseError,
+    ProductShellState,
+    ProductState,
+    UnknownProductError,
     ZeAlfieService,
     collect_status,
     format_component_status,
@@ -24,6 +28,7 @@ from .app import (
 )
 from .components import UnknownComponentError, default_registry
 from .launching import LaunchError, LaunchResult
+from .products.catalog import ProductCatalog
 from .runtime import (
     DeploymentPlan,
     DeploymentResult,
@@ -90,6 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to the offline release directory",
     )
     runtime_subs.add_parser("rollback", help="rollback the shared runtime")
+
+    # -- products subcommand (M1-2A) -----------------------------------------
+    products_parser = subparsers.add_parser("products", help="show product catalog state")
+    products_parser.add_argument(
+        "product_id", nargs="?",
+        help="optional product id to inspect",
+    )
+
     return parser
 
 
@@ -121,56 +134,10 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
         return _handle_launch(args, stdout=stdout)
 
     if args.command == "runtime":
-        layout = default_runtime_layout()
-        rt = SharedRuntime(layout=layout)
+        return _handle_runtime(args, stdout=stdout)
 
-        if args.runtime_command == "status":
-            print(_format_runtime_status(rt.status()), file=stdout)
-            return 0
-
-        if args.runtime_command == "create":
-            try:
-                st = rt.create()
-                print(_format_runtime_status(st), file=stdout)
-                return 0
-            except SharedRuntimeError as exc:
-                print(f"Cannot create shared runtime: {exc}", file=sys.stderr)
-                return 3
-
-        if args.runtime_command == "plan":
-            service = _make_service()
-            try:
-                plan = service.plan_offline_deployment(args.release_dir)
-                print(_format_deployment_plan(plan), file=stdout)
-                if plan.blocked:
-                    return 1
-                return 0
-            except OfflineReleaseError as exc:
-                print(f"plan failed: {exc}", file=sys.stderr)
-                return 4
-
-        if args.runtime_command == "apply":
-            service = _make_service()
-            try:
-                result = service.apply_offline_deployment(args.release_dir)
-                print(_format_deployment_result(result), file=stdout)
-                return 0 if result.success else 3
-            except OfflineReleaseError as exc:
-                print(f"apply failed: {exc}", file=sys.stderr)
-                return 4
-
-        if args.runtime_command == "rollback":
-            service = _make_service()
-            status = service.rollback_runtime()
-            print(_format_runtime_status(status), file=stdout)
-            if (status.state == RuntimeState.READY
-                    and status.reason_code == RuntimeReasonCode.RUNTIME_READY):
-                return 0
-            return 3
-
-        # No runtime subcommand given → show help.
-        runtime_parser.print_help(file=stdout)
-        return 0
+    if args.command == "products":
+        return _handle_products(args, stdout=stdout)
 
     print(startup_message(), file=stdout)
     return 0
@@ -218,6 +185,130 @@ def _print_launch_result(result: LaunchResult, *, stdout: TextIO) -> None:
         print(result.stderr, end="", file=sys.stderr)
     if result.timed_out:
         print("launch timed out", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# M0-9.3: runtime handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_runtime(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie runtime ...`` commands."""
+    layout = default_runtime_layout()
+    rt = SharedRuntime(layout=layout)
+
+    if args.runtime_command == "status":
+        print(_format_runtime_status(rt.status()), file=stdout)
+        return 0
+
+    if args.runtime_command == "create":
+        try:
+            st = rt.create()
+            print(_format_runtime_status(st), file=stdout)
+            return 0
+        except SharedRuntimeError as exc:
+            print(f"Cannot create shared runtime: {exc}", file=sys.stderr)
+            return 3
+
+    if args.runtime_command == "plan":
+        service = _make_service()
+        try:
+            plan = service.plan_offline_deployment(args.release_dir)
+            print(_format_deployment_plan(plan), file=stdout)
+            if plan.blocked:
+                return 1
+            return 0
+        except OfflineReleaseError as exc:
+            print(f"plan failed: {exc}", file=sys.stderr)
+            return 4
+
+    if args.runtime_command == "apply":
+        service = _make_service()
+        try:
+            result = service.apply_offline_deployment(args.release_dir)
+            print(_format_deployment_result(result), file=stdout)
+            return 0 if result.success else 3
+        except OfflineReleaseError as exc:
+            print(f"apply failed: {exc}", file=sys.stderr)
+            return 4
+
+    if args.runtime_command == "rollback":
+        service = _make_service()
+        status = service.rollback_runtime()
+        print(_format_runtime_status(status), file=stdout)
+        if (status.state == RuntimeState.READY
+                and status.reason_code == RuntimeReasonCode.RUNTIME_READY):
+            return 0
+        return 3
+
+    # No runtime subcommand given → show help.
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# M1-2A: products handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_products(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie products [<product_id>]``."""
+    service = _make_service()
+
+    if args.product_id:
+        try:
+            state = service.get_product_state(args.product_id)
+        except UnknownProductError:
+            catalog_ids = ", ".join(service.catalog.available_ids()) or "none"
+            print(
+                f"Unknown product: {args.product_id}. Known products: {catalog_ids}",
+                file=sys.stderr,
+            )
+            return 2
+        print(_format_product_state(state), file=stdout)
+        return 0
+    else:
+        shell_state = service.collect_product_state()
+        print(_format_product_shell_state(shell_state), file=stdout)
+        return 0
+
+
+def _format_product_shell_state(shell: ProductShellState) -> str:
+    """Format a ProductShellState for CLI output."""
+    lines = [
+        "Product shell state:",
+        f" Runtime state: {shell.runtime_state.value}",
+        f" Runtime root: {shell.runtime_root}",
+        f" Known products: {len(shell.products)}",
+        f" Managed: {shell.managed_count}",
+        f" Installed: {shell.installed_count}",
+        "",
+    ]
+    for p in shell.products:
+        lines.append(f" {p.product_id} ({p.display_name}):")
+        lines.append(f"  Managed: {p.managed.value}")
+        lines.append(f"  Installed: {'yes' if p.installed else 'no'}")
+        if p.version:
+            lines.append(f"  Version: {p.version}")
+        lines.append(f"  Launchable: {'yes' if p.launchable else 'no'}")
+        lines.append(f"  Reason code: {p.reason_code.value}")
+        lines.append(f"  Reason: {p.reason}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _format_product_state(state: ProductState) -> str:
+    """Format a single ProductState for CLI output."""
+    lines = [
+        f"Product: {state.product_id} ({state.display_name})",
+        f" Managed: {state.managed.value}",
+        f" Installed: {'yes' if state.installed else 'no'}",
+    ]
+    if state.version:
+        lines.append(f" Version: {state.version}")
+    lines.append(f" Launchable: {'yes' if state.launchable else 'no'}")
+    lines.append(f" Reason code: {state.reason_code.value}")
+    lines.append(f" Reason: {state.reason}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
