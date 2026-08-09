@@ -188,6 +188,10 @@ class DeploymentPlan:
     # M0-8B foundation: bind to source runtime identity.
     source_active_slot_id: str | None = None
     source_previous_slot_id: str | None = None
+    # M1-1B: optional shared-runtime dependency lock.
+    # When present, apply-deployment-plan materializes dependency wheels
+    # into the candidate slot before component installs.
+    dependency_lock: "RuntimeLock | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +217,7 @@ def build_deployment_plan(
     runtime_status: RuntimeStatus,
     *,
     probe_distribution: _ProbeFn | None = None,
+    dependency_lock: "RuntimeLock | None" = None,
 ) -> DeploymentPlan:
     """Build a pure, read-only deployment plan.
 
@@ -288,10 +293,11 @@ def build_deployment_plan(
             runtime_status,
             reason_code=DeploymentReasonCode.RUNTIME_BROKEN,
             reason=runtime_status.reason or "shared runtime is BROKEN",
+            dependency_lock=dependency_lock,
         )
 
     if runtime_status.state == RuntimeState.ABSENT:
-        return _build_absent_plan(desired_state, runtime_status)
+        return _build_absent_plan(desired_state, runtime_status, dependency_lock=dependency_lock)
 
     # ------------------------------------------------------------------
     # 4) READY runtime — probe each desired component.
@@ -318,6 +324,7 @@ def build_deployment_plan(
                 runtime_status,
                 reason_code=DeploymentReasonCode.PROBE_FAILED,
                 reason=f"probe failed for {dc.component_id!r}: {exc}",
+                dependency_lock=dependency_lock,
             )
 
         # Validate probe payload structure.
@@ -327,6 +334,7 @@ def build_deployment_plan(
                 runtime_status,
                 reason_code=DeploymentReasonCode.PROBE_FAILED,
                 reason=f"probe returned non-dict payload for {dc.component_id!r}",
+                dependency_lock=dependency_lock,
             )
 
         # Strict payload structure validation.
@@ -337,6 +345,7 @@ def build_deployment_plan(
                 runtime_status,
                 reason_code=DeploymentReasonCode.PROBE_FAILED,
                 reason=validation_error,
+                dependency_lock=dependency_lock,
             )
 
         step = _plan_step_for_component(dc, definition, probe)
@@ -353,6 +362,7 @@ def build_deployment_plan(
         steps=tuple(steps),
         blocked=blocked,
         blocked_reason="one or more components blocked" if blocked else None,
+        dependency_lock=dependency_lock,
     )
 
 
@@ -384,6 +394,7 @@ def _build_blocked_plan(
     *,
     reason_code: DeploymentReasonCode,
     reason: str,
+    dependency_lock: "RuntimeLock | None" = None,
 ) -> DeploymentPlan:
     steps = tuple(
         DeploymentStep(
@@ -405,12 +416,14 @@ def _build_blocked_plan(
         steps=steps,
         blocked=True,
         blocked_reason=reason,
+        dependency_lock=dependency_lock,
     )
 
 
 def _build_absent_plan(
     desired_state: DesiredRuntimeState,
     runtime_status: RuntimeStatus,
+    dependency_lock: "RuntimeLock | None" = None,
 ) -> DeploymentPlan:
     """Plan INSTALL for every component when the runtime is ABSENT."""
     steps = tuple(
@@ -432,6 +445,7 @@ def _build_absent_plan(
         source_previous_slot_id=runtime_status.previous_slot_id,
         steps=steps,
         blocked=False,
+        dependency_lock=dependency_lock,
     )
 
 

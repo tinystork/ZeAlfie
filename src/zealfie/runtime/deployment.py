@@ -1,8 +1,9 @@
 """Transactional offline deployment engine (M0-8B).
 
 Applies a validated :class:`DeploymentPlan` to the shared runtime:
-preflight → candidate creation → full-state materialization → candidate
-validation → pre-activation M0-6 revalidation → atomic activation.
+preflight → dependency materialization → full-state component
+materialization → candidate validation → pre-activation M0-6
+revalidation → atomic activation.
 
 All installation is offline (``--no-index --no-deps``) and every
 artifact is TOCTOU-revalidated immediately before pip handoff.
@@ -10,10 +11,15 @@ artifact is TOCTOU-revalidated immediately before pip handoff.
 
 from __future__ import annotations
 
+import hashlib
+import sys as _sys
 import venv
+from pathlib import Path as _Path
 
+from zealfie.common import normalise_distribution_name
 from zealfie.components.model import ComponentDefinition
 from zealfie.components.registry import ComponentRegistry
+from zealfie.dependencies.models import LockedDependency, RuntimeLock
 from zealfie.releases.model import VerifiedArtifact
 from zealfie.releases.verifier import ArtifactRejectionError, revalidate_verified_artifact
 
@@ -44,16 +50,22 @@ def apply_deployment_plan(
 
     1. **Preflight** — validate the plan against the current runtime state
        and reject before any filesystem mutation.
-    2. **Candidate creation** — begin an M0-6 transaction and create a
+    2. **Dependency lock coherence** — validate RuntimeLock primary
+       entries against desired component artifacts (no mutation).
+    3. **Candidate creation** — begin an M0-6 transaction and create a
        fresh venv directly at the final slot path.
-    3. **Full-state materialization** — install every desired component
-       in deterministic component-id order, regardless of KEEP/INSTALL.
-       Each artifact is TOCTOU-revalidated immediately before pip.
-    4. **Candidate validation** — verify every component is installed
+    4. **Dependency materialization** — install locked non-component
+       dependencies from the RuntimeLock into the candidate.  This is the
+       shared runtime foundation and MUST precede component installs.
+    5. **Full-state component materialization** — install every desired
+       component in deterministic component-id order, regardless of
+       KEEP/INSTALL.  Each artifact is TOCTOU-revalidated immediately
+       before pip handoff.
+    6. **Candidate validation** — verify every component is installed
        correctly within the candidate.
-    5. **Activation** — atomically switch the active pointer (M0-6).
+    7. **Activation** — atomically switch the active pointer (M0-6).
 
-    The active pointer is never modified before step 5.  On failure at
+    The active pointer is never modified before step 7.  On failure at
     any stage, the partially-created candidate is left for diagnostics
     and the active slot is unchanged.
 
@@ -76,24 +88,22 @@ def apply_deployment_plan(
     if runtime is None:
         runtime = SharedRuntime()
 
-    # ---- 1. Preflight: blocked plan -----------------------------------------
+    # ---- 1. Preflight: blocked plan ----------------------------------------
     if plan.blocked:
         return DeploymentResult(
             success=False,
             reason=f"deployment plan is blocked: {plan.blocked_reason or 'unknown'}",
         )
 
-    # ---- 2. Preflight: stale plan detection ---------------------------------
+    # ---- 2. Preflight: stale plan detection --------------------------------
     status = runtime.status()
 
-    # BROKEN runtime → fail closed, no repair.
     if status.state == RuntimeState.BROKEN:
         return DeploymentResult(
             success=False,
             reason=f"shared runtime is BROKEN: {status.reason or 'unknown'}",
         )
 
-    # Stale plan: source active slot differs from current active slot.
     if plan.source_active_slot_id != status.active_slot_id:
         return DeploymentResult(
             success=False,
@@ -104,7 +114,7 @@ def apply_deployment_plan(
             ),
         )
 
-    # ---- 3. Preflight: validate desired state against registry ---------------
+    # ---- 3. Preflight: validate desired state against registry --------------
     desired_ids = frozenset(
         dc.component_id for dc in plan.desired_state.components
     )
@@ -120,7 +130,7 @@ def apply_deployment_plan(
             ),
         )
 
-    # ---- 3.5  Preflight: shared-runtime conflict check -----------------
+    # ---- 4. Preflight: shared-runtime conflict check -----------------------
     try:
         check_desired_state_conflicts(plan.desired_state, registry)
     except PlanningError as exc:
@@ -129,7 +139,13 @@ def apply_deployment_plan(
             reason=f"shared-runtime conflict detected at apply time: {exc}",
         )
 
-    # ---- 4. Candidate creation ----------------------------------------------
+    # ---- 5. Preflight: dependency lock coherence (no mutation) --------------
+    if plan.dependency_lock is not None:
+        coh_err = _validate_dependency_lock_coherence(plan)
+        if coh_err is not None:
+            return DeploymentResult(success=False, reason=coh_err)
+
+    # ---- 6. Candidate creation ----------------------------------------------
     try:
         txn = runtime.begin_transaction()
     except Exception as exc:
@@ -155,7 +171,18 @@ def apply_deployment_plan(
             reason=f"failed to create candidate venv: {exc}",
         )
 
-    # ---- 5. Full-state materialization --------------------------------------
+    # ---- 7. Dependency materialization (from RuntimeLock) -------------------
+    # Dependencies are the shared runtime foundation and MUST be installed
+    # before any component — the milestone boundary guarantees component
+    # installs operate on top of a fully-resolved dependency environment.
+    if plan.dependency_lock is not None:
+        dep_result = _install_locked_dependencies(
+            plan, runtime, txn,
+        )
+        if dep_result is not None:
+            return dep_result
+
+    # ---- 8. Full-state component materialization ---------------------------
     # Install every desired component in deterministic component_id order,
     # regardless of KEEP/INSTALL action.  Each artifact is TOCTOU-revalidated
     # immediately before pip handoff.
@@ -171,7 +198,7 @@ def apply_deployment_plan(
                 reason=f"component {desired.component_id!r} not found in registry",
             )
 
-        # TOCTOU revalidation of the artifact before pip.
+        # TOCTOU revalidation of the artifact before pip handoff.
         try:
             fresh_artifact = _revalidate_artifact(
                 desired, registry
@@ -185,7 +212,7 @@ def apply_deployment_plan(
                 ),
             )
 
-        # Install the wheel into the candidate.
+        # Install the component wheel into the candidate.
         result = runtime.install_local_wheel(
             fresh_artifact.path,
             slot_id=txn.candidate_slot_id,
@@ -196,7 +223,6 @@ def apply_deployment_plan(
             definitions.append(definition)
             continue
 
-        # FAILED, VERSION_MISMATCH, CONTRACT_MISMATCH → stop.
         return DeploymentResult(
             success=False,
             reason=(
@@ -205,7 +231,7 @@ def apply_deployment_plan(
             ),
         )
 
-    # ---- 6. Candidate validation (multi-component) --------------------------
+    # ---- 9. Candidate validation (multi-component) --------------------------
     val_status = runtime.validate_candidate(
         txn,
         component_definitions=definitions,
@@ -220,7 +246,7 @@ def apply_deployment_plan(
             ),
         )
 
-    # ---- 6b. Verify candidate versions match desired state (M0-8B.2) ----
+    # ---- 9b. Verify candidate versions match desired state (M0-8B.2) --------
     for desired in plan.desired_state.components:
         observed = txn.expected_versions.get(desired.component_id)
         if observed is None:
@@ -240,7 +266,7 @@ def apply_deployment_plan(
                 ),
             )
 
-    # ---- 7. Activation (includes pre-activation TOCTOU revalidation) --------
+    # ---- 10. Activation (includes pre-activation TOCTOU revalidation) -------
     act_status = runtime.activate(txn)
 
     if act_status.state != RuntimeState.READY:
@@ -277,3 +303,255 @@ def _revalidate_artifact(
         desired.artifact,
         registry=registry,
     )
+
+
+# ---------------------------------------------------------------------------
+# M1-1B dependency materialization helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_dependency_lock_coherence(plan: DeploymentPlan) -> str | None:
+    """Validate that every RuntimeLock primary entry agrees with its
+    corresponding DesiredComponent/VerifiedArtifact on all stable
+    identity and artifact fields.
+
+    Fields checked (fail-closed — any mismatch blocks deployment):
+
+    * Normalised distribution name (primary → desired component lookup)
+    * Version (wheel_version)
+    * Wheel path (resolved)
+    * Size
+    * SHA256
+
+    Every RuntimeLock primary must match a desired component; the
+    reverse direction (every desired component must be a primary) is
+    NOT enforced — users may omit certain components from the lock.
+
+    This is a pure plan-inspection check that runs before any filesystem
+    mutation (before ``begin_transaction``).
+    """
+    lock = plan.dependency_lock
+    if lock is None:
+        return None
+
+    # Build normalised component distribution name -> DesiredComponent map.
+    component_dists: dict[str, DesiredComponent] = {}
+    for dc in plan.desired_state.components:
+        norm = normalise_distribution_name(dc.artifact.distribution_name)
+        if norm in component_dists:
+            return (
+                f"duplicate normalised distribution name {norm!r} "
+                f"in desired components"
+            )
+        component_dists[norm] = dc
+
+    # Validate every primary entry against its corresponding desired component.
+    for primary_name in lock.primary_names:
+        if primary_name not in component_dists:
+            return (
+                f"RuntimeLock primary entry {primary_name!r} does not match "
+                f"any desired component distribution"
+            )
+
+        locked_dep = lock[primary_name]
+
+        if locked_dep.name != primary_name:
+            return (
+                f"RuntimeLock primary key {primary_name!r} does not match "
+                f"locked dependency name {locked_dep.name!r}"
+            )
+
+        dc = component_dists[primary_name]
+
+        # --- Version (wheel_version) ---
+        if locked_dep.version != dc.artifact.wheel_version:
+            return (
+                f"RuntimeLock primary {primary_name!r} version "
+                f"{locked_dep.version!r} does not match desired component "
+                f"{dc.component_id!r} wheel_version "
+                f"{dc.artifact.wheel_version!r}"
+            )
+
+        # --- Wheel path (resolve for equivalent-path detection) ---
+        if locked_dep.wheel_path.resolve() != dc.artifact.path.resolve():
+            return (
+                f"RuntimeLock primary {primary_name!r} wheel_path "
+                f"{locked_dep.wheel_path} does not match desired component "
+                f"{dc.component_id!r} artifact path "
+                f"{dc.artifact.path}"
+            )
+
+        # --- Size ---
+        if locked_dep.size != dc.artifact.size:
+            return (
+                f"RuntimeLock primary {primary_name!r} size "
+                f"{locked_dep.size} does not match desired component "
+                f"{dc.component_id!r} artifact size "
+                f"{dc.artifact.size}"
+            )
+
+        # --- SHA256 ---
+        if locked_dep.sha256 != dc.artifact.sha256:
+            return (
+                f"RuntimeLock primary {primary_name!r} sha256 "
+                f"{locked_dep.sha256[:16]}... does not match desired component "
+                f"{dc.component_id!r} artifact sha256 "
+                f"{dc.artifact.sha256[:16]}..."
+            )
+
+    return None
+
+
+def _install_locked_dependencies(
+    plan: DeploymentPlan,
+    runtime: SharedRuntime,
+    txn: "RuntimeTransaction",
+) -> DeploymentResult | None:
+    """Install locked non-component dependencies into the candidate slot.
+
+    Steps per dependency:
+    1. TOCTOU revalidation (size + sha256 against LockedDependency).
+    2. ``pip install --no-index --no-deps`` into the candidate.
+    3. Exact version validation in the candidate.
+
+    Returns ``None`` on success, or a ``DeploymentResult`` on failure.
+    The active pointer is never modified here.
+    """
+    lock = plan.dependency_lock
+    if lock is None:
+        return None
+
+    # ---- Phase A: TOCTOU + install each non-component dependency ------------
+    for dep in _iter_locked_dependencies(lock):
+        dep_name = dep.name
+
+        # TOCTOU revalidation before pip.
+        toctou_err = _revalidate_dependency_wheel(dep)
+        if toctou_err is not None:
+            return DeploymentResult(success=False, reason=toctou_err)
+
+        # Install via the existing offline install path.
+        result = runtime.install_local_wheel(
+            dep.wheel_path,
+            slot_id=txn.candidate_slot_id,
+            component_definition=None,  # No component contract for deps
+        )
+
+        if result.outcome not in (
+            InstallOutcome.INSTALLED,
+            InstallOutcome.ALREADY_INSTALLED,
+        ):
+            return DeploymentResult(
+                success=False,
+                reason=(
+                    f"dependency install failed for {dep_name!r}: "
+                    f"{result.outcome.value} -- {result.detail or 'no detail'}"
+                ),
+            )
+
+    # ---- Phase B: exact dependency version validation -----------------------
+    validation_err = _validate_exact_dependency_versions(txn, lock)
+    if validation_err is not None:
+        return DeploymentResult(success=False, reason=validation_err)
+
+    return None
+
+
+def _revalidate_dependency_wheel(dep: LockedDependency) -> str | None:
+    """TOCTOU revalidate a single dependency wheel before pip handoff.
+
+    Returns an error string on mismatch, or None if the wheel is intact.
+    """
+    wheel_path = dep.wheel_path
+
+    if not wheel_path.is_file():
+        return (
+            f"TOCTOU: dependency wheel not found for {dep.name!r}: "
+            f"{wheel_path}"
+        )
+
+    actual_size = wheel_path.stat().st_size
+    if actual_size != dep.size:
+        return (
+            f"TOCTOU size mismatch for dependency {dep.name!r}: "
+            f"expected {dep.size}, got {actual_size}"
+        )
+
+    actual_sha256 = _sha256_of_path(wheel_path)
+    if actual_sha256 != dep.sha256:
+        return (
+            f"TOCTOU sha256 mismatch for dependency {dep.name!r}: "
+            f"expected {dep.sha256[:16]}..., got {actual_sha256[:16]}..."
+        )
+
+    return None
+
+
+def _validate_exact_dependency_versions(
+    txn: "RuntimeTransaction",
+    lock: RuntimeLock,
+) -> str | None:
+    """Probe the candidate for every locked non-component dependency.
+
+    Every locked dependency distribution must be installed in the
+    candidate at the exact version recorded in the lock.
+
+    Returns an error string on the first mismatch, or None if all
+    dependencies satisfy the lock.
+    """
+    from .probe import probe_runtime_distribution
+
+    candidate_python = _candidate_python(txn.candidate_path)
+    if candidate_python is None:
+        return "candidate Python not found during dependency validation"
+
+    for dep in _iter_locked_dependencies(lock):
+        dep_name = dep.name
+
+        try:
+            probe = probe_runtime_distribution(candidate_python, dep_name)
+        except Exception as exc:
+            return (
+                f"dependency probe failed for {dep_name!r} "
+                f"during exact version validation: {exc}"
+            )
+
+        if not probe.get("installed"):
+            return (
+                f"dependency {dep_name!r} not installed in candidate "
+                f"after dependency materialization"
+            )
+
+        installed_version = probe.get("version")
+        if installed_version != dep.version:
+            return (
+                f"dependency version mismatch for {dep_name!r}: "
+                f"expected {dep.version!r}, got {installed_version!r}"
+            )
+
+    return None
+
+
+def _iter_locked_dependencies(lock: RuntimeLock):
+    """Yield non-primary dependencies in RuntimeLock insertion order."""
+    for dep in lock.locked.values():
+        if dep.required_by:
+            yield dep
+
+
+def _sha256_of_path(path: _Path) -> str:
+    """Compute the SHA-256 hex digest of a file."""
+    sha = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def _candidate_python(candidate_path: _Path) -> _Path | None:
+    """Return the Python interpreter inside a candidate slot directory."""
+    if _sys.platform == "win32":
+        py = candidate_path / "Scripts" / "python.exe"
+    else:
+        py = candidate_path / "bin" / "python"
+    return py if py.is_file() else None
