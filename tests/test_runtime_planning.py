@@ -599,7 +599,7 @@ def test_entry_points_non_string_group_name_blocks() -> None:
     assert plan.blocked is True
     assert plan.steps[0].action == DeploymentAction.BLOCKED
     assert plan.steps[0].reason_code == DeploymentReasonCode.PROBE_FAILED
-    assert "group/name must be str" in (plan.steps[0].reason or "")
+    assert "group/name must be non-empty str" in (plan.steps[0].reason or "")
 
 
 # ---------------------------------------------------------------------------

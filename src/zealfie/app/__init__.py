@@ -10,10 +10,21 @@ from ._status import (
     format_status,
     startup_message,
 )
-from .service import OfflineReleaseError, ZeAlfieService
+from .service import (
+    ComponentNotInstalledError,
+    LaunchContractNotSatisfiedError,
+    LaunchPreparationError,
+    LaunchScriptNotFoundError,
+    OfflineReleaseError,
+    ZeAlfieService,
+)
 
 __all__ = [
+    "ComponentNotInstalledError",
     "FULL_NAME",
+    "LaunchContractNotSatisfiedError",
+    "LaunchPreparationError",
+    "LaunchScriptNotFoundError",
     "OfflineReleaseError",
     "RuntimeStatus",
     "ZeAlfieService",

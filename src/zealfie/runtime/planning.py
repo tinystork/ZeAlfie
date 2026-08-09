@@ -559,7 +559,7 @@ def _validate_probe_payload(probe: dict[str, Any], component_id: str) -> str | N
         * ``version`` must be a non-empty ``str``.
         * ``entry_points`` must be a ``list``.
         * Every item in ``entry_points`` must be a ``dict`` whose
-          ``group`` and ``name`` values are ``str``.
+          ``group`` and ``name`` values are non-empty ``str``.
     """
     installed = probe.get("installed")
 
@@ -632,11 +632,12 @@ def _validate_probe_payload(probe: dict[str, Any], component_id: str) -> str | N
             )
         group = ep.get("group")
         name = ep.get("name")
-        if not isinstance(group, str) or not isinstance(name, str):
+        if not isinstance(group, str) or not group or not isinstance(name, str) or not name:
             return (
                 f"probe payload for {component_id!r}: "
-                f"entry_points[{i}] group/name must be str, "
-                f"got group={type(group).__name__} name={type(name).__name__}"
+                f"entry_points[{i}] group/name must be non-empty str, "
+                f"got group={type(group).__name__}={group!r} "
+                f"name={type(name).__name__}={name!r}"
             )
 
     return None

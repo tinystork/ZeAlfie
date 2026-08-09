@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import TextIO
 
 from . import get_version
 from .app import (
+    ComponentNotInstalledError,
+    LaunchContractNotSatisfiedError,
+    LaunchPreparationError,
+    LaunchScriptNotFoundError,
     OfflineReleaseError,
     ZeAlfieService,
     collect_status,
@@ -18,6 +23,7 @@ from .app import (
     startup_message,
 )
 from .components import UnknownComponentError, default_registry
+from .launching import LaunchError, LaunchResult
 from .runtime import (
     DeploymentPlan,
     DeploymentResult,
@@ -29,6 +35,21 @@ from .runtime import (
     SharedRuntimeError,
     default_runtime_layout,
 )
+
+
+def _positive_finite_float(value: str) -> float:
+    """Validate a finite, strictly positive float for --timeout.
+
+    Raises :class:`argparse.ArgumentTypeError` for nan, inf, zero,
+    and negative values so the parser produces a clean error message
+    and exits rather than propagating garbage downstream.
+    """
+    f = float(value)
+    if f <= 0 or not math.isfinite(f):
+        raise argparse.ArgumentTypeError(
+            f"timeout must be a positive finite number, got {value!r}"
+        )
+    return f
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +65,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     status_parser = subparsers.add_parser("status", help="show current ZeAlfie runtime status")
     status_parser.add_argument("component_id", nargs="?", help="optional component id to inspect")
+
+    # -- launch subcommand ---------------------------------------------------
+    launch_parser = subparsers.add_parser("launch", help="launch a managed component from the shared runtime")
+    launch_parser.add_argument("component_id", help="component id to launch")
+    launch_parser.add_argument(
+        "--timeout", type=_positive_finite_float, default=None, dest="timeout_seconds",
+        help="seconds to wait before killing the process (default: no timeout)",
+    )
 
     # -- runtime subcommand --------------------------------------------------
     runtime_parser = subparsers.add_parser("runtime", help="manage the shared runtime")
@@ -87,6 +116,9 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
         else:
             print(format_status(collect_status(registry)), file=stdout)
         return 0
+
+    if args.command == "launch":
+        return _handle_launch(args, stdout=stdout)
 
     if args.command == "runtime":
         layout = default_runtime_layout()
@@ -142,6 +174,55 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
 
     print(startup_message(), file=stdout)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# M1-0A: launch handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_launch(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie launch <component_id> [--timeout SECONDS]``."""
+    service = _make_service()
+
+    try:
+        result = service.launch_component(
+            args.component_id,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except UnknownComponentError:
+        available = ", ".join(default_registry().available_ids()) or "none"
+        print(
+            f"Unknown component: {args.component_id}. Available components: {available}",
+            file=sys.stderr,
+        )
+        return 5
+    except LaunchPreparationError as exc:
+        print(f"cannot launch {args.component_id!r}: {exc}", file=sys.stderr)
+        return 6
+    except LaunchError as exc:
+        print(f"cannot launch {args.component_id!r}: {exc}", file=sys.stderr)
+        return 6
+
+    _print_launch_result(result, stdout=stdout)
+    if result.timed_out:
+        return 10
+    return result.return_code
+
+
+def _print_launch_result(result: LaunchResult, *, stdout: TextIO) -> None:
+    """Print launch output to stdout, stderr to stderr."""
+    if result.stdout:
+        print(result.stdout, end="", file=stdout)
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.timed_out:
+        print("launch timed out", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _format_runtime_status(st: RuntimeStatus) -> str:

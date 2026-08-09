@@ -35,14 +35,15 @@ class EntryPointScriptNotFoundError(LaunchError):
 def execute_launch_plan(
     plan: LaunchPlan,
     *,
-    timeout_seconds: float = 30,
+    timeout_seconds: float | None = 30,
 ) -> LaunchResult:
     """Execute a prepared :class:`LaunchPlan` as a subprocess.
 
     The process always runs with ``shell=False``.  stdout and stderr are
-    captured and decoded as UTF-8.  If the process does not complete
-    within *timeout_seconds*, it is killed and the result will have
-    ``timed_out=True``.
+    captured and decoded as UTF-8.  If *timeout_seconds* is not ``None``
+    and the process does not complete within it, it is killed and the
+    result will have ``timed_out=True``.  When *timeout_seconds* is
+    ``None``, the subprocess runs with no time limit.
 
     Raises :class:`FileNotFoundError` when the executable does not exist.
     """

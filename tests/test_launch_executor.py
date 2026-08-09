@@ -95,6 +95,21 @@ def test_execute_missing_executable_raises() -> None:
         execute_launch_plan(plan, timeout_seconds=5)
 
 
+def test_execute_present_but_not_executable_raises(tmp_path: Path) -> None:
+    """A present script that cannot be executed is an execution-boundary
+    LaunchError, not a raw OSError."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX execute bits are not portable to Windows")
+
+    script = tmp_path / "not-executable.sh"
+    script.write_text("#!/bin/sh\necho should-not-run\n")
+    script.chmod(0o644)
+
+    plan = LaunchPlan(component_id="test", executable=script)
+    with pytest.raises(LaunchError, match="could not execute"):
+        execute_launch_plan(plan, timeout_seconds=5)
+
+
 # ---------------------------------------------------------------------------
 # Working directory
 # ---------------------------------------------------------------------------

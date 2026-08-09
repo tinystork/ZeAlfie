@@ -1,15 +1,25 @@
-"""Application-level deployment orchestration service (M0-9).
+"""Application-level deployment orchestration service (M0-9/M1-0A).
 
 M0-9.1: read-only offline deployment planning (plan_offline_deployment).
 M0-9.2: apply + rollback orchestration using existing runtime primitives.
 M0-9.3: CLI commands delegate to this service.
+M1-0A: runtime component launch (prepare_launch_plan, launch_component).
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from zealfie.components.registry import ComponentRegistry, default_registry
+from zealfie.components.model import ComponentDefinition
+from zealfie.components.registry import ComponentRegistry, UnknownComponentError, default_registry
+from zealfie.launching import (
+    EntryPointScriptNotFoundError,
+    LaunchPlan,
+    LaunchResult,
+    execute_launch_plan,
+    resolve_script,
+)
 from zealfie.releases.manifest import (
     ReleaseManifestError,
     parse_release_manifest_file,
@@ -18,13 +28,18 @@ from zealfie.releases.model import HostTarget
 from zealfie.releases.resolver import ReleaseResolutionError, resolve_local_release
 from zealfie.runtime.deployment import apply_deployment_plan
 from zealfie.runtime.manager import SharedRuntime
-from zealfie.runtime.model import DeploymentResult, RuntimeStatus
+from zealfie.runtime.model import (
+    DeploymentResult,
+    RuntimeState,
+    RuntimeStatus,
+)
 from zealfie.runtime.planning import (
     DeploymentPlan,
     DesiredComponent,
     DesiredRuntimeState,
     build_deployment_plan,
 )
+from zealfie.runtime.probe import probe_runtime_distribution
 
 
 class OfflineReleaseError(ValueError):
@@ -36,12 +51,46 @@ class OfflineReleaseError(ValueError):
     """
 
 
+# ---------------------------------------------------------------------------
+# M1-0A: Launch errors
+# ---------------------------------------------------------------------------
+
+
+class LaunchPreparationError(RuntimeError):
+    """Raised when a launch cannot be prepared.
+
+    Each subclass carries an *exit_code* that the CLI can use when
+    surfacing the error to the user.  All messages are human-readable
+    and free of Python traceback details.
+    """
+
+
+class ComponentNotInstalledError(LaunchPreparationError):
+    """The component's distribution is not installed in the runtime."""
+
+
+class LaunchContractNotSatisfiedError(LaunchPreparationError):
+    """None of the component's declared entry-point contracts were found
+    in the installed distribution."""
+
+
+class LaunchScriptNotFoundError(LaunchPreparationError):
+    """The matched entry-point script does not exist inside the runtime."""
+
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+
+
 class ZeAlfieService:
     """Application-level deployment orchestration for ZeAlfie.
 
     Provides ``plan_offline_deployment`` for preview/planning,
-    ``apply_offline_deployment`` for orchestrated apply, and
-    ``rollback_runtime`` for rollback.
+    ``apply_offline_deployment`` for orchestrated apply,
+    ``rollback_runtime`` for rollback, and
+    ``prepare_launch_plan`` / ``launch_component`` for runtime launch
+    (M1-0A).
 
     Dependencies (registry, runtime, host) are injectable so tests
     can supply synthetic instances.
@@ -234,3 +283,300 @@ class ZeAlfieService:
         This mutates the shared runtime active pointer.
         """
         return self._runtime.rollback()
+
+    # ------------------------------------------------------------------
+    # M1-0A: prepare_launch_plan
+    # ------------------------------------------------------------------
+
+    def prepare_launch_plan(self, component_id: str) -> LaunchPlan:
+        """Prepare a :class:`LaunchPlan` for *component_id* from the
+        active shared runtime.
+
+        The component MUST be declared in the trusted registry and its
+        distribution MUST be installed in the active runtime slot with a
+        satisfied launch contract.  The resolved entry-point script is
+        located inside the runtime's scripts directory — never the dev
+        venv.
+
+        This is a read-only operation; no process is started.
+
+        Raises
+        ------
+        UnknownComponentError
+            If *component_id* is not in the trusted registry.
+        LaunchPreparationError
+            If the runtime is ABSENT or BROKEN.
+        ComponentNotInstalledError
+            If the component's distribution is not installed in the
+            runtime.
+        LaunchContractNotSatisfiedError
+            If the installed distribution does not declare any of the
+            expected entry-point contracts.
+        LaunchScriptNotFoundError
+            If the matched entry-point script cannot be found inside the
+            runtime scripts directory.
+        """
+        # --- 1. Resolve component from trusted registry --------------------
+        try:
+            definition = self._registry.get(component_id)
+        except UnknownComponentError:
+            raise  # let CLI surface it directly
+
+        # --- 2. Require READY runtime with an active slot ------------------
+        rt_status = self._runtime.status()
+        if rt_status.state == RuntimeState.ABSENT:
+            raise LaunchPreparationError(
+                "shared runtime is absent — create or deploy a runtime first "
+                "(zealfie runtime create)"
+            )
+        if rt_status.state == RuntimeState.BROKEN:
+            raise LaunchPreparationError(
+                f"shared runtime is broken: {rt_status.reason or 'unknown reason'}"
+            )
+        if rt_status.active_path is None or rt_status.python_executable is None:
+            raise LaunchPreparationError(
+                "shared runtime is READY but has no active slot path"
+            )
+
+        active_path = rt_status.active_path
+        runtime_python = rt_status.python_executable
+
+        # --- 3. Probe the distribution inside the runtime ------------------
+        try:
+            probe = probe_runtime_distribution(
+                runtime_python, definition.distribution_name
+            )
+        except Exception as exc:
+            raise LaunchPreparationError(
+                f"could not probe runtime for {definition.distribution_name!r}: {exc}"
+            ) from exc
+
+        # --- 3b. Validate probe payload structure (M1-0A C1) ---------------
+        _validate_probe_payload(probe, definition.distribution_name)
+
+        # --- 3c. Check installed flag --------------------------------------
+        if not probe.get("installed"):
+            raise ComponentNotInstalledError(
+                f"component {component_id!r} ({definition.distribution_name}) "
+                "is not installed in the shared runtime"
+            )
+
+        # --- 4. Select a declared entry point (prefer registry order) ------
+        entry_point_name = _select_entry_point_name(definition, probe)
+        if entry_point_name is None:
+            expected = ", ".join(
+                f"{c.group}:{c.name}" for c in definition.launch_entry_points
+            )
+            raise LaunchContractNotSatisfiedError(
+                f"component {component_id!r} is installed but none of the "
+                f"expected launch entry points ({expected}) were found"
+            )
+
+        # --- 5. Resolve the entry-point script in the runtime scripts dir --
+        scripts_dir = _runtime_scripts_dir(active_path)
+        try:
+            script_path = resolve_script(scripts_dir, entry_point_name)
+        except EntryPointScriptNotFoundError as exc:
+            raise LaunchScriptNotFoundError(
+                f"entry-point script {entry_point_name!r} not found in "
+                f"the active runtime scripts directory ({scripts_dir})"
+            ) from exc
+
+        # --- 6. Build the launch plan --------------------------------------
+        return LaunchPlan(
+            component_id=component_id,
+            executable=script_path,
+        )
+
+    # ------------------------------------------------------------------
+    # M1-0A: launch_component
+    # ------------------------------------------------------------------
+
+    def launch_component(
+        self,
+        component_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> LaunchResult:
+        """Prepare and execute a launch of *component_id* from the active
+        shared runtime.
+
+        Calls :meth:`prepare_launch_plan` then
+        :func:`~zealfie.launching.execute_launch_plan`.
+
+        Parameters
+        ----------
+        component_id:
+            The trusted component to launch.
+        timeout_seconds:
+            Seconds to wait for the subprocess.  ``None`` (default) means
+            no timeout, which is appropriate for long-running GUI apps.
+            Pass an explicit value to impose a deadline.
+
+        Returns
+        -------
+        LaunchResult
+            The captured stdout, stderr, return code, and timeout flag.
+
+        Raises
+        ------
+        UnknownComponentError
+            If *component_id* is not in the trusted registry.
+        LaunchPreparationError
+            (or subclass) If preparation fails — runtime absent/broken,
+            component not installed, contract not satisfied, or script
+            not found.
+        """
+        plan = self.prepare_launch_plan(component_id)
+        return execute_launch_plan(plan, timeout_seconds=timeout_seconds)
+
+
+# ---------------------------------------------------------------------------
+# M1-0A helpers
+# ---------------------------------------------------------------------------
+
+def _validate_probe_payload(
+    probe: object,
+    distribution_name: str,
+) -> None:
+    """Validate the structure of a probe payload.
+
+    Raises :class:`LaunchPreparationError` for any malformed field so
+    that callers never receive an ``AttributeError`` or ``TypeError``
+    from downstream consumers such as :func:`_select_entry_point_name`.
+
+    Rules (aligned with :func:`zealfie.runtime.planning._validate_probe_payload`):
+
+    * ``installed`` must be exactly ``bool``.
+    * If ``installed is False``:
+        * ``version`` must be present and exactly ``None``.
+        * ``entry_points`` must be present, must be a ``list``, and
+          must be empty.
+    * If ``installed is True``:
+        * ``version`` must be a non-empty ``str``.
+        * ``entry_points`` must be a ``list``.
+        * Every item in ``entry_points`` must be a ``dict`` whose
+          ``group`` and ``name`` values are non-empty ``str``.
+    """
+    if not isinstance(probe, dict):
+        raise LaunchPreparationError(
+            f"runtime probe for {distribution_name!r} returned an "
+            f"unexpected type {type(probe).__name__!r} (expected dict)"
+        )
+
+    installed = probe.get("installed")
+    if not isinstance(installed, bool):
+        raise LaunchPreparationError(
+            f"runtime probe for {distribution_name!r} returned "
+            f"non-bool 'installed' field: {installed!r}"
+        )
+
+    if installed is False:
+        # version must exist and be exactly None.
+        if "version" not in probe:
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                "missing 'version' key when installed=False"
+            )
+        version = probe["version"]
+        if version is not None:
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                f"version must be None when installed=False, "
+                f"got {type(version).__name__}={version!r}"
+            )
+        # entry_points must exist, be a list, and be empty.
+        if "entry_points" not in probe:
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                "missing 'entry_points' key when installed=False"
+            )
+        entry_points = probe["entry_points"]
+        if not isinstance(entry_points, list):
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                f"entry_points must be a list when installed=False, "
+                f"got {type(entry_points).__name__}"
+            )
+        if len(entry_points) != 0:
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                f"entry_points must be empty when installed=False, "
+                f"got {type(entry_points).__name__} "
+                f"with {len(entry_points)} item(s)"
+            )
+        return
+
+    # installed is True
+    version = probe.get("version")
+    if not isinstance(version, str) or not version:
+        raise LaunchPreparationError(
+            f"runtime probe for {distribution_name!r}: "
+            f"version must be non-empty str when installed=True, "
+            f"got {type(version).__name__}={version!r}"
+        )
+
+    entry_points = probe.get("entry_points")
+    if not isinstance(entry_points, list):
+        raise LaunchPreparationError(
+            f"runtime probe for {distribution_name!r} returned "
+            f"non-list 'entry_points' field: {entry_points!r}"
+        )
+
+    for i, ep in enumerate(entry_points):
+        if not isinstance(ep, dict):
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                f"entry_points[{i}] is not a dict: {ep!r}"
+            )
+        group = ep.get("group")
+        if not isinstance(group, str) or not group:
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                f"entry_points[{i}] has missing or non-string "
+                f"'group': {group!r}"
+            )
+        name = ep.get("name")
+        if not isinstance(name, str) or not name:
+            raise LaunchPreparationError(
+                f"runtime probe for {distribution_name!r}: "
+                f"entry_points[{i}] has missing or non-string "
+                f"'name': {name!r}"
+            )
+
+
+def _select_entry_point_name(
+    definition: ComponentDefinition,
+    probe: dict[str, object],
+) -> str | None:
+    """Return the script *name* of the first registry entry-point contract
+    that is present in the probe's entry points, or ``None``."""
+    observed_eps = probe.get("entry_points", [])
+    if not isinstance(observed_eps, list):
+        return None
+
+    # Build a set of observed (group, name) → name for fast lookup.
+    observed: dict[tuple[str, str], str] = {}
+    for ep in observed_eps:
+        if not isinstance(ep, dict):
+            continue  # defense-in-depth: skip non-dict entries
+        g = str(ep.get("group", ""))
+        n = str(ep.get("name", ""))
+        if g and n:
+            observed[(g, n)] = n
+
+    # Walk registry contracts in definition order.
+    for contract in definition.launch_entry_points:
+        key = (contract.group, contract.name)
+        if key in observed:
+            return observed[key]
+
+    return None
+
+
+def _runtime_scripts_dir(venv_dir: Path) -> Path:
+    """Return the scripts directory inside a runtime venv slot."""
+    if sys.platform == "win32":
+        return venv_dir / "Scripts"
+    else:
+        return venv_dir / "bin"

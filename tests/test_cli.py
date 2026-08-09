@@ -1079,3 +1079,278 @@ def test_runtime_rollback_broken_returns_nonzero(monkeypatch):
     assert code == 3, f"expected exit 3 for BROKEN rollback, got {code}"
     output = stdout.getvalue()
     assert "State: BROKEN" in output
+
+# ===========================================================================
+# M1-0A: CLI launch command
+# ===========================================================================
+
+from zealfie.app.service import (
+    ComponentNotInstalledError,
+    LaunchContractNotSatisfiedError,
+    LaunchPreparationError,
+    LaunchScriptNotFoundError,
+)
+from zealfie.components import UnknownComponentError
+from zealfie.launching import LaunchError, LaunchResult
+
+
+class _FakeLaunchService:
+    """Fake ZeAlfieService for CLI launch tests."""
+
+    def __init__(self, result_or_error):
+        self._result_or_error = result_or_error
+        self.launch_called_with: list[tuple] = []
+
+    def launch_component(self, component_id, *, timeout_seconds=None):
+        self.launch_called_with.append((component_id, timeout_seconds))
+        if isinstance(self._result_or_error, Exception):
+            raise self._result_or_error
+        return self._result_or_error
+
+
+# -- Success -------------------------------------------------------------------
+
+
+def test_launch_success_returns_component_rc(monkeypatch):
+    """CLI launch prints output and returns component's return code."""
+    result = LaunchResult(return_code=0, stdout="hello world\n", stderr="")
+    service = _FakeLaunchService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = run(["launch", "zewitness"], stdout=stdout)
+    assert code == 0
+    assert "hello world" in stdout.getvalue()
+    assert service.launch_called_with == [("zewitness", None)]
+
+
+def test_launch_success_nonzero_rc(monkeypatch):
+    """CLI launch returns component's non-zero return code."""
+    result = LaunchResult(return_code=42, stdout="", stderr="error detail")
+    service = _FakeLaunchService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = run(["launch", "zewitness"], stdout=stdout)
+    assert code == 42
+
+
+def test_launch_passes_timeout(monkeypatch):
+    """CLI launch passes --timeout to service.launch_component."""
+    result = LaunchResult(return_code=0, stdout="ok", stderr="")
+    service = _FakeLaunchService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = run(["launch", "zewitness", "--timeout", "10"], stdout=stdout)
+    assert code == 0
+    assert service.launch_called_with == [("zewitness", 10.0)]
+
+
+# -- Unknown component ---------------------------------------------------------
+
+
+def test_launch_unknown_component_clean_error(monkeypatch):
+    """Unknown component → exit code 5, clean stderr, no traceback."""
+    service = _FakeLaunchService(UnknownComponentError("zewitness"))
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(
+        cli, "default_registry",
+        lambda: ComponentRegistry(
+            [ComponentDefinition("zesolver", "ZeSolver", "ZeSolver",
+                                 (EntryPointContract("gui_scripts", "zesolver"),))]
+        )
+    )
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["launch", "nonexistent"], stdout=stdout)
+        assert code == 5
+        assert "Unknown component: nonexistent" in stderr.getvalue()
+        assert "zesolver" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- LaunchPreparationError (runtime absent/broken) ----------------------------
+
+
+def test_launch_preparation_error_clean(monkeypatch):
+    """LaunchPreparationError → exit code 6, clean stderr, no traceback."""
+    service = _FakeLaunchService(
+        LaunchPreparationError("shared runtime is absent")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["launch", "zewitness"], stdout=stdout)
+        assert code == 6
+        assert "cannot launch 'zewitness': shared runtime is absent" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+def test_launch_component_not_installed_clean(monkeypatch):
+    """ComponentNotInstalledError → exit code 6, clean stderr, no traceback."""
+    service = _FakeLaunchService(
+        ComponentNotInstalledError("not installed")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["launch", "zewitness"], stdout=stdout)
+        assert code == 6
+        assert "cannot launch 'zewitness': not installed" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+def test_launch_contract_not_satisfied_clean(monkeypatch):
+    """LaunchContractNotSatisfiedError → exit code 6, clean stderr."""
+    service = _FakeLaunchService(
+        LaunchContractNotSatisfiedError("no matching entry points")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["launch", "zewitness"], stdout=stdout)
+        assert code == 6
+        assert "cannot launch 'zewitness': no matching entry points" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+def test_launch_script_not_found_clean(monkeypatch):
+    """LaunchScriptNotFoundError → exit code 6, clean stderr."""
+    service = _FakeLaunchService(
+        LaunchScriptNotFoundError("script not found")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["launch", "zewitness"], stdout=stdout)
+        assert code == 6
+        assert "cannot launch 'zewitness': script not found" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- Timeout -------------------------------------------------------------------
+
+
+def test_launch_timed_out_returns_10(monkeypatch):
+    """CLI launch returns exit code 10 on timeout."""
+    result = LaunchResult(
+        return_code=-1, stdout="partial", stderr="", timed_out=True
+    )
+    service = _FakeLaunchService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["launch", "zewitness"], stdout=stdout)
+        assert code == 10
+        assert "launch timed out" in stderr.getvalue()
+        assert "partial" in stdout.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- Parser tests --------------------------------------------------------------
+
+
+def test_launch_in_parser():
+    """launch subcommand is present in the argument parser."""
+    p = cli.build_parser()
+    # Parse standalone launch with component.
+    args = p.parse_args(["launch", "zewitness"])
+    assert args.command == "launch"
+    assert args.component_id == "zewitness"
+    assert args.timeout_seconds is None
+
+
+def test_launch_parser_timeout():
+    """launch subcommand accepts --timeout."""
+    p = cli.build_parser()
+    args = p.parse_args(["launch", "zewitness", "--timeout", "60"])
+    assert args.timeout_seconds == 60.0
+
+
+# -- LaunchError (execution boundary failure) ----------------------------------
+
+
+def test_launch_execution_error_clean(monkeypatch):
+    """LaunchError from execute_launch_plan → exit code 6, clean stderr,
+    no traceback."""
+    service = _FakeLaunchService(
+        LaunchError("could not execute /bin/nonexistent: Permission denied")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["launch", "zewitness"], stdout=stdout)
+        assert code == 6
+        assert "cannot launch 'zewitness': could not execute" in stderr.getvalue()
+        assert "Permission denied" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- Timeout validation (adversarial) ------------------------------------------
+
+
+def test_launch_parser_timeout_nan_rejected():
+    """--timeout nan → argparse SystemExit, clean error."""
+    p = cli.build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["launch", "zewitness", "--timeout", "nan"])
+
+
+def test_launch_parser_timeout_inf_rejected():
+    """--timeout inf → argparse SystemExit, clean error."""
+    p = cli.build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["launch", "zewitness", "--timeout", "inf"])
+
+
+def test_launch_parser_timeout_negative_rejected():
+    """--timeout negative → argparse SystemExit, clean error."""
+    p = cli.build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["launch", "zewitness", "--timeout", "-1"])
+
+
+def test_launch_parser_timeout_zero_rejected():
+    """--timeout 0 → argparse SystemExit, clean error."""
+    p = cli.build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["launch", "zewitness", "--timeout", "0"])
+
+
+def test_launch_parser_timeout_positive_accepted():
+    """--timeout with a positive float is accepted."""
+    p = cli.build_parser()
+    args = p.parse_args(["launch", "zewitness", "--timeout", "0.5"])
+    assert args.timeout_seconds == 0.5

@@ -939,3 +939,671 @@ def test_unicode_decode_error_not_leaked_from_parse(tmp_path, witness_wheel) -> 
 
     with pytest.raises(ReleaseManifestError, match="cannot read release manifest"):
         parse_release_manifest_file(bad_path)
+
+# ===========================================================================
+# M1-0A: prepare_launch_plan / launch_component
+# ===========================================================================
+
+from zealfie.app.service import (
+    ComponentNotInstalledError,
+    LaunchContractNotSatisfiedError,
+    LaunchPreparationError,
+    LaunchScriptNotFoundError,
+)
+from zealfie.components import UnknownComponentError
+from zealfie.launching import LaunchPlan, LaunchResult
+
+
+class _SyntheticSharedRuntime:
+    """A SharedRuntime replacement that returns canned status + python."""
+
+    def __init__(
+        self,
+        status: RuntimeStatus,
+        *,
+        probe_result: dict | None = None,
+        scripts_dir: Path | None = None,
+    ) -> None:
+        self._status = status
+        self._probe_result = probe_result or {}
+        self._scripts_dir = scripts_dir
+
+    def status(self) -> RuntimeStatus:
+        return self._status
+
+    def python(self) -> Path | None:
+        return self._status.python_executable
+
+
+def _ready_status(active_path: Path, python: Path | None = None) -> RuntimeStatus:
+    if python is None:
+        python = active_path / "bin" / "python"
+    return RuntimeStatus(
+        state=RuntimeState.READY,
+        runtime_root=active_path.parent,
+        active_slot_id="rt-test00000000",
+        active_path=active_path,
+        python_executable=python,
+        python_version="3.13.0",
+        reason_code=RuntimeReasonCode.RUNTIME_READY,
+    )
+
+
+def _absent_status_result() -> RuntimeStatus:
+    return RuntimeStatus(
+        state=RuntimeState.ABSENT,
+        runtime_root=Path("/fake/runtime"),
+    )
+
+
+def _broken_status_result() -> RuntimeStatus:
+    return RuntimeStatus(
+        state=RuntimeState.BROKEN,
+        runtime_root=Path("/fake/runtime"),
+        reason="active slot missing",
+    )
+
+
+# -- Unknown component ---------------------------------------------------------
+
+
+def test_prepare_launch_plan_unknown_component_raises():
+    """Unknown component raises UnknownComponentError directly."""
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(Path("/fake/rt"))),
+    )
+    with pytest.raises(UnknownComponentError):
+        service.prepare_launch_plan("nonexistent")
+
+
+# -- ABSENT / BROKEN runtime ---------------------------------------------------
+
+
+def test_prepare_launch_plan_absent_runtime_raises():
+    """ABSENT runtime raises LaunchPreparationError."""
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_absent_status_result()),
+    )
+    with pytest.raises(LaunchPreparationError, match="absent"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_broken_runtime_raises():
+    """BROKEN runtime raises LaunchPreparationError."""
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_broken_status_result()),
+    )
+    with pytest.raises(LaunchPreparationError, match="broken"):
+        service.prepare_launch_plan("zewitness")
+
+
+# -- Missing distribution ------------------------------------------------------
+
+
+def test_prepare_launch_plan_not_installed_raises(monkeypatch, tmp_path):
+    """ComponentNotInstalledError when probe says not installed."""
+    active = tmp_path / "rt" / "slots" / "test"
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        assert str(runtime_python) == str(python)
+        return {"installed": False, "version": None, "entry_points": []}
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    # Create scripts dir but NOT the script file so we can verify
+    # we don't reach script resolution.
+    scripts = active / "bin"
+    scripts.mkdir(parents=True)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+    with pytest.raises(ComponentNotInstalledError, match="not installed"):
+        service.prepare_launch_plan("zewitness")
+
+
+# -- Missing contract ----------------------------------------------------------
+
+
+def test_prepare_launch_plan_contract_not_satisfied_raises(monkeypatch):
+    """LaunchContractNotSatisfiedError when no entry-point contract matches."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": [
+                {"group": "console_scripts", "name": "other_tool"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+    with pytest.raises(LaunchContractNotSatisfiedError):
+        service.prepare_launch_plan("zewitness")
+
+
+# -- Script not found ----------------------------------------------------------
+
+
+def test_prepare_launch_plan_script_not_found_raises(monkeypatch, tmp_path):
+    """LaunchScriptNotFoundError when the entry-point wrapper is missing."""
+    active = tmp_path / "rt" / "slots" / "test"
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zewitness", "value": "zewitness.__main__:main"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    # Create scripts dir but NOT the script file.
+    scripts = active / "bin"
+    scripts.mkdir(parents=True)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+    with pytest.raises(LaunchScriptNotFoundError):
+        service.prepare_launch_plan("zewitness")
+
+
+# -- Successful plan preparation -----------------------------------------------
+
+
+def test_prepare_launch_plan_success(monkeypatch, tmp_path):
+    """Successful plan preparation with all conditions met."""
+    active = tmp_path / "rt" / "slots" / "test"
+    python = active / "bin" / "python"
+    scripts = active / "bin"
+    scripts.mkdir(parents=True)
+    # Create the script wrapper.
+    script = scripts / "zewitness"
+    script.write_text("#!/bin/sh\necho ok")
+    script.chmod(0o755)
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        assert str(runtime_python) == str(python)
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zewitness", "value": "zewitness.__main__:main"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    plan = service.prepare_launch_plan("zewitness")
+    assert isinstance(plan, LaunchPlan)
+    assert plan.component_id == "zewitness"
+    assert plan.executable == script
+    assert plan.arguments == ()
+    # The script is inside the runtime, NOT the dev venv.
+    assert str(active) in str(plan.executable)
+
+
+# -- launch_component success --------------------------------------------------
+
+
+def test_launch_component_success(monkeypatch, tmp_path):
+    """launch_component prepares and executes a LaunchPlan successfully."""
+    active = tmp_path / "rt" / "slots" / "test"
+    python = active / "bin" / "python"
+    scripts = active / "bin"
+    scripts.mkdir(parents=True)
+    script = scripts / "zewitness"
+    script.write_text("#!/bin/sh\necho ok")
+    script.chmod(0o755)
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zewitness", "value": "zewitness.__main__:main"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    result = service.launch_component("zewitness", timeout_seconds=5)
+    assert isinstance(result, LaunchResult)
+    assert result.return_code == 0
+    assert "ok" in result.stdout
+    assert result.timed_out is False
+
+
+# -- Multi-entry-point contract: picks first match in registry order -----------
+
+
+def test_prepare_launch_plan_picks_first_matching_contract(monkeypatch, tmp_path):
+    """With multiple launch_entry_points in registry order, the first
+    matching probe entry point is selected."""
+    active = tmp_path / "rt" / "slots" / "test"
+    python = active / "bin" / "python"
+    scripts = active / "bin"
+    scripts.mkdir(parents=True)
+    first_script = scripts / "first_app"
+    first_script.write_text("#!/bin/sh\necho first")
+    first_script.chmod(0o755)
+    second_script = scripts / "second_app"
+    second_script.write_text("#!/bin/sh\necho second")
+    second_script.chmod(0o755)
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": [
+                {"group": "console_scripts", "name": "first_app"},
+                {"group": "console_scripts", "name": "second_app"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    multi_def = ComponentDefinition(
+        "multi",
+        "Multi",
+        "multi-dist",
+        (
+            EntryPointContract("console_scripts", "first_app"),
+            EntryPointContract("console_scripts", "second_app"),
+        ),
+    )
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([multi_def]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    plan = service.prepare_launch_plan("multi")
+    assert plan.executable == first_script
+
+
+
+# ===========================================================================
+# M1-0A integration: witness deploy + launch via service
+# ===========================================================================
+
+
+@pytest.mark.zealfie_slow
+def test_witness_deploy_and_launch_via_service(tmp_path, witness_wheel):
+    """Deploy witness to a temp shared runtime, then launch via
+    ZeAlfieService.launch_component and verify output."""
+    rt_root = tmp_path / "rt"
+    layout = RuntimeLayout(root=rt_root)
+    rt = SharedRuntime(layout=layout)
+
+    # Create the runtime (ABSENT → READY).
+    rt.create()
+
+    # Install the witness wheel into the runtime.
+    install_result = rt.install_local_wheel(
+        witness_wheel, component_definition=WITNESS_DEF
+    )
+    assert install_result.outcome.value == 'INSTALLED', (
+        f"install failed: {install_result.detail}"
+    )
+
+    # Verify the runtime is READY with the witness installed.
+    rt_status = rt.status()
+    assert rt_status.state == RuntimeState.READY
+    assert rt_status.python_executable is not None
+
+    # Launch via service.
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=rt,
+    )
+
+    launch_result = service.launch_component("zewitness", timeout_seconds=10)
+    assert launch_result.return_code == 0, (
+        f"witness launch failed: rc={launch_result.return_code} "
+        f"stderr={launch_result.stderr}"
+    )
+    assert launch_result.stdout.strip() == "ZeWitness is present."
+    assert launch_result.stderr == ""
+    assert launch_result.timed_out is False
+
+    # Also verify prepare_launch_plan produces the correct plan.
+    plan_obj = service.prepare_launch_plan("zewitness")
+    assert plan_obj.component_id == "zewitness"
+    # The executable is inside the runtime scripts dir, not the dev venv.
+    active_path = rt_status.active_path
+    assert active_path is not None
+    assert str(active_path) in str(plan_obj.executable)
+    assert plan_obj.executable.is_file()
+
+
+@pytest.mark.zealfie_slow
+def test_witness_deploy_and_launch_from_absent_fails_clean(tmp_path):
+    """Launch from an ABSENT runtime fails with a clean error."""
+    rt_root = tmp_path / "rt"
+    layout = RuntimeLayout(root=rt_root)
+    rt = SharedRuntime(layout=layout)
+
+    # Runtime is ABSENT (never created).
+    assert rt.status().state == RuntimeState.ABSENT
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=rt,
+    )
+
+    with pytest.raises(LaunchPreparationError, match="absent"):
+        service.launch_component("zewitness")
+
+
+# ===========================================================================
+# M1-0A C1 — malformed probe payloads fail closed
+# ===========================================================================
+
+
+def test_prepare_launch_plan_malformed_entry_point_element_raises(monkeypatch):
+    """A probe payload with a non-dict entry point element raises
+    LaunchPreparationError, not AttributeError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": ["not-a-dict"],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError) as exc_info:
+        service.prepare_launch_plan("zewitness")
+
+    # Must be LaunchPreparationError, NOT AttributeError.
+    assert not isinstance(exc_info.value, AttributeError)
+    assert "entry_points[0] is not a dict" in str(exc_info.value)
+
+
+def test_prepare_launch_plan_non_bool_installed_raises(monkeypatch):
+    """A probe payload with a non-bool 'installed' field raises
+    LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": "yes",  # string, not bool
+            "version": "0.0.1",
+            "entry_points": [],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="non-bool 'installed'"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_non_list_entry_points_raises(monkeypatch):
+    """A probe payload with a non-list 'entry_points' field raises
+    LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": "not-a-list",
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="non-list 'entry_points'"):
+        service.prepare_launch_plan("zewitness")
+
+
+# -- M1-0A D: probe validation alignment (installed=False branch) --------------
+
+
+def test_prepare_launch_plan_installed_false_missing_version_raises(monkeypatch):
+    """installed=False with missing 'version' key raises LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": False,
+            # version key missing
+            "entry_points": [],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="missing 'version' key when installed=False"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_installed_false_version_not_none_raises(monkeypatch):
+    """installed=False with non-None version raises LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": False,
+            "version": "0.0.1",  # should be None
+            "entry_points": [],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="version must be None when installed=False"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_installed_false_missing_entry_points_raises(monkeypatch):
+    """installed=False with missing 'entry_points' key raises LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": False,
+            "version": None,
+            # entry_points key missing
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="missing 'entry_points' key when installed=False"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_installed_false_entry_points_not_empty_raises(monkeypatch):
+    """installed=False with non-empty entry_points raises LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": False,
+            "version": None,
+            "entry_points": [{"group": "console_scripts", "name": "foo"}],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="entry_points must be empty when installed=False"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_installed_false_entry_points_not_list_raises(monkeypatch):
+    """installed=False with non-list entry_points raises LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": False,
+            "version": None,
+            "entry_points": "not-a-list",
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="entry_points must be a list when installed=False"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_installed_true_empty_version_raises(monkeypatch):
+    """installed=True with empty version string raises LaunchPreparationError."""
+    active = Path("/fake/rt/slots/test")
+    python = active / "bin" / "python"
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "",  # empty string
+            "entry_points": [
+                {"group": "console_scripts", "name": "zewitness"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    with pytest.raises(LaunchPreparationError, match="version must be non-empty str when installed=True"):
+        service.prepare_launch_plan("zewitness")
+
+
+def test_prepare_launch_plan_installed_true_valid_probe_passes(monkeypatch, tmp_path):
+    """installed=True with a well-formed probe succeeds validation."""
+    active = tmp_path / "rt" / "slots" / "test"
+    python = active / "bin" / "python"
+    scripts = active / "bin"
+    scripts.mkdir(parents=True)
+    script = scripts / "zewitness"
+    script.write_text("#!/bin/sh\necho ok")
+    script.chmod(0o755)
+
+    from zealfie.app import service as svc_mod
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zewitness"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    service = ZeAlfieService(
+        registry=ComponentRegistry([WITNESS_DEF]),
+        runtime=_FakeSharedRuntime(_ready_status(active, python=python)),
+    )
+
+    plan = service.prepare_launch_plan("zewitness")
+    assert plan.component_id == "zewitness"
