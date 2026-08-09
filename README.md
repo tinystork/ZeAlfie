@@ -33,7 +33,26 @@ Concepts kept distinct by design:
 * **shared runtime** — persistent, managed by ZeAlfie;
 * **temporary venv** — test-only, cleaned up after use.
 
-ZeAlfie does not install, download, update, or launch real ZeSoftware components yet. The witness cycle proves the entire pipeline but uses only a controlled local test fixture.
+## Product Shell (M1-2C)
+
+ZeAlfie 0.0.6 ships a **PySide6 graphical product shell** for browsing
+and launching managed products.
+
+```bash
+zealfie-gui
+```
+
+The product shell:
+* displays all known managed products as individual product cards;
+* shows human-readable state labels derived from runtime probe results;
+* provides a **Lancer** button for each launchable product;
+* includes a **Refresh** toolbar button (or F5) to re-probe runtime state;
+* shows a visible error banner on startup if state collection fails.
+* **depends on PySide6** — declared as a runtime dependency in `pyproject.toml`.
+
+The GUI exposes a single entry point `zealfie-gui` under
+`[project.gui-scripts]`, keeping the existing CLI under
+`[project.scripts]`.
 
 ## Development install
 

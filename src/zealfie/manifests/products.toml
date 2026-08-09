@@ -4,6 +4,7 @@ schema_version = 1
 id = "zesolver"
 display_name = "ZeSolver"
 distribution_name = "ZeSolver"
+description = "Optical solver for high-resolution astrophotography — plate solve, blind solve, and star field analysis."
 required_extras = ["gui"]
 
 [[products.launch.entry_points]]
@@ -14,6 +15,7 @@ name = "zesolver"
 id = "zemosaic"
 display_name = "ZeMosaic"
 distribution_name = "ZeMosaic"
+description = "Mosaic planner and composer — stitch, align, and blend multi-panel deep sky images."
 
 [[products.launch.entry_points]]
 group = "gui_scripts"
@@ -23,6 +25,7 @@ name = "zemosaic"
 id = "zeseestarstacker"
 display_name = "ZeSeestarStacker"
 distribution_name = "ZeSeestarStacker"
+description = "One-click star stacking for Seestar S50 users — calibrate, align, and stack automatically."
 
 [[products.launch.entry_points]]
 group = "gui_scripts"
@@ -32,6 +35,7 @@ name = "zeseestarstacker"
 id = "zeanalyser"
 display_name = "ZeAnalyser"
 distribution_name = "ZeAnalyser"
+description = "Deep image analysis toolkit — FWHM, eccentricity, SNR, and session statistics."
 
 [[products.launch.entry_points]]
 group = "gui_scripts"

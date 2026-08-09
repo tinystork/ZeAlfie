@@ -74,6 +74,7 @@ class ProductDescriptor:
     distribution_name: str
     launch_entry_points: tuple[EntryPointContract, ...]
     required_extras: tuple[str, ...] = ()
+    description: str = ""
 
     def __post_init__(self) -> None:
         for field_name in ("product_id", "display_name", "distribution_name"):
@@ -81,6 +82,9 @@ class ProductDescriptor:
             if not value:
                 raise ValueError(f"{field_name} is required")
             object.__setattr__(self, field_name, value)
+        # Validate description: optional, but if provided must be a str.
+        desc = str(getattr(self, "description") or "")
+        object.__setattr__(self, "description", desc)
         # Validate entry points.
         entry_points = tuple(self.launch_entry_points)
         object.__setattr__(self, "launch_entry_points", entry_points)
@@ -235,6 +239,16 @@ def _product_from_payload(
         raw, "distribution_name", f"{label_prefix}.distribution_name"
     )
 
+    # --- optional description ---
+    description = raw.get("description", "")
+    if description is None:
+        description = ""
+    if not isinstance(description, str):
+        raise InvalidCatalogError(
+            f"{label_prefix}.description must be a string"
+        )
+    description = description.strip()
+
     # --- launch entry points ---
     launch = raw.get("launch")
     if not isinstance(launch, dict):
@@ -309,6 +323,7 @@ def _product_from_payload(
         distribution_name=distribution_name,
         launch_entry_points=tuple(contracts),
         required_extras=required_extras,
+        description=description,
     )
 
 

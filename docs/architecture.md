@@ -1076,3 +1076,152 @@ parameter.
 * No GPU provisioning, installation, or selective deployment changes.
 * No replacement of ``execute_launch_plan`` / ``launch_component`` — both
   remain for synchronous use cases.
+
+## M1-2C — PySide6 Product Shell
+
+M1-2C adds a graphical product shell (launcher window) built on PySide6.
+
+### Runtime Dependency Decision
+
+**PySide6** (``>=6``) is declared as a direct runtime dependency in
+``[project.dependencies]`` of ``pyproject.toml``.
+
+Rationale:
+* No optional/extras gate — the product shell is a core deliverable.
+* PySide6 is packaged on PyPI and Conda, installable without a system
+  Qt SDK.
+* PyQt6 was not selected: the GPL licensing model is incompatible with a
+  plausible future MIT/Apache-2.0 license for ZeAlfie.
+
+### Entry Point
+
+The product shell is exposed through ``[project.gui-scripts]`` (the
+setuptools GUI scripts group), **not** ``[project.scripts]``:
+
+```toml
+[project.gui-scripts]
+zealfie-gui = "zealfie.gui:main"
+```
+
+This separates the GUI launcher from the CLI:
+
+* ``zealfie`` → ``[project.scripts]`` → CLI (``zealfie.cli:main``);
+* ``zealfie-gui`` → ``[project.gui-scripts]`` → product shell
+  (``zealfie.gui:main``).
+
+On Windows, ``gui-scripts`` additionally create ``pythonw.exe``
+wrappers (no console window).  On Unix the behaviour is identical to
+``scripts``.
+
+### Composition Root
+
+The composition root (``zealfie.gui.app.run_gui``) follows a strict
+initialisation order:
+
+1. Create the singleton ``QApplication`` (must exist before any Qt
+   object is constructed).
+2. Instantiate ``ZeAlfieService`` with default dependencies (runtime
+   layout, registry, etc.).
+3. Construct ``ZeAlfieMainWindow(service=service)``.
+4. Show the window and enter the Qt event loop via ``app.exec()``.
+
+No command-line argument parsing is performed by the GUI — it always
+opens the product shell window.
+
+### Module Layout
+
+```
+src/zealfie/gui/
+  __init__.py        # exports main()
+  app.py             # composition root: QApplication + run_gui()
+  main_window.py     # QMainWindow: cards, refresh, status bar, toolbar
+  product_card.py    # QFrame: single-product display + action button
+  presentation.py    # pure functions: state ↔ label mapping
+```
+
+Responsibilities are separated:
+* ``presentation`` is pure Python — no Qt imports, no side effects.
+  Testable without a QApplication.
+* ``product_card`` owns a single product's widget subtree and its
+  action button click handler.  Routes spawn calls through
+  ``ZeAlfieService.spawn_component``.
+* ``main_window`` owns the window-level composition: scroll area,
+  product cards, menu bar, toolbar, and status bar.
+
+### Service Boundary
+
+GUI widgets **never** call subprocess, pip, resolver, or deployment
+functions directly.
+
+All product interaction routes through ``ZeAlfieService``:
+* ``list_products()`` — catalog descriptors;
+* ``collect_product_state()`` — runtime probe results;
+* ``spawn_component(product_id)`` — non-blocking launch.
+
+### Product Cards and State Mapping
+
+Each ``ProductCard`` widget maps a ``ProductState`` observation to
+human-readable UI:
+
+| ``reason_code`` | State Label | Action Button |
+|--------------------|--------------|---------------|
+| ``RUNTIME_ABSENT`` | "No runtime — deploy a runtime first" | Installer (disabled) |
+| ``RUNTIME_BROKEN`` | "Runtime broken — check or recreate" | Installer (disabled) |
+| ``NOT_INSTALLED`` | "Not installed — Installer coming in the next milestone" | Installer (disabled) |
+| ``INSTALLED_LAUNCHABLE`` | "Ready — click Lancer to start" | Lancer (enabled) |
+| ``INSTALLED_NOT_LAUNCHABLE`` | "Installed but launch contract missing" | Installer (disabled) |
+| ``PROBE_FAILED`` | "Could not check — probe failed" | Installer (disabled) |
+
+Never shows raw enum values to users.  All user-facing strings come from
+the ``presentation`` module.
+
+### Refresh
+
+The ``_refresh()`` method on ``ZeAlfieMainWindow`` calls
+``service.collect_product_state()`` and updates every card.  It is
+triggered by:
+
+* window construction (initial probe);
+* **Refresh** toolbar button;
+* **F5** keyboard shortcut;
+* **Shell → Refresh** menu item.
+
+Refresh does **not** call subprocess or filesystem probing from Qt —
+all heavy work stays inside ``ZeAlfieService``.
+
+### Launch Path
+
+Clicking the **Lancer** button on a launchable product card:
+
+1. calls ``service.spawn_component(product_id)`` —
+   non-blocking, returns immediately with a ``SpawnedLaunch``;
+2. the button is disabled for a 500 ms debounce period;
+3. the status label shows "Launching DisplayName...";
+4. on failure, the status label shows the error message (truncated to
+   120 characters);
+5. the button is re-enabled after the debounce.
+
+No QThread, no asyncio, no event-loop indirection.  The child process is
+spawned and ZeAlfie does not currently track its lifecycle.
+
+### Error Handling
+
+* Startup failure (e.g. ``collect_product_state`` raises): a
+  visible error banner with red text replaces the product card area.
+  The window is **never** blank on startup.
+* Spawn failure: per-product status label shows the error; the button is
+  re-enabled after debounce.
+* Refresh failure: status bar shows "Refresh failed"; previous
+  card data is preserved.
+
+### Explicit Non-Goals for M1-2C
+
+* No installation/download/update/deployment/activation
+  (``Installer`` buttons are visible but disabled).
+* No QThread, asyncio, or event-loop indirection for spawn.
+* No process lifecycle management, polling daemon, or job registry.
+* No cross-platform installer packaging (MSI, AppImage, DMG).
+* No GPU capability display, catalogue management, or settings dialog.
+* No changes to the ZeSolver repository.
+* No custom widget toolkit — PySide6 stock widgets only.
+* No dark/light mode toggle, theme engine, or CSS skinning.
