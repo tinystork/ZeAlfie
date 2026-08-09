@@ -4,6 +4,7 @@ schema_version = 1
 id = "zesolver"
 display_name = "ZeSolver"
 distribution_name = "ZeSolver"
+required_extras = ["gui"]
 
 [[components.launch.entry_points]]
 group = "gui_scripts"

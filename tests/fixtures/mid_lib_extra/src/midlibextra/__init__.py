@@ -1,0 +1,1 @@
+"""Mid-level extra dependency fixture — has optional feature extra."""

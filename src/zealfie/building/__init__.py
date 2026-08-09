@@ -294,3 +294,94 @@ def _remove_tree_safe(path: Path) -> None:
 
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def read_wheel_metadata_raw(wheel_path: str | Path) -> str:
+    """Read the raw METADATA text from a wheel's ``.dist-info`` directory.
+
+    Returns the complete METADATA file contents as a UTF-8 string.
+    The caller is responsible for parsing ``Requires-Dist``,
+    ``Provides-Extra``, and other fields from the raw text (e.g. via
+    ``packaging.metadata.parse_email``).
+
+    Validates the same critical identity invariants as ``inspect_wheel``:
+    exactly one ``.dist-info`` directory, exactly one METADATA ZIP member,
+    valid UTF-8, and unambiguous ``Name`` / ``Version`` fields.
+
+    Raises ``WheelInspectionError`` if the wheel is structurally invalid.
+    """
+    wheel = Path(wheel_path)
+    if not wheel.is_file():
+        raise FileNotFoundError(f"wheel not found: {wheel}")
+
+    import zipfile as _zipfile
+
+    try:
+        zf = _zipfile.ZipFile(wheel, "r")
+    except _zipfile.BadZipFile as exc:
+        raise WheelInspectionError(f"invalid wheel ZIP: {exc}") from exc
+
+    with zf:
+        names = zf.namelist()
+        all_names = [zi.filename for zi in zf.infolist()]
+
+        # Find the single dist-info directory.
+        dist_info_dirs: list[str] = []
+        for name in names:
+            parts = name.rstrip("/").split("/")
+            if len(parts) >= 1 and parts[0].endswith(".dist-info"):
+                di = parts[0]
+                if di not in dist_info_dirs:
+                    dist_info_dirs.append(di)
+
+        if len(dist_info_dirs) == 0:
+            raise WheelInspectionError("wheel has no .dist-info directory")
+        if len(dist_info_dirs) > 1:
+            raise WheelInspectionError(
+                f"ambiguous wheel: multiple .dist-info directories: {dist_info_dirs}"
+            )
+        dist_info_dir = dist_info_dirs[0]
+
+        metadata_name = f"{dist_info_dir}/METADATA"
+        metadata_count = all_names.count(metadata_name)
+        if metadata_count == 0:
+            raise WheelInspectionError(f"wheel has no {metadata_name}")
+        if metadata_count > 1:
+            raise WheelInspectionError(
+                f"duplicate critical member: {metadata_name} "
+                f"appears {metadata_count} times"
+            )
+
+        try:
+            metadata_text = zf.read(metadata_name).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WheelInspectionError(f"METADATA is not valid UTF-8: {exc}") from exc
+
+        raw_name: str | None = None
+        raw_version: str | None = None
+        name_seen = 0
+        version_seen = 0
+        for line in metadata_text.splitlines():
+            if line.startswith("Name:"):
+                name_seen += 1
+                if name_seen == 1:
+                    raw_name = line.split(":", 1)[1].strip()
+                elif name_seen > 1:
+                    raise WheelInspectionError(
+                        "duplicate canonical METADATA field: Name"
+                    )
+            elif line.startswith("Version:"):
+                version_seen += 1
+                if version_seen == 1:
+                    raw_version = line.split(":", 1)[1].strip()
+                elif version_seen > 1:
+                    raise WheelInspectionError(
+                        "duplicate canonical METADATA field: Version"
+                    )
+
+        if not raw_name:
+            raise WheelInspectionError("METADATA has no Name field")
+        if not raw_version:
+            raise WheelInspectionError("METADATA has no Version field")
+
+        return metadata_text

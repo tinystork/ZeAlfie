@@ -1,0 +1,1 @@
+"""Mid-level dependency fixture — depends on leaf-lib."""

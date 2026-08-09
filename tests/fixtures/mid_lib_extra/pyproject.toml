@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mid-lib-extra"
+version = "1.0.0"
+dependencies = ["leaf-lib>=1.0"]
+
+[project.optional-dependencies]
+feature = ["mid-lib>=1.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

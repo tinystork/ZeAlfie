@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leaf-lib"
+version = "1.0.0"
+
+[tool.setuptools.packages.find]
+where = ["src"]

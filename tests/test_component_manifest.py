@@ -206,3 +206,183 @@ name = "zesolver"
         match="duplicate entry point contract: gui_scripts:zesolver",
     ):
         load_component_definitions_from_text(text)
+
+
+# ---------------------------------------------------------------------------
+# M1-1A: required_extras
+# ---------------------------------------------------------------------------
+
+MANIFEST_WITH_EXTRAS = """
+schema_version = 1
+
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = ["gui"]
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+"""
+
+
+def test_parses_required_extras() -> None:
+    definitions = load_component_definitions_from_text(MANIFEST_WITH_EXTRAS)
+    assert len(definitions) == 1
+    assert definitions[0].required_extras == ("gui",)
+
+
+def test_default_manifest_parses_required_extras() -> None:
+    definitions = load_default_component_definitions()
+    assert definitions[0].required_extras == ("gui",)
+
+
+def test_required_extras_defaults_to_empty() -> None:
+    """A component without required_extras gets an empty tuple."""
+    manifest = """
+schema_version = 1
+
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+"""
+    definitions = load_component_definitions_from_text(manifest)
+    assert definitions[0].required_extras == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    (
+        (
+            """
+schema_version = 1
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = "not_a_list"
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+""",
+            "required_extras must be a list of strings",
+        ),
+        (
+            """
+schema_version = 1
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = [1, 2]
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+""",
+            "required_extras\\[0\\] must be a string",
+        ),
+        (
+            """
+schema_version = 1
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = [""]
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+""",
+            "required_extras\\[0\\] must not be empty",
+        ),
+        (
+            """
+schema_version = 1
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = ["gui", "gui"]
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+""",
+            "duplicate extra 'gui'",
+        ),
+    ),
+)
+def test_invalid_required_extras_shapes(text: str, message: str) -> None:
+    with pytest.raises(InvalidComponentManifestError, match=message):
+        load_component_definitions_from_text(text)
+
+
+# ---------------------------------------------------------------------------
+# M1-1A hardening: PEP 685 extras canonicalization in manifest
+# ---------------------------------------------------------------------------
+
+
+def test_required_extras_normalized_case_insensitive_dedup() -> None:
+    """'Gui' and 'gui' are canonicalised to the same name → duplicate error."""
+    manifest = """
+schema_version = 1
+
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = ["Gui", "gui"]
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+"""
+    with pytest.raises(InvalidComponentManifestError, match="duplicate extra 'gui'"):
+        load_component_definitions_from_text(manifest)
+
+
+def test_required_extras_normalized_dash_underscore_dedup() -> None:
+    """'my-extra' and 'my_extra' are canonicalised to the same name → duplicate error."""
+    manifest = """
+schema_version = 1
+
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = ["my-extra", "my_extra"]
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+"""
+    with pytest.raises(InvalidComponentManifestError, match="duplicate extra 'my_extra'"):
+        load_component_definitions_from_text(manifest)
+
+
+def test_required_extras_stored_canonical() -> None:
+    """'Gui' → stored as 'gui', 'my_extra' → stored as 'my-extra'."""
+    manifest = """
+schema_version = 1
+
+[[components]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+required_extras = ["Gui", "my_extra"]
+
+[[components.launch.entry_points]]
+group = "gui_scripts"
+name = "zesolver"
+"""
+    definitions = load_component_definitions_from_text(manifest)
+    assert definitions[0].required_extras == ("gui", "my-extra")

@@ -99,3 +99,63 @@ def test_entry_point_info_is_valid() -> None:
     assert info.group == "console_scripts"
     assert info.name == "zewitness"
     assert info.value == "zewitness.__main__:main"
+
+
+# ---------------------------------------------------------------------------
+# M1-1A: required_extras
+# ---------------------------------------------------------------------------
+
+
+def test_component_definition_with_required_extras() -> None:
+    definition = ComponentDefinition(
+        component_id="zesolver",
+        display_name="ZeSolver",
+        distribution_name="ZeSolver",
+        launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
+        required_extras=("Gui", "my_extra"),
+    )
+    assert definition.required_extras == ("gui", "my-extra")
+
+
+def test_component_definition_rejects_duplicate_required_extras_after_normalization() -> None:
+    with pytest.raises(ValueError, match="duplicate required extra: my-extra"):
+        ComponentDefinition(
+            component_id="zesolver",
+            display_name="ZeSolver",
+            distribution_name="ZeSolver",
+            launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
+            required_extras=("my-extra", "my_extra"),
+        )
+
+
+def test_component_definition_rejects_empty_required_extra() -> None:
+    with pytest.raises(ValueError, match="required_extras must not contain empty values"):
+        ComponentDefinition(
+            component_id="zesolver",
+            display_name="ZeSolver",
+            distribution_name="ZeSolver",
+            launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
+            required_extras=("",),
+        )
+
+
+def test_component_definition_default_extras_empty() -> None:
+    definition = ComponentDefinition(
+        component_id="zesolver",
+        display_name="ZeSolver",
+        distribution_name="ZeSolver",
+        launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
+    )
+    assert definition.required_extras == ()
+
+
+def test_component_definition_with_required_extras_is_immutable() -> None:
+    definition = ComponentDefinition(
+        component_id="zesolver",
+        display_name="ZeSolver",
+        distribution_name="ZeSolver",
+        launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
+        required_extras=("gui",),
+    )
+    with pytest.raises(FrozenInstanceError):
+        definition.required_extras = ("dev",)  # type: ignore[misc]

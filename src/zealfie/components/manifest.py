@@ -7,6 +7,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from packaging.utils import canonicalize_name
+
 from .model import ComponentDefinition, EntryPointContract
 
 
@@ -128,11 +130,43 @@ def _component_from_payload(raw_component: dict[str, Any], index: int) -> Compon
         seen_contracts.add(contract)
         contracts.append(contract)
 
+    # --- required_extras (M1-1A) ---
+    required_extras: tuple[str, ...] = ()
+    raw_extras = raw_component.get("required_extras")
+    if raw_extras is not None:
+        if not isinstance(raw_extras, list):
+            raise InvalidComponentManifestError(
+                f"components[{index}].required_extras must be a list of strings"
+            )
+        extras_canonical: list[str] = []
+        seen_canonical: set[str] = set()
+        for ei, raw_extra in enumerate(raw_extras):
+            if not isinstance(raw_extra, str):
+                raise InvalidComponentManifestError(
+                    f"components[{index}].required_extras[{ei}] must be a string"
+                )
+            extra = raw_extra.strip()
+            if not extra:
+                raise InvalidComponentManifestError(
+                    f"components[{index}].required_extras[{ei}] must not be empty"
+                )
+            # PEP 685: canonicalize before deduplication.
+            # "Gui" and "gui" → both "gui"; "my_extra" → "my-extra".
+            canon = canonicalize_name(extra)
+            if canon in seen_canonical:
+                raise InvalidComponentManifestError(
+                    f"components[{index}].required_extras: duplicate extra {extra!r}"
+                )
+            seen_canonical.add(canon)
+            extras_canonical.append(canon)
+        required_extras = tuple(extras_canonical)
+
     return ComponentDefinition(
         component_id=component_id,
         display_name=display_name,
         distribution_name=distribution_name,
         launch_entry_points=tuple(contracts),
+        required_extras=required_extras,
     )
 
 

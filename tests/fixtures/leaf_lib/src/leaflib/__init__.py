@@ -1,0 +1,1 @@
+"""Leaf dependency fixture — no deps."""
