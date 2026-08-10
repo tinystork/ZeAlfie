@@ -224,6 +224,13 @@ class SelectionStore:
     ) -> DesiredProductSelection:
         """Add a product to the selection and persist to disk atomically.
 
+        **Low-level primitive.**  This method does **not** bootstrap the
+        selection file from the legacy registry.  Callers that need the
+        legacy-preserving guard should use
+        :func:`bootstrap_selection_from_legacy_registry` first, or use
+        :meth:`ZeAlfieService.select_product` which guarantees the
+        bootstrap (D.4.0).
+
         * Idempotent — adding an already-selected product is a no-op
           (no file write).
         * Raises :class:`UnknownProductError` for unknown products
@@ -252,6 +259,79 @@ class SelectionStore:
         if not self._loaded:
             self.reload()
         return self._selection
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap from legacy registry (D.4.0)
+# ---------------------------------------------------------------------------
+
+
+def bootstrap_selection_from_legacy_registry(
+    store: SelectionStore,
+    catalog: ProductCatalog,
+    legacy_registry: ComponentRegistry,
+) -> DesiredProductSelection:
+    """One-shot bootstrap of a :class:`DesiredProductSelection` from the
+    legacy ``ComponentRegistry`` (packaged ``components.toml``).
+
+    **Bootstrap rule (idempotent):**
+
+    * If ``store.path`` does **not** exist:
+        - Derive initial product ids from ``legacy_registry.available_ids()``.
+        - Validate every id against *catalog* — unknown legacy ids raise
+          :class:`UnknownProductError` without writing the selection file.
+        - Persist a deterministic ``DesiredProductSelection`` to *store*.
+        - Return the newly persisted selection.
+    * If ``store.path`` **does** exist (including an explicit empty
+      selection): do nothing — the file is authoritative.  Return the
+      currently loaded selection from *store*.
+
+    **Idempotent / one-shot:** once the file exists, subsequent calls
+    are no-ops.  The legacy registry is never consulted after the first
+    bootstrap.
+
+    **No runtime/deployment/network:** pure file-initialisation from
+    local registries.  Does not touch the runtime, deployment, launch,
+    or acquisition layers.
+
+    Parameters
+    ----------
+    store:
+        The :class:`SelectionStore` whose backing file is checked.
+    catalog:
+        The :class:`ProductCatalog` used to validate legacy ids.
+    legacy_registry:
+        The :class:`ComponentRegistry` representing the pre-D.3 managed
+        set (packaged ``components.toml``).
+
+    Returns
+    -------
+    DesiredProductSelection
+        The authoritative selection — either freshly bootstrapped or
+        loaded from the existing file.
+
+    Raises
+    ------
+    UnknownProductError
+        If any legacy component id is not in the product catalog.
+        The selection file is never written on this error.
+    """
+    if store.path.exists():
+        # File exists (including explicit empty) — authoritative, do not
+        # overwrite with any derivation from a potentially-changed legacy
+        # registry.
+        return store.current_selection()
+
+    legacy_ids = legacy_registry.available_ids()
+    # Validate every legacy id against the product catalog first.
+    for pid in legacy_ids:
+        catalog.get(pid)  # raises UnknownProductError
+
+    selection = DesiredProductSelection(legacy_ids)
+    _save_to_file(selection, store.path)
+    store.reload()
+    return store.current_selection()
+
 
 
 # ---------------------------------------------------------------------------

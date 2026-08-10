@@ -913,15 +913,27 @@ def test_service_select_product_integration(tmp_path):
 
 
 def test_service_select_product_unknown_raises(tmp_path):
-    """select_product raises UnknownProductError for unknown products."""
+    """select_product raises UnknownProductError for unknown products.
+
+    The D.3 contract validates *product_id* against the catalog before
+    any file I/O.  An unknown product id raises UnknownProductError
+    without writing or bootstrapping the selection file — even when the
+    legacy registry would have produced a non-empty bootstrap.
+    """
     catalog = _make_catalog()
     store = SelectionStore(path=tmp_path / "sel.toml")
-    service = ZeAlfieService(catalog=catalog, selection_store=store)
+    # Empty registry still bootstraps empty, but D.3 guard runs first.
+    empty_registry = ComponentRegistry([])
+    service = ZeAlfieService(
+        registry=empty_registry,
+        catalog=catalog,
+        selection_store=store,
+    )
 
     with pytest.raises(UnknownProductError, match="nonexistent"):
         service.select_product("nonexistent")
 
-    # No file written.
+    # No file written — validation fails before bootstrap (D.3 contract).
     assert not store.path.exists()
 
 
@@ -1300,3 +1312,391 @@ def test_validate_selection_against_catalog_partial_unknown():
 
     with pytest.raises(UnknownProductError, match="ghost"):
         validate_selection_against_catalog(catalog, sel)
+
+
+# ===========================================================================
+# 24) D.4.0 — Legacy-preserving SelectionStore bootstrap
+# ===========================================================================
+
+
+def _make_legacy_registry(ids: tuple[str, ...]) -> ComponentRegistry:
+    """Create a synthetic legacy ComponentRegistry with the given component ids."""
+    defs = tuple(
+        ComponentDefinition(
+            component_id=pid,
+            display_name=pid.title(),
+            distribution_name=pid.title(),
+            launch_entry_points=(),
+        )
+        for pid in ids
+    )
+    return ComponentRegistry(defs)
+
+
+# --- bootstrap: store absent + legacy {zesolver} -> bootstrap persists {zesolver} ---
+
+
+def test_bootstrap_absent_store_persists_legacy_ids(tmp_path):
+    """When the selection file does not exist, bootstrap derives ids from
+    legacy ComponentRegistry and persists them."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    result = bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    assert result.selected_product_ids == ("zesolver",)
+    assert store.path.is_file()
+    assert "zesolver" in store.path.read_text()
+
+
+def test_bootstrap_absent_store_persists_multiple_legacy_ids(tmp_path):
+    """Bootstrap handles multiple legacy ids and sorts them."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver", "zemosaic"))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    result = bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    assert result.selected_product_ids == ("zemosaic", "zesolver")  # sorted
+    text = store.path.read_text()
+    assert "zesolver" in text
+    assert "zemosaic" in text
+
+
+# --- bootstrap + service/select add zemosaic -> {zesolver, zemosaic} ---
+
+
+def test_service_select_after_bootstrap_preserves_legacy(tmp_path):
+    """select_product bootstraps from legacy, then adding a new product
+    preserves the legacy one."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    service = ZeAlfieService(
+        registry=legacy,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    # First select_product call: bootstraps from legacy, adds nothing new.
+    # The bootstrap is idempotent, so we'll just add zemosaic directly.
+    # But actually, select_product calls bootstrap first, then adds.
+    # So adding zemosaic from scratch: bootstrap persists {zesolver}, then
+    # adds zemosaic -> {zemosaic, zesolver}.
+    result = service.select_product("zemosaic")
+    assert result.selected_product_ids == ("zemosaic", "zesolver")
+
+    # File has both.
+    text = store.path.read_text()
+    assert "zesolver" in text
+    assert "zemosaic" in text
+
+
+# --- bootstrap: file existing empty -> remains empty, no bootstrap ---
+
+
+def test_bootstrap_existing_empty_file_no_op(tmp_path):
+    """If the selection file already exists with an explicit empty
+    selection, bootstrap does NOT overwrite it."""
+    path = tmp_path / "sel.toml"
+    path.write_text("schema_version = 1\nselected_product_ids = []\n")
+
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=path)
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    result = bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    # Must remain empty — file is authoritative.
+    assert result.selected_product_ids == ()
+
+    # File content unchanged.
+    assert "zesolver" not in path.read_text()
+    assert "selected_product_ids = []" in path.read_text()
+
+
+# --- bootstrap: file existing non-empty -> authoritative ---
+
+
+def test_bootstrap_existing_non_empty_file_no_op(tmp_path):
+    """If the selection file already exists with content, bootstrap does
+    NOT overwrite with legacy ids."""
+    path = tmp_path / "sel.toml"
+    path.write_text(
+        'schema_version = 1\nselected_product_ids = ["zemosaic"]\n'
+    )
+
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=path)
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    result = bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    # Must be the existing file content.
+    assert result.selected_product_ids == ("zemosaic",)
+    # Not rewritten with zesolver.
+    assert '"zesolver"' not in path.read_text()
+
+
+# --- bootstrap: legacy id unknown in ProductCatalog -> explicit error ---
+
+
+def test_bootstrap_unknown_legacy_id_raises_no_file_written(tmp_path):
+    """If a legacy component id is not in the ProductCatalog, bootstrap
+    raises UnknownProductError and writes no file."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver", "ghost-product"))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    with pytest.raises(UnknownProductError, match="ghost-product"):
+        bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    # No file should be written.
+    assert not store.path.exists()
+
+
+def test_bootstrap_unknown_legacy_id_no_file_even_if_valid_also_present(tmp_path):
+    """When a legacy registry has valid + unknown ids, bootstrap fails
+    fast and writes no file (partial bootstrap is forbidden)."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver", "ghost"))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    with pytest.raises(UnknownProductError, match="ghost"):
+        bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    assert not store.path.exists()
+
+
+# --- bootstrap: second call -> idempotent, does not rewrite from changed legacy registry ---
+
+
+def test_bootstrap_idempotent_across_calls(tmp_path):
+    """Second bootstrap call is a no-op — does not rewrite from a
+    potentially-changed legacy registry."""
+    catalog = _make_catalog()
+    legacy_v1 = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    # First bootstrap.
+    r1 = bootstrap_selection_from_legacy_registry(store, catalog, legacy_v1)
+    assert r1.selected_product_ids == ("zesolver",)
+
+    # "Change" the legacy registry — now it includes zemosaic too.
+    legacy_v2 = _make_legacy_registry(("zesolver", "zemosaic"))
+
+    # Second bootstrap with the "new" registry — must not rewrite.
+    r2 = bootstrap_selection_from_legacy_registry(store, catalog, legacy_v2)
+
+    # Still returns the original bootstrapped selection.
+    assert r2.selected_product_ids == ("zesolver",)
+    # zemosaic from legacy_v2 is NOT in the file.
+    assert "zemosaic" not in store.path.read_text()
+
+
+def test_bootstrap_idempotent_after_file_exists_from_select(tmp_path):
+    """If select_product already bootstrapped and wrote the file,
+    a second bootstrap call does nothing."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    service = ZeAlfieService(
+        registry=legacy,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    # select_product bootstraps then adds zemosaic.
+    service.select_product("zemosaic")
+    assert store.path.is_file()
+    content_before = store.path.read_text()
+
+    # Now call bootstrap explicitly — it should be a no-op.
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    # Use a different legacy registry that would produce a different result.
+    legacy_different = _make_legacy_registry(("zesolver",))
+    result = bootstrap_selection_from_legacy_registry(
+        store, catalog, legacy_different,
+    )
+
+    # File unchanged — no rewrite.
+    assert store.path.read_text() == content_before
+    assert result.selected_product_ids == ("zemosaic", "zesolver")
+
+
+# --- bootstrap: no runtime/deployment touched ---
+
+
+def test_bootstrap_does_not_touch_runtime_or_deployment(tmp_path):
+    """Bootstrap is pure file-initialisation — it imports no runtime or
+    deployment modules and creates no side effects beyond the selection file."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    # Verify the module doesn't import runtime modules.
+    import sys
+    mod = sys.modules["zealfie.products.selection"]
+    source = Path(mod.__file__).read_text()
+    for forbidden in ("zealfie.runtime.", "zealfie.launching.", "zealfie.sources."):
+        assert forbidden not in source, f"selection module imports {forbidden}"
+
+    # Call bootstrap — just verifies no exceptions.
+    result = bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+    assert result.selected_product_ids == ("zesolver",)
+
+    # No runtime directories created.
+    entries = list(tmp_path.iterdir())
+    assert len(entries) == 1
+    assert entries[0].name == "sel.toml"
+
+
+# --- bootstrap: legacy empty registry -> empty selection ---
+
+
+def test_bootstrap_empty_legacy_registry_persists_empty_selection(tmp_path):
+    """If the legacy registry has no components, bootstrap persists an
+    empty selection."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(())
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    result = bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    assert result.selected_product_ids == ()
+    assert store.path.is_file()
+    assert "selected_product_ids = []" in store.path.read_text()
+
+
+# --- bootstrap: service.bootstrap_desired_selection() ---
+
+
+def test_service_bootstrap_desired_selection(tmp_path):
+    """bootstrap_desired_selection on the service bootstraps from the
+    injected registry."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    service = ZeAlfieService(
+        registry=legacy,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    result = service.bootstrap_desired_selection()
+    assert result.selected_product_ids == ("zesolver",)
+    assert store.path.is_file()
+
+
+def test_service_bootstrap_desired_selection_idempotent(tmp_path):
+    """Second call to bootstrap_desired_selection is a no-op."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    service = ZeAlfieService(
+        registry=legacy,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    r1 = service.bootstrap_desired_selection()
+    r2 = service.bootstrap_desired_selection()
+    assert r1.selected_product_ids == r2.selected_product_ids
+    assert r1.selected_product_ids == ("zesolver",)
+
+
+def test_select_product_absent_store_does_not_orphan_legacy(tmp_path):
+    """Core D.4.0 sentinel: absent selection file + select_product(zemosaic)
+    must bootstrap from legacy {zesolver} first, then add zemosaic,
+    NOT produce {zemosaic} alone."""
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    service = ZeAlfieService(
+        registry=legacy,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    # This is the D.4.0 guard: absent + zemosaic -> {zesolver, zemosaic}
+    service.select_product("zemosaic")
+
+    sel = store.current_selection()
+    assert sel.selected_product_ids == ("zemosaic", "zesolver")
+    assert "zesolver" in sel  # legacy preserved
+    assert "zemosaic" in sel   # new addition present
+
+
+def test_select_product_absent_store_unknown_legacy_id_raises(tmp_path):
+    """If the legacy registry has an id unknown to the catalog,
+    select_product raises UnknownProductError and writes no file — even
+    for a valid product_id argument."""
+    catalog = _make_catalog()
+    # Legacy has a valid id AND an unknown one.
+    legacy = _make_legacy_registry(("zesolver", "ghost"))
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    service = ZeAlfieService(
+        registry=legacy,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    with pytest.raises(UnknownProductError, match="ghost"):
+        service.select_product("zemosaic")
+
+    # No file written — bootstrap failed, select never reached.
+    assert not store.path.exists()
+
+
+# ===========================================================================
+# 25) Corrupt existing selection file + bootstrap: must raise, not overwrite
+# ===========================================================================
+
+
+def test_bootstrap_corrupt_existing_file_raises_CorruptSelectionError(tmp_path):
+    """If the selection file already exists but is corrupt, bootstrap
+    must raise CorruptSelectionError and must not clobber/overwrite the
+    corrupt file.  This pins the present-file-authoritative/fail-closed
+    contract.
+    """
+    path = tmp_path / "corrupt.toml"
+    corrupt_content = "this is not valid toml {{{"
+    path.write_text(corrupt_content)
+
+    catalog = _make_catalog()
+    legacy = _make_legacy_registry(("zesolver",))
+    store = SelectionStore(path=path)
+
+    from zealfie.products.selection import bootstrap_selection_from_legacy_registry
+
+    with pytest.raises(CorruptSelectionError, match="invalid TOML"):
+        bootstrap_selection_from_legacy_registry(store, catalog, legacy)
+
+    # The corrupt file must NOT be overwritten or replaced.
+    assert path.read_text() == corrupt_content

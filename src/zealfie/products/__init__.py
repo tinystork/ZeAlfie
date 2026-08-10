@@ -26,6 +26,7 @@ from .catalog import (
     default_catalog,
 )
 from .selection import (
+    bootstrap_selection_from_legacy_registry,
     CorruptSelectionError,
     DesiredProductSelection,
     SelectionStore,
@@ -55,6 +56,7 @@ from zealfie.sources import (
 )
 
 __all__ = [
+    "bootstrap_selection_from_legacy_registry",
     "CorruptSelectionError",
     "DesiredProductSelection",
     "InvalidRemoteSourceError",

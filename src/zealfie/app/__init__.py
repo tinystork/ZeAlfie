@@ -48,6 +48,7 @@ from zealfie.sources import (
 
 # M1-2D.3: Selection store and materialization re-exported.
 from zealfie.products.selection import (
+    bootstrap_selection_from_legacy_registry,
     CorruptSelectionError,
     DesiredProductSelection,
     SelectionStore,
@@ -63,6 +64,7 @@ from zealfie.products.selection import (
 from zealfie.launching import SpawnedLaunch
 
 __all__ = [
+    "bootstrap_selection_from_legacy_registry",
     "ComponentNotInstalledError",
     "CorruptSelectionError",
     "DesiredProductSelection",

@@ -39,6 +39,7 @@ from zealfie.products.catalog import (
 )
 from zealfie.products.selection import (
     DesiredProductSelection,
+    bootstrap_selection_from_legacy_registry,
     SelectionStore,
     desired_component_registry as _desired_component_registry,
     materialize_desired_components as _materialize_desired_components,
@@ -129,6 +130,11 @@ class ZeAlfieService:
     ``materialize_desired_components``, and
     ``desired_component_registry`` for the user selection store and
     desired-component materialization.
+
+    M1-2D.4.0 adds ``bootstrap_desired_selection`` for legacy-preserving
+    one-shot initialisation of the selection file from the packaged
+    ``ComponentRegistry``.  ``select_product`` guarantees the bootstrap
+    before any additive mutation.
 
     The **managed** set in the product shell is now driven by the
     ``SelectionStore`` (what the user wants), not by the packaged
@@ -705,16 +711,64 @@ class ZeAlfieService:
         """The user selection store."""
         return self._selection_store
 
+    def bootstrap_desired_selection(self) -> DesiredProductSelection:
+        """Ensure the selection file is initialised from the legacy
+        :class:`~zealfie.components.registry.ComponentRegistry`
+        (packaged ``components.toml``) before any desired-state mutation.
+
+        This is a one-shot/idempotent guard: if the selection file
+        already exists (including an explicit empty selection), it is
+        authoritative and no bootstrap occurs.  Otherwise the legacy
+        registry's ids are validated against the product catalog and
+        persisted as the initial desired selection.
+
+        **D.4.0**: this prevents `absent + zemosaic -> {zemosaic}` by
+        ensuring the legacy managed set (e.g. ``zesolver``) is preserved
+        before any additive ``select_product`` call.
+
+        Returns
+        -------
+        DesiredProductSelection
+            The authoritative selection — freshly bootstrapped or
+            loaded from the existing file.
+
+        Raises
+        ------
+        UnknownProductError
+            If any legacy component id is not in the product catalog.
+            The selection file is never written on this error.
+        """
+        return bootstrap_selection_from_legacy_registry(
+            self._selection_store,
+            self._catalog,
+            self._registry,
+        )
+
     def select_product(self, product_id: str) -> DesiredProductSelection:
         """Select a product for management and persist the choice.
 
+        **D.3 contract:** validates *product_id* against the catalog
+        first.  If unknown, raises
+        :class:`~zealfie.products.catalog.UnknownProductError` without
+        writing or bootstrapping the selection file.
+
+        Guarantees a one-shot bootstrap from the legacy
+        :class:`~zealfie.components.registry.ComponentRegistry` before
+        the first additive mutation so that legacy managed products are
+        never orphaned (D.4.0).
+
         * Idempotent — selecting an already-selected product is a no-op.
         * Raises :class:`~zealfie.products.catalog.UnknownProductError`
-          for unknown product ids without mutating the persisted file.
+          for unknown product ids without mutating the persisted file
+          or triggering a bootstrap.
 
         This does NOT install the product, build wheels, or mutate the
         runtime.  It only records the user's intent.
         """
+        # D.3: Validate before any file I/O — unknown product must not
+        # trigger a bootstrap or write any selection file.
+        self._catalog.get(product_id)  # raises UnknownProductError
+        self.bootstrap_desired_selection()
         return self._selection_store.select(product_id, catalog=self._catalog)
 
     def desired_selection(self) -> DesiredProductSelection:
