@@ -675,3 +675,584 @@ def test_prepared_product_artifact_is_immutable() -> None:
     # Immutable — mutation should raise.
     with pytest.raises(Exception):
         ppa.product_id = "other"  # type: ignore
+
+
+# ===========================================================================
+# D.4.1C: Prepared artifact → deployment plan bridge
+# ===========================================================================
+
+# Shared helpers for D.4.1C tests
+
+_SECOND_SHA = "e5b1f2a3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9"
+_SECOND_WHEEL_SHA = "b" * 64
+
+
+# Mapping from product_id → default distribution_name for tests.
+_PLANNING_DIST_NAMES = {
+    "zewitness": "zealfie-witness",
+    "zesolver": "zealfie-solver",
+}
+
+
+def _make_ppa(product_id, component_id, wheel_path, version="1.0",
+              dist_name=None):
+    """Create a PreparedProductArtifact for testing."""
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+
+    if dist_name is None:
+        dist_name = _PLANNING_DIST_NAMES.get(product_id, f"zealfie-{product_id}")
+
+    remote = RS(owner="tinystork", repo=f"Ze{product_id.capitalize()}", ref="main")
+    resolved = ResS(source=remote, commit_sha=VALID_SHA)
+
+    return PreparedProductArtifact(
+        product_id=product_id,
+        component_id=component_id,
+        resolved_source=resolved,
+        wheel_path=wheel_path,
+        verified_artifact=VerifiedArtifact(
+            component_id=component_id,
+            version=version,
+            path=wheel_path,
+            size=wheel_path.stat().st_size if wheel_path.exists() else 100,
+            sha256=_SECOND_WHEEL_SHA,
+            distribution_name=dist_name,
+            wheel_version=version,
+        ),
+    )
+
+
+# ── ProductDescriptor helpers for planning tests ─────────────────────
+
+
+_ZEWITNESS_EP = (EntryPointContract("console_scripts", "zewitness"),)
+_ZESOLVER_EP = (EntryPointContract("gui_scripts", "zesolver"),)
+
+
+def _planning_catalog(
+    product_id="zewitness",
+    dist_name="zealfie-witness",
+    entry_points=_ZEWITNESS_EP,
+    **kwargs,
+) -> ProductCatalog:
+    """Create a single-product catalog for planning tests."""
+    desc = ProductDescriptor(
+        product_id=product_id,
+        display_name=product_id.capitalize(),
+        distribution_name=dist_name,
+        launch_entry_points=entry_points,
+        **kwargs,
+    )
+    return _catalog(desc)
+
+
+def _dual_catalog() -> ProductCatalog:
+    """Create a two-product catalog for duplicate/set planning tests."""
+    w = ProductDescriptor(
+        product_id="zewitness",
+        display_name="ZeWitness",
+        distribution_name="zealfie-witness",
+        launch_entry_points=_ZEWITNESS_EP,
+    )
+    z = ProductDescriptor(
+        product_id="zesolver",
+        display_name="ZeSolver",
+        distribution_name="zealfie-solver",
+        launch_entry_points=_ZESOLVER_EP,
+    )
+    return _catalog(w, z)
+
+
+# =========================================================================
+# Test D.4.1C-1: Empty prepared artifact sequence → structured error
+# =========================================================================
+
+
+def test_empty_prepared_artifacts_raises_structured_error() -> None:
+    """plan_prepared_product_deployment with empty list raises
+    ProductDeploymentPlanningError, no runtime/selection mutation."""
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    service = ZeAlfieService(catalog=_planning_catalog())
+
+    with pytest.raises(ProductDeploymentPlanningError, match="at least one"):
+        service.plan_prepared_product_deployment([])
+
+
+def test_empty_prepared_artifacts_no_runtime_status_call(monkeypatch) -> None:
+    """Empty artifacts must fail before any runtime status call."""
+    from zealfie.app.service import ProductDeploymentPlanningError
+    from zealfie.runtime.model import RuntimeStatus, RuntimeState
+
+    calls = 0
+
+    class _FakeRt:
+        def status(self):
+            nonlocal calls
+            calls += 1
+            return RuntimeStatus(
+                state=RuntimeState.READY,
+                runtime_root=Path("/fake"),
+                active_slot_id="rt-test0000",
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeRt(),
+    )
+
+    with pytest.raises(ProductDeploymentPlanningError):
+        service.plan_prepared_product_deployment([])
+
+    assert calls == 0, "runtime.status() must not be called for empty input"
+
+
+# =========================================================================
+# Test D.4.1C-2: Duplicate product/component ids → structured error
+# =========================================================================
+
+
+def test_duplicate_product_id_raises_structured_error(
+    tmp_path, witness_wheel,
+) -> None:
+    """Duplicate product_id in prepared artifacts raises
+    ProductDeploymentPlanningError."""
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    ppa1 = _make_ppa("zewitness", "zewitness", witness_wheel)
+    ppa2 = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    service = ZeAlfieService(catalog=_planning_catalog())
+
+    with pytest.raises(ProductDeploymentPlanningError, match="duplicate product_id"):
+        service.plan_prepared_product_deployment([ppa1, ppa2])
+
+
+def test_duplicate_component_id_raises_structured_error(
+    tmp_path, witness_wheel,
+) -> None:
+    """Duplicate component_id (via duplicate product_id, since they must
+    match per D.4.1B contract) raises ProductDeploymentPlanningError."""
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    ppa1 = _make_ppa("zewitness", "zewitness", witness_wheel)
+    ppa2 = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    catalog = _planning_catalog()
+    service = ZeAlfieService(catalog=catalog)
+
+    with pytest.raises(ProductDeploymentPlanningError, match="duplicate product_id"):
+        service.plan_prepared_product_deployment([ppa1, ppa2])
+
+
+# =========================================================================
+# Test D.4.1C-3: Unknown prepared product id → UnknownProductError
+# =========================================================================
+
+
+def test_unknown_prepared_product_id_raises_unknown_product_error(
+    tmp_path, witness_wheel,
+) -> None:
+    """Prepared artifact with product_id not in catalog raises
+    UnknownProductError, no legacy registry fallback."""
+    ppa = _make_ppa("nobody", "nobody", witness_wheel)
+    service = ZeAlfieService(catalog=_planning_catalog("zewitness"))
+
+    with pytest.raises(UnknownProductError, match="nobody"):
+        service.plan_prepared_product_deployment([ppa])
+
+
+def test_unknown_product_id_no_legacy_registry_fallback(
+    tmp_path, witness_wheel,
+) -> None:
+    """Even when the legacy registry has 'nobody', planning must use
+    the product catalog (which does not)."""
+    dummy_reg = ComponentRegistry([
+        ComponentDefinition(
+            component_id="nobody",
+            display_name="Nobody",
+            distribution_name="nobody-lib",
+            launch_entry_points=_ZEWITNESS_EP,
+        ),
+    ])
+
+    ppa = _make_ppa("nobody", "nobody", witness_wheel)
+    service = ZeAlfieService(
+        catalog=_planning_catalog("zewitness"),
+        registry=dummy_reg,
+    )
+
+    with pytest.raises(UnknownProductError, match="nobody"):
+        service.plan_prepared_product_deployment([ppa])
+
+
+# =========================================================================
+# Test D.4.1C-4: Prepared product/component/artifact id mismatch
+# =========================================================================
+
+
+def test_product_component_id_mismatch_fails_closed(
+    tmp_path, witness_wheel,
+) -> None:
+    """product_id != component_id → ProductDeploymentPlanningError."""
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    ppa = _make_ppa("zewitness", "different", witness_wheel)
+    service = ZeAlfieService(catalog=_planning_catalog())
+
+    with pytest.raises(ProductDeploymentPlanningError,
+                       match="product_id.*!=.*component_id"):
+        service.plan_prepared_product_deployment([ppa])
+
+
+def test_product_verified_artifact_component_id_mismatch_fails_closed(
+    tmp_path, witness_wheel,
+) -> None:
+    """product_id != verified_artifact.component_id →
+    ProductDeploymentPlanningError."""
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    ppa = _make_ppa("zesolver", "zesolver", witness_wheel)
+    # Override verified_artifact.component_id to differ from product_id
+    # while keeping product_id == component_id.
+    bad_va = VerifiedArtifact(
+        component_id="different",  # mismatched
+        version="1.0",
+        path=ppa.wheel_path,
+        size=ppa.verified_artifact.size,
+        sha256=ppa.verified_artifact.sha256,
+        distribution_name=ppa.verified_artifact.distribution_name,
+        wheel_version="1.0",
+    )
+    ppa = PreparedProductArtifact(
+        product_id="zesolver",
+        component_id="zesolver",
+        resolved_source=ppa.resolved_source,
+        wheel_path=ppa.wheel_path,
+        verified_artifact=bad_va,
+    )
+
+    service = ZeAlfieService(catalog=_dual_catalog())
+
+    with pytest.raises(ProductDeploymentPlanningError,
+                       match="product_id.*!=.*verified_artifact"):
+        service.plan_prepared_product_deployment([ppa])
+
+
+# =========================================================================
+# Test D.4.1C-5: ABSENT runtime + valid prepared artifact → INSTALL plan
+# =========================================================================
+
+
+def test_absent_runtime_plan_has_install_step(
+    tmp_path, witness_wheel,
+) -> None:
+    """ABSENT runtime with a valid prepared artifact produces a
+    DeploymentPlan with one INSTALL step and VerifiedArtifact in
+    desired state."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+    from zealfie.runtime.planning import DeploymentAction
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+    )
+
+    plan = service.plan_prepared_product_deployment([ppa])
+
+    assert plan.runtime_state == RuntimeState.ABSENT
+    assert not plan.blocked
+    assert len(plan.steps) == 1
+    step = plan.steps[0]
+    assert step.component_id == "zewitness"
+    assert step.action == DeploymentAction.INSTALL
+    assert step.reason_code is not None
+    assert step.artifact.path == witness_wheel
+
+    # Desired state preserves VerifiedArtifact.
+    assert len(plan.desired_state.components) == 1
+    dc = plan.desired_state.components[0]
+    assert dc.artifact == ppa.verified_artifact
+
+
+def test_absent_runtime_source_slot_ids_preserved(
+    tmp_path, witness_wheel,
+) -> None:
+    """Source slot ids from runtime status are preserved in the plan."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+                active_slot_id="rt-a0000000",
+                previous_slot_id="rt-b0000000",
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeRt(),
+    )
+
+    plan = service.plan_prepared_product_deployment([ppa])
+    assert plan.source_active_slot_id == "rt-a0000000"
+    assert plan.source_previous_slot_id == "rt-b0000000"
+
+
+# =========================================================================
+# Test D.4.1C-6: Plan registry uses ProductCatalog descriptor
+# =========================================================================
+
+
+def test_plan_registry_uses_catalog_not_legacy(tmp_path, witness_wheel) -> None:
+    """A legacy registry with unrelated ids must not affect planning.
+    The catalog-derived registry is authoritative."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+    from zealfie.runtime.planning import DeploymentAction
+
+    # Legacy registry with an unrelated id.
+    legacy_reg = ComponentRegistry([
+        ComponentDefinition(
+            component_id="irrelevant",
+            display_name="Irrelevant",
+            distribution_name="irrelevant-lib",
+            launch_entry_points=_ZEWITNESS_EP,
+        ),
+    ])
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        registry=legacy_reg,
+        runtime=_FakeAbsentRt(),
+    )
+
+    plan = service.plan_prepared_product_deployment([ppa])
+
+    # Plan must have exactly one step for zewitness.
+    assert len(plan.steps) == 1
+    assert plan.steps[0].component_id == "zewitness"
+    assert plan.steps[0].action == DeploymentAction.INSTALL
+
+
+def test_registry_distribution_name_from_catalog(
+    tmp_path, witness_wheel,
+) -> None:
+    """The registry used for planning exposes the catalog's
+    distribution_name, not the default."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel, dist_name="my-custom-dist")
+    catalog = _planning_catalog(dist_name="my-custom-dist")
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(catalog=catalog, runtime=_FakeAbsentRt())
+
+    plan = service.plan_prepared_product_deployment([ppa])
+
+    # The plan must have been built with the catalog-derived registry.
+    # Verify via the internal helper.
+    reg = service._registry_for_prepared_products([ppa])
+    definition = reg.get("zewitness")
+    assert definition.distribution_name == "my-custom-dist"
+
+
+# =========================================================================
+# Test D.4.1C-7: Selection store file not created/read-mutated
+# =========================================================================
+
+
+def test_planning_does_not_create_selection_store(
+    tmp_path, witness_wheel,
+) -> None:
+    """plan_prepared_product_deployment must not create or touch the
+    selection store file."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+    from zealfie.products.selection import SelectionStore
+
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    assert not sel_path.exists(), "selection file must not exist before planning"
+
+    service.plan_prepared_product_deployment([ppa])
+
+    assert not sel_path.exists(), (
+        "plan_prepared_product_deployment must not create selection file"
+    )
+
+
+# =========================================================================
+# Test D.4.1C-8: No install/apply — explode if called
+# =========================================================================
+
+
+def test_no_apply_deployment_plan_called(monkeypatch, tmp_path, witness_wheel) -> None:
+    """plan_prepared_product_deployment must not call apply_deployment_plan
+    or any runtime transaction methods."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    # Monkeypatch apply_deployment_plan to explode.
+    import zealfie.app.service as svc_mod
+
+    apply_called = False
+
+    def _explosive_apply(*args, **kwargs):
+        nonlocal apply_called
+        apply_called = True
+        raise AssertionError("apply_deployment_plan must not be called by planning")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _explosive_apply)
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+    )
+
+    plan = service.plan_prepared_product_deployment([ppa])
+    assert not apply_called, "apply_deployment_plan must not be called"
+    assert plan is not None
+
+
+# =========================================================================
+# Test D.4.1C: Error hierarchy
+# =========================================================================
+
+
+def test_product_deployment_planning_error_hierarchy() -> None:
+    """ProductDeploymentPlanningError is a RuntimeError."""
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    assert issubclass(ProductDeploymentPlanningError, RuntimeError)
+
+    # Not a ProductInstallPreparationError — distinct family.
+    assert not issubclass(ProductDeploymentPlanningError, ProductInstallPreparationError)
+
+
+# =========================================================================
+# Test D.4.1C: Probe injectable for READY runtime
+# =========================================================================
+
+
+def test_probe_injectable_for_ready_runtime(
+    tmp_path, witness_wheel,
+) -> None:
+    """When the runtime is READY, an injectable probe_distribution
+    callable controls the plan outcome."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus, RuntimeReasonCode
+    from zealfie.runtime.planning import DeploymentAction
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeReadyRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.READY,
+                runtime_root=Path("/fake"),
+                active_slot_id="rt-test0000",
+                python_executable=Path("/fake/bin/python"),
+                reason_code=RuntimeReasonCode.RUNTIME_READY,
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeReadyRt(),
+    )
+
+    # Probe that says installed with matching version.
+    def _fake_probe(python_exe, dist_name):
+        return {
+            "installed": True,
+            "version": "1.0",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zewitness",
+                 "value": "zewitness:main"},
+            ],
+        }
+
+    plan = service.plan_prepared_product_deployment(
+        [ppa], probe_distribution=_fake_probe,
+    )
+
+    assert not plan.blocked
+    assert len(plan.steps) == 1
+    assert plan.steps[0].action == DeploymentAction.KEEP
+
+
+# =========================================================================
+# Test D.4.1C: dependency_wheelhouse parameter (read-only, optional)
+# =========================================================================
+
+
+def test_dependency_wheelhouse_passed_through_none_by_default(
+    tmp_path, witness_wheel,
+) -> None:
+    """When dependency_wheelhouse is not passed, lock is None."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+    )
+
+    plan = service.plan_prepared_product_deployment([ppa])
+    assert plan.dependency_lock is None

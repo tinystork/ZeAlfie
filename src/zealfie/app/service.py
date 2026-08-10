@@ -160,6 +160,17 @@ class RemoteSourceUnavailableError(ProductInstallPreparationError):
     """
 
 
+
+class ProductDeploymentPlanningError(RuntimeError):
+    """Raised when bridging prepared product artifacts to a deployment
+    plan fails validation.
+
+    This is a planning-only error: no install, no apply, no runtime
+    mutation, no selection persistence occurs.  The error is raised
+    before any deployment planner call when the input is structurally
+    invalid (empty, duplicates, mismatches).
+    """
+
 # ---------------------------------------------------------------------------
 # M1-2D.4.1B: Prepared product artifact
 # ---------------------------------------------------------------------------
@@ -418,6 +429,123 @@ class ZeAlfieService:
             resolved_source=resolved,
             wheel_path=wheel_path,
             verified_artifact=verified,
+        )
+
+
+    # ------------------------------------------------------------------
+    # D.4.1C: Prepared artifact → deployment plan bridge
+    # ------------------------------------------------------------------
+
+    def plan_prepared_product_deployment(
+        self,
+        prepared_artifacts: Sequence[PreparedProductArtifact],
+        *,
+        probe_distribution=None,
+        dependency_wheelhouse: Path | None = None,
+    ) -> DeploymentPlan:
+        """Build a read-only deployment plan from one or more
+        :class:`PreparedProductArtifact` objects.
+
+        This is the bridge between D.4.1B (artifact preparation) and
+        the existing deployment planner.  It validates the prepared
+        artifacts against the product catalog, materializes a
+        :class:`ComponentRegistry` from the catalog descriptors, builds a
+        :class:`DesiredRuntimeState` from the verified artifacts, and
+        calls :func:`build_deployment_plan`.
+
+        **No install, no apply, no runtime mutation, no selection
+        persistence.**  This is purely a read-only planning operation.
+
+        Returns
+        -------
+        DeploymentPlan
+            For ABSENT runtimes, every component receives an INSTALL
+            step.  For READY runtimes, the probe determines KEEP/INSTALL.
+
+        Raises
+        ------
+        ProductDeploymentPlanningError
+            If *prepared_artifacts* is empty, contains duplicate ids,
+            or has artifact-id mismatches.
+        UnknownProductError
+            If any prepared artifact's *product_id* is not in the
+            product catalog.
+        PlanningError
+            If the desired state fails registry validation at
+            plan-build time.
+        """
+        # 1. Validate input — empty, duplicates, mismatches.
+        _validate_prepared_artifacts(prepared_artifacts)
+
+        # 2. Validate every product_id exists in catalog.
+        for pa in prepared_artifacts:
+            self._catalog.get(pa.product_id)  # raises UnknownProductError
+
+        # 3. Build catalog-derived ComponentRegistry.
+        registry = _registry_for_prepared_products(
+            self._catalog, prepared_artifacts
+        )
+
+        # 4. Build DesiredRuntimeState from verified artifacts.
+        desired_state = _desired_state_from_prepared_artifacts(
+            prepared_artifacts
+        )
+
+        # 5. Resolve shared runtime dependencies (optional).
+        lock = None
+        if dependency_wheelhouse is not None and dependency_wheelhouse.is_dir():
+            primary_wheels: list[tuple[Path, frozenset[str]]] = []
+            for dc in desired_state.components:
+                definition = registry.get(dc.component_id)
+                primary_wheels.append(
+                    (
+                        dc.artifact.path,
+                        frozenset(definition.required_extras),
+                    )
+                )
+            if primary_wheels:
+                try:
+                    lock = resolve_runtime_dependencies(
+                        primary_wheels,
+                        wheelhouse=dependency_wheelhouse,
+                    )
+                except DependencyResolutionError as exc:
+                    raise OfflineReleaseError(
+                        f"shared runtime dependency resolution failed: {exc}"
+                    ) from exc
+
+        # 6. Get runtime status and build the plan.
+        runtime_status = self._runtime.status()
+        return build_deployment_plan(
+            desired_state,
+            registry=registry,
+            runtime_status=runtime_status,
+            probe_distribution=probe_distribution,
+            dependency_lock=lock,
+        )
+
+    # ------------------------------------------------------------------
+    # D.4.1C: Internal helpers
+    # ------------------------------------------------------------------
+
+    def _registry_for_prepared_products(
+        self,
+        prepared_artifacts: Sequence[PreparedProductArtifact],
+    ) -> ComponentRegistry:
+        """Build a :class:`ComponentRegistry` from product catalog
+        descriptors matching the prepared artifacts."""
+        return _registry_for_prepared_products(
+            self._catalog, prepared_artifacts
+        )
+
+    def _desired_state_from_prepared_artifacts(
+        self,
+        prepared_artifacts: Sequence[PreparedProductArtifact],
+    ) -> DesiredRuntimeState:
+        """Build a :class:`DesiredRuntimeState` from prepared artifact
+        verified artifacts."""
+        return _desired_state_from_prepared_artifacts(
+            prepared_artifacts
         )
 
     # ------------------------------------------------------------------
@@ -1319,3 +1447,112 @@ def _runtime_scripts_dir(venv_dir: Path) -> Path:
         return venv_dir / "Scripts"
     else:
         return venv_dir / "bin"
+
+
+# ---------------------------------------------------------------------------
+# D.4.1C: Module-level helpers for prepared artifact → deployment plan bridge
+# ---------------------------------------------------------------------------
+
+
+def _validate_prepared_artifacts(
+    prepared_artifacts: Sequence[PreparedProductArtifact],
+) -> None:
+    """Validate the prepared artifact sequence before planning.
+
+    Fails closed with :class:`ProductDeploymentPlanningError` for:
+
+    * Empty sequence.
+    * Duplicate *product_id* values.
+    * Duplicate *component_id* values.
+    * Mismatch between ``product_id``, ``component_id``, and
+      ``verified_artifact.component_id`` on any single artifact.
+    """
+    if not prepared_artifacts:
+        raise ProductDeploymentPlanningError(
+            "at least one prepared product artifact is required for planning"
+        )
+
+    seen_product_ids: set[str] = set()
+    seen_component_ids: set[str] = set()
+
+    for pa in prepared_artifacts:
+        # Mismatch checks.
+        if pa.product_id != pa.component_id:
+            raise ProductDeploymentPlanningError(
+                f"product_id {pa.product_id!r} != component_id "
+                f"{pa.component_id!r} — must match"
+            )
+        if pa.product_id != pa.verified_artifact.component_id:
+            raise ProductDeploymentPlanningError(
+                f"product_id {pa.product_id!r} != "
+                f"verified_artifact.component_id "
+                f"{pa.verified_artifact.component_id!r} — must match"
+            )
+        if pa.component_id != pa.verified_artifact.component_id:
+            raise ProductDeploymentPlanningError(
+                f"component_id {pa.component_id!r} != "
+                f"verified_artifact.component_id "
+                f"{pa.verified_artifact.component_id!r} — must match"
+            )
+
+        # Duplicate checks.
+        if pa.product_id in seen_product_ids:
+            raise ProductDeploymentPlanningError(
+                f"duplicate product_id: {pa.product_id!r}"
+            )
+        if pa.component_id in seen_component_ids:
+            raise ProductDeploymentPlanningError(
+                f"duplicate component_id: {pa.component_id!r}"
+            )
+
+        seen_product_ids.add(pa.product_id)
+        seen_component_ids.add(pa.component_id)
+
+
+def _registry_for_prepared_products(
+    catalog: ProductCatalog,
+    prepared_artifacts: Sequence[PreparedProductArtifact],
+) -> ComponentRegistry:
+    """Build a :class:`ComponentRegistry` from product catalog
+    descriptors corresponding to the prepared artifacts.
+
+    The registry is always derived from the catalog — never from the
+    legacy packaged registry and never from wheel metadata alone.
+    Each prepared artifact's *product_id* must already be validated
+    against the catalog before calling this function.
+    """
+    definitions: list[ComponentDefinition] = []
+    for pa in prepared_artifacts:
+        desc = catalog.get(pa.product_id)
+        definitions.append(
+            ComponentDefinition(
+                component_id=desc.product_id,
+                display_name=desc.display_name,
+                distribution_name=desc.distribution_name,
+                launch_entry_points=desc.launch_entry_points,
+                required_extras=desc.required_extras,
+            )
+        )
+    return ComponentRegistry(definitions)
+
+
+def _desired_state_from_prepared_artifacts(
+    prepared_artifacts: Sequence[PreparedProductArtifact],
+) -> DesiredRuntimeState:
+    """Build a :class:`DesiredRuntimeState` from the verified artifacts
+    carried by the prepared product artifacts.
+
+    Each :class:`DesiredComponent` is built from the
+    :class:`VerifiedArtifact` inside the :class:`PreparedProductArtifact`.
+    The artifact proof (path, size, SHA256, identity) is preserved — no
+    re-verification occurs at this stage.
+    """
+    components = tuple(
+        DesiredComponent(
+            component_id=pa.verified_artifact.component_id,
+            version=pa.verified_artifact.version,
+            artifact=pa.verified_artifact,
+        )
+        for pa in prepared_artifacts
+    )
+    return DesiredRuntimeState(components=components)
