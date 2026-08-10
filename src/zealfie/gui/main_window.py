@@ -6,6 +6,7 @@ The top-level product shell window hosting product cards and a status bar.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from zealfie.app import ProductShellState, ZeAlfieService
+from zealfie.sources.acquisition import ArchiveFetcher
+from zealfie.sources import SourceRefResolver
 
 from .presentation import runtime_summary
 from .product_card import ProductCard
@@ -37,9 +40,20 @@ class ZeAlfieMainWindow(QMainWindow):
     internals.  All product interaction routes through ``service``.
     """
 
-    def __init__(self, service: ZeAlfieService, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        service: ZeAlfieService,
+        parent: QWidget | None = None,
+        *,
+        resolver: SourceRefResolver | None = None,
+        fetcher: ArchiveFetcher | None = None,
+        work_root: Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self._service = service
+        self._resolver = resolver
+        self._fetcher = fetcher
+        self._work_root = work_root
         self._cards: dict[str, ProductCard] = {}
         self._status_label: QLabel | None = None
         self._error_label: QLabel | None = None
@@ -52,7 +66,7 @@ class ZeAlfieMainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        self.setWindowTitle("ZeAlfie — Astronomy Launcher For Imaging Engines")
+        self.setWindowTitle("ZeAlfie \u2014 Astronomy Launcher For Imaging Engines")
         self.resize(580, 500)
 
         # --- Central scroll area ---
@@ -65,7 +79,7 @@ class ZeAlfieMainWindow(QMainWindow):
         header_layout = QVBoxLayout()
         header_layout.setSpacing(2)
 
-        title = QLabel("🛸 ZeAlfie")
+        title = QLabel("\U0001f6f8 ZeAlfie")
         title_font = title.font()
         title_font.setBold(True)
         title_font.setPointSize(title_font.pointSize() + 8)
@@ -73,7 +87,7 @@ class ZeAlfieMainWindow(QMainWindow):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(title)
 
-        subtitle = QLabel("Astronomy Launcher For Imaging Engines  👽")
+        subtitle = QLabel("Astronomy Launcher For Imaging Engines  \U0001f47d")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(subtitle)
 
@@ -107,7 +121,7 @@ class ZeAlfieMainWindow(QMainWindow):
 
         # --- Status bar ---
         status_bar = QStatusBar()
-        self._status_label = QLabel("Starting…")
+        self._status_label = QLabel("Starting\u2026")
         self._status_label.setObjectName("statusLabel")
         status_bar.addWidget(self._status_label)
         self.setStatusBar(status_bar)
@@ -150,8 +164,13 @@ class ZeAlfieMainWindow(QMainWindow):
                 state=None,
                 service=self._service,
                 parent=self,
+                resolver=self._resolver,
+                fetcher=self._fetcher,
+                work_root=self._work_root,
             )
             self._cards[desc.product_id] = card
+            # Connect install_succeeded signal to trigger a full state refresh
+            card.install_succeeded.connect(self._on_install_succeeded)
             # Insert before the stretch at the end
             cards_layout.insertWidget(cards_layout.count() - 1, card)
 
@@ -167,6 +186,10 @@ class ZeAlfieMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Refresh
     # ------------------------------------------------------------------
+
+    def _on_install_succeeded(self, product_id: str) -> None:
+        """Install finished; re-collect authoritative state."""
+        self._refresh()
 
     def _refresh(self) -> None:
         """Collect fresh product state from the service and update cards.

@@ -1,4 +1,10 @@
-"""Command-line interface for ZeAlfie."""
+"""Command-line interface for ZeAlfie.
+
+The default install work root is ``$XDG_CACHE_HOME/zealfie/work`` on Linux,
+``~/Library/Caches/zealfie/work`` on macOS, and
+``%LOCALAPPDATA%/zealfie/work`` on Windows.  Tests override it via the
+injectable ``_make_work_root`` / ``_make_install_deps`` helpers.
+"""
 
 from __future__ import annotations
 
@@ -16,9 +22,12 @@ from .app import (
     LaunchPreparationError,
     LaunchScriptNotFoundError,
     ManagedStatus,
+    ProductDeploymentPlanningError,
     OfflineReleaseError,
+    ProductInstallPreparationError,
     ProductShellState,
     ProductState,
+    RemoteSourceUnavailableError,
     UnknownProductError,
     ZeAlfieService,
     collect_status,
@@ -26,13 +35,17 @@ from .app import (
     format_status,
     startup_message,
 )
+from .app.install_defaults import default_install_work_root
 from .components import UnknownComponentError, default_registry
 from .launching import LaunchError, LaunchResult
 from .products.catalog import ProductCatalog
+from .products.selection import CorruptSelectionError
+from .releases import ArtifactRejectionError
 from .runtime import (
     DeploymentPlan,
     DeploymentResult,
     DeploymentStep,
+    PlanningError,
     RuntimeReasonCode,
     RuntimeState,
     RuntimeStatus,
@@ -40,6 +53,9 @@ from .runtime import (
     SharedRuntimeError,
     default_runtime_layout,
 )
+
+from .sources import SourceResolutionError
+from .sources.acquisition import AcquisitionError
 
 
 def _positive_finite_float(value: str) -> float:
@@ -103,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional product id to inspect",
     )
 
+
+    # -- install subcommand (D.4.1G) -----------------------------------------
+    install_parser = subparsers.add_parser(
+        "install", help="install a product from its remote source",
+    )
+    install_parser.add_argument("product_id", help="product id to install")
     return parser
 
 
@@ -138,6 +160,9 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
 
     if args.command == "products":
         return _handle_products(args, stdout=stdout)
+
+    if args.command == "install":
+        return _handle_install(args, stdout=stdout)
 
     print(startup_message(), file=stdout)
     return 0
@@ -312,6 +337,83 @@ def _format_product_state(state: ProductState) -> str:
 
 
 # ---------------------------------------------------------------------------
+# D.4.1G: install handler
+# ---------------------------------------------------------------------------
+
+
+def _make_install_deps():
+    """Return default install dependencies (resolver, fetcher, work_root).
+
+    Tests monkeypatch this function or the private helpers
+    ``_make_source_resolver`` and ``_make_source_fetcher`` to avoid
+    any real network access.
+    """
+    return (
+        _make_source_resolver(),
+        _make_source_fetcher(),
+        _make_work_root(),
+    )
+
+
+def _make_source_resolver():
+    """Return a default :class:`SourceRefResolver`."""
+    from .sources.github import GitHubSourceRefResolver
+
+    return GitHubSourceRefResolver()
+
+
+def _make_source_fetcher():
+    """Return a default :class:`ArchiveFetcher`."""
+    from .sources.github import GitHubArchiveFetcher
+
+    return GitHubArchiveFetcher()
+
+
+def _make_work_root() -> Path:
+    """Return the default install work root."""
+    return default_install_work_root()
+
+
+def _handle_install(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie install <product_id>``."""
+    service = _make_service()
+    resolver, fetcher, work_root = _make_install_deps()
+
+    # Ensure work root exists so the service can stage artifacts.
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = service.install_product(
+            args.product_id,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+    except UnknownProductError:
+        catalog_ids = ", ".join(service.catalog.available_ids()) or "none"
+        print(
+            f"Unknown product: {args.product_id}. Known products: {catalog_ids}",
+            file=sys.stderr,
+        )
+        return 2
+    except RemoteSourceUnavailableError as exc:
+        print(f"cannot install {args.product_id!r}: {exc}", file=sys.stderr)
+        return 7
+    except SourceResolutionError as exc:
+        print(f"cannot resolve source for {args.product_id!r}: {exc}", file=sys.stderr)
+        return 8
+    except AcquisitionError as exc:
+        print(f"cannot fetch source for {args.product_id!r}: {exc}", file=sys.stderr)
+        return 9
+    except (
+        ArtifactRejectionError, CorruptSelectionError, ProductInstallPreparationError,
+        ProductDeploymentPlanningError, PlanningError,
+    ) as exc:
+        print(f"install failed for {args.product_id!r}: {exc}", file=sys.stderr)
+        return 3
+
+    print(_format_deployment_result(result), file=stdout)
+    return 0 if result.success else 3
 # Helpers
 # ---------------------------------------------------------------------------
 

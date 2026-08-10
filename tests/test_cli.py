@@ -1354,3 +1354,402 @@ def test_launch_parser_timeout_positive_accepted():
     p = cli.build_parser()
     args = p.parse_args(["launch", "zewitness", "--timeout", "0.5"])
     assert args.timeout_seconds == 0.5
+
+# ===========================================================================
+# D.4.1G: CLI install command
+# ===========================================================================
+
+
+class _FakeInstallService:
+    """Fake ZeAlfieService for CLI install tests."""
+
+    def __init__(self, result_or_error, *, catalog_ids=("zesolver",)):
+        self._result_or_error = result_or_error
+        self._catalog_ids = catalog_ids
+        self.install_called_with: list[dict] = []
+
+    @property
+    def catalog(self):
+        from zealfie.products.catalog import ProductCatalog
+
+        return _FakeInstallCatalog(self._catalog_ids)
+
+    def install_product(self, product_id, *, resolver, fetcher, work_root,
+                        dependency_wheelhouse=None, probe_distribution=None):
+        self.install_called_with.append({
+            "product_id": product_id,
+            "resolver": resolver,
+            "fetcher": fetcher,
+            "work_root": work_root,
+        })
+        if isinstance(self._result_or_error, Exception):
+            raise self._result_or_error
+        return self._result_or_error
+
+
+class _FakeInstallCatalog:
+    """Fake ProductCatalog for install tests."""
+
+    def __init__(self, available_ids=("zesolver",)):
+        self._ids = available_ids
+
+    def available_ids(self):
+        return self._ids
+
+
+def _fake_resolver(owner, repo, ref):
+    return "a" * 40
+
+
+def _fake_fetcher(owner, repo, commit_sha):
+    return b"fake zip content"
+
+
+# -- Success -------------------------------------------------------------------
+
+
+def test_install_success_returns_zero(monkeypatch, tmp_path):
+    """zealfie install success → exit 0, prints DeploymentResult."""
+    result = DeploymentResult(success=True, active_slot_id="rt-new0000", previous_slot_id="rt-old0000")
+    service = _FakeInstallService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    stdout = StringIO()
+    code = run(["install", "zesolver"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "Success: yes" in output
+    assert "Active slot: rt-new0000" in output
+    assert len(service.install_called_with) == 1
+    assert service.install_called_with[0]["product_id"] == "zesolver"
+
+
+def test_install_failure_returns_3(monkeypatch, tmp_path):
+    """zealfie install DeploymentResult(success=False) → exit 3."""
+    result = DeploymentResult(success=False, reason="plan was blocked")
+    service = _FakeInstallService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    stdout = StringIO()
+    code = run(["install", "zesolver"], stdout=stdout)
+    assert code == 3
+    output = stdout.getvalue()
+    assert "Success: no" in output
+    assert "plan was blocked" in output
+
+
+def test_install_passes_deps_to_service(monkeypatch, tmp_path):
+    """zealfie install forwards resolver, fetcher, work_root."""
+    result = DeploymentResult(success=True, active_slot_id="rt-x")
+    service = _FakeInstallService(result)
+    work = tmp_path / "my-work"
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, work))
+    stdout = StringIO()
+    code = run(["install", "zesolver"], stdout=stdout)
+    assert code == 0
+    assert len(service.install_called_with) == 1
+    call = service.install_called_with[0]
+    assert call["resolver"] is _fake_resolver
+    assert call["fetcher"] is _fake_fetcher
+    assert call["work_root"] == work
+    # work_root should exist after handler runs
+    assert work.is_dir()
+
+
+# -- Unknown product -----------------------------------------------------------
+
+
+def test_install_unknown_product_returns_2(monkeypatch):
+    """zealfie install unknown product → exit 2, clean stderr."""
+    from zealfie.app import UnknownProductError
+
+    service = _FakeInstallService(UnknownProductError("zemosaic"), catalog_ids=("zesolver",))
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, Path("/tmp")))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zemosaic"], stdout=stdout)
+        assert code == 2
+        assert "Unknown product: zemosaic" in stderr.getvalue()
+        assert "zesolver" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- RemoteSourceUnavailableError ----------------------------------------------
+
+
+def test_install_no_remote_source_returns_7(monkeypatch, tmp_path):
+    """Product has no remote_source → exit 7."""
+    from zealfie.app import RemoteSourceUnavailableError
+
+    service = _FakeInstallService(
+        RemoteSourceUnavailableError("product 'zesolver' has no remote source")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 7
+        assert "cannot install 'zesolver'" in stderr.getvalue()
+        assert "no remote source" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- SourceResolutionError -----------------------------------------------------
+
+
+def test_install_resolver_failure_returns_8(monkeypatch, tmp_path):
+    """SourceResolutionError → exit 8."""
+    from zealfie.sources import SourceResolutionError
+
+    service = _FakeInstallService(
+        SourceResolutionError("ref not-found not found")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 8
+        assert "cannot resolve source for 'zesolver'" in stderr.getvalue()
+        assert "not found" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- AcquisitionError ----------------------------------------------------------
+
+
+def test_install_fetch_failure_returns_9(monkeypatch, tmp_path):
+    """AcquisitionError → exit 9."""
+    from zealfie.sources.acquisition import AcquisitionError
+
+    service = _FakeInstallService(
+        AcquisitionError("network error fetching archive")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 9
+        assert "cannot fetch source for 'zesolver'" in stderr.getvalue()
+        assert "network error" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- ArtifactRejectionError ----------------------------------------------------
+
+
+def test_install_artifact_rejection_returns_3(monkeypatch, tmp_path):
+    """ArtifactRejectionError → exit 3, clean stderr."""
+    from zealfie.releases import ArtifactRejectionError
+
+    service = _FakeInstallService(
+        ArtifactRejectionError("invalid artifact filename")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 3
+        assert "install failed for 'zesolver'" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- ProductInstallPreparationError --------------------------------------------
+
+
+def test_install_prep_error_returns_3(monkeypatch, tmp_path):
+    """ProductInstallPreparationError → exit 3."""
+    from zealfie.app import ProductInstallPreparationError
+
+    service = _FakeInstallService(
+        ProductInstallPreparationError("build failed")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 3
+        assert "install failed for 'zesolver'" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- CorruptSelectionError -----------------------------------------------------
+
+
+def test_install_corrupt_selection_returns_3(monkeypatch, tmp_path):
+    """CorruptSelectionError → exit 3, clean stderr."""
+    from zealfie.products.selection import CorruptSelectionError
+
+    service = _FakeInstallService(
+        CorruptSelectionError("selection file corrupted")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 3
+        assert "install failed for 'zesolver'" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- Parser tests --------------------------------------------------------------
+
+
+def test_install_in_parser():
+    """install subcommand is present in the argument parser."""
+    p = cli.build_parser()
+    args = p.parse_args(["install", "zesolver"])
+    assert args.command == "install"
+    assert args.product_id == "zesolver"
+
+
+def test_install_requires_product_id():
+    """install requires a product_id argument."""
+    p = cli.build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["install"])
+
+
+# -- Default work root ---------------------------------------------------------
+
+
+def test_default_install_work_root_exists():
+    """default_install_work_root returns a Path."""
+    from zealfie.app.install_defaults import default_install_work_root
+
+    root = default_install_work_root()
+    assert isinstance(root, Path)
+    assert "zealfie" in str(root)
+    assert "work" in str(root).split("/")[-1] or root.name == "work"
+
+
+def test_make_install_deps_returns_triple():
+    """_make_install_deps returns (resolver, fetcher, work_root)."""
+    resolver, fetcher, work_root = cli._make_install_deps()
+    assert callable(resolver)
+    assert callable(fetcher)
+    assert isinstance(work_root, Path)
+
+
+# -- No real network -----------------------------------------------------------
+
+
+def test_install_never_touches_real_network(monkeypatch, tmp_path):
+    """Install tests use only fake transports — no real GitHub."""
+    result = DeploymentResult(success=True, active_slot_id="rt-x")
+    service = _FakeInstallService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+
+    # Use callable mocks that record calls
+    resolver_calls = []
+    fetcher_calls = []
+
+    def recording_resolver(owner, repo, ref):
+        resolver_calls.append((owner, repo, ref))
+        return "a" * 40
+
+    def recording_fetcher(owner, repo, commit_sha):
+        fetcher_calls.append((owner, repo, commit_sha))
+        return b"zip"
+
+    monkeypatch.setattr(
+        cli, "_make_install_deps",
+        lambda: (recording_resolver, recording_fetcher, tmp_path / "work"),
+    )
+    stdout = StringIO()
+    code = run(["install", "zesolver"], stdout=stdout)
+    assert code == 0
+    # Resolver and fetcher are passed to service, not called directly by CLI.
+    # The service call was recorded — no real network by definition.
+    assert len(service.install_called_with) == 1
+
+# -- ProductDeploymentPlanningError --------------------------------------------
+
+
+def test_install_planning_error_returns_3(monkeypatch, tmp_path):
+    """ProductDeploymentPlanningError → exit 3, clean stderr."""
+    from zealfie.app import ProductDeploymentPlanningError
+
+    service = _FakeInstallService(
+        ProductDeploymentPlanningError("deployment plan blocked")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 3
+        assert "install failed for 'zesolver'" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup
+
+
+# -- PlanningError -------------------------------------------------------------
+
+
+def test_install_planning_error_runtime_returns_3(monkeypatch, tmp_path):
+    """PlanningError (runtime) → exit 3, clean stderr."""
+    from zealfie.runtime import PlanningError
+
+    service = _FakeInstallService(
+        PlanningError("planning constraints violated")
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 3
+        assert "install failed for 'zesolver'" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+    finally:
+        sys.stderr = backup

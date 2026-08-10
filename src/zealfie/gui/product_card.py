@@ -7,8 +7,9 @@ user-facing state text, and the primary action button.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from zealfie.app import ProductDescriptor, ProductState, ZeAlfieService
+from zealfie.sources.acquisition import ArchiveFetcher
+from zealfie.sources import SourceRefResolver
 
 from .presentation import (
     action_enabled,
@@ -42,18 +45,31 @@ class ProductCard(QFrame):
     deployment layers directly — routes through ``ZeAlfieService``.
     """
 
+    # Emitted when install_product succeeds; transports product_id.
+    # The MainWindow connects this to trigger a full state refresh.
+    install_succeeded = Signal(str)
+
     def __init__(
         self,
         descriptor: ProductDescriptor,
         state: ProductState | None,
         service: ZeAlfieService,
         parent: QWidget | None = None,
+        *,
+        resolver: SourceRefResolver | None = None,
+        fetcher: ArchiveFetcher | None = None,
+        work_root: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self._descriptor = descriptor
         self._state = state
         self._service = service
+        self._resolver = resolver
+        self._fetcher = fetcher
+        self._work_root = work_root
         self._spawning = False
+        self._installing = False
+        self._awaiting_install_refresh: bool = False
         self._status_label: QLabel | None = None
         self._action_button: QPushButton | None = None
         self._last_spawn_error: str | None = None
@@ -71,6 +87,8 @@ class ProductCard(QFrame):
         """Update the card display for a new product state observation."""
         self._last_spawn_error = None
         self._state = state
+        self._awaiting_install_refresh = False
+        self._set_installing(False)
         self._apply_state(state)
 
     @property
@@ -133,9 +151,9 @@ class ProductCard(QFrame):
         """Wire the product state observables into the widget."""
         if state is None:
             if self._status_label:
-                self._status_label.setText("Loading…")
+                self._status_label.setText("Loading\u2026")
             if self._action_button:
-                self._action_button.setText("…")
+                self._action_button.setText("\u2026")
                 self._action_button.setEnabled(False)
                 self._action_button.setToolTip("")
             return
@@ -145,7 +163,7 @@ class ProductCard(QFrame):
 
         if self._action_button:
             self._action_button.setText(action_label(state))
-            self._action_button.setEnabled(action_enabled(state) and not self._spawning)
+            self._action_button.setEnabled(action_enabled(state) and not self._spawning and not self._installing)
             self._action_button.setToolTip(action_tooltip(state))
 
     def _set_spawning(self, spawning: bool) -> None:
@@ -153,7 +171,17 @@ class ProductCard(QFrame):
         if self._action_button:
             if self._state is not None:
                 self._action_button.setEnabled(
-                    action_enabled(self._state) and not self._spawning
+                    action_enabled(self._state) and not self._spawning and not self._installing
+                )
+            else:
+                self._action_button.setEnabled(False)
+
+    def _set_installing(self, installing: bool) -> None:
+        self._installing = installing
+        if self._action_button:
+            if self._state is not None:
+                self._action_button.setEnabled(
+                    action_enabled(self._state) and not self._spawning and not self._installing
                 )
             else:
                 self._action_button.setEnabled(False)
@@ -166,41 +194,93 @@ class ProductCard(QFrame):
         """Handle the primary action button click.
 
         For launchable products: calls ``service.spawn_component``.
-        For non-launchable products: does nothing (button is disabled).
+        For not-installed products: calls ``service.install_product``.
+        For installed-not-launchable: no-op (button is disabled).
         """
         if self._state is None:
             return
-        if not self._state.launchable:
-            return  # defensive — button should already be disabled
 
-        self._last_spawn_error = None
+        if self._state.launchable:
+            self._handle_launch()
+        elif not self._state.installed:
+            self._handle_install()
+        # else: installed-not-launchable — button disabled, nothing to do
+
+    def _handle_launch(self) -> None:
+        """Launch the product component."""
         pid = self._descriptor.product_id
+        self._last_spawn_error = None
+
         logger.info("Spawning product %r via service", pid)
         self._set_spawning(True)
 
         try:
             self._service.spawn_component(pid)
-            self._status_label.setText(f"Launching {self._descriptor.display_name}…")
+            self._status_label.setText(f"Launching {self._descriptor.display_name}\u2026")
         except Exception as exc:
             logger.error("Spawn of %r failed: %s", pid, exc)
             msg = str(exc)
             # Keep message short and user-friendly
             if len(msg) > 120:
-                msg = msg[:117] + "…"
+                msg = msg[:117] + "\u2026"
             self._status_label.setText(f"Error: {msg}")
             self._last_spawn_error = msg
         finally:
-            # Re-enable after a short debounce.  Use an owned timer rather than
-            # a static singleShot so tests/window teardown cannot leave a
-            # dangling callback to a destroyed card.
+            self._debounce_timer.start(DEBOUNCE_MS)
+
+    def _handle_install(self) -> None:
+        """Install the product from its remote source."""
+        pid = self._descriptor.product_id
+        self._last_spawn_error = None
+
+        if self._resolver is None or self._fetcher is None or self._work_root is None:
+            self._status_label.setText("Error: install dependencies not configured")
+            logger.error("Install deps not wired for product %r", pid)
+            return
+
+        logger.info("Installing product %r via service", pid)
+        self._set_installing(True)
+        self._action_button.setText("Installing\u2026")
+
+        try:
+            result = self._service.install_product(
+                pid,
+                resolver=self._resolver,
+                fetcher=self._fetcher,
+                work_root=self._work_root,
+            )
+            if result.success:
+                self._status_label.setText(f"Installation complete — {self._descriptor.display_name}")
+                self._awaiting_install_refresh = True
+                self.install_succeeded.emit(pid)
+            else:
+                reason = result.reason or "unknown error"
+                if len(reason) > 120:
+                    reason = reason[:117] + "\u2026"
+                self._status_label.setText(f"Install failed: {reason}")
+                self._last_spawn_error = reason
+        except Exception as exc:
+            logger.error("Install of %r failed: %s", pid, exc)
+            msg = str(exc)
+            if len(msg) > 120:
+                msg = msg[:117] + "\u2026"
+            self._status_label.setText(f"Error: {msg}")
+            self._last_spawn_error = msg
+        finally:
             self._debounce_timer.start(DEBOUNCE_MS)
 
     def _on_debounce_done(self) -> None:
         if self._debounce_timer.isActive():
             self._debounce_timer.stop()
         self._set_spawning(False)
+        if not self._awaiting_install_refresh:
+            self._set_installing(False)
         if self._last_spawn_error:
             # Error label already visible; do not overwrite it
+            return
+        if self._awaiting_install_refresh:
+            # Waiting for a full state refresh from MainWindow;
+            # do not overwrite the status label with stale state.
             return
         if self._status_label and self._state is not None and self._state.launchable:
             self._status_label.setText(state_label(self._state))

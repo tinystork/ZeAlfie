@@ -18,7 +18,7 @@ _STATE_LABELS: dict[ProductStateReasonCode, str] = {
     ProductStateReasonCode.RUNTIME_BROKEN: "Runtime broken — check or recreate",
     ProductStateReasonCode.INSTALLED_LAUNCHABLE: "Ready — click Lancer to start",
     ProductStateReasonCode.INSTALLED_NOT_LAUNCHABLE: "Installed but launch contract missing",
-    ProductStateReasonCode.NOT_INSTALLED: "Not installed — Installer coming in the next milestone",
+    ProductStateReasonCode.NOT_INSTALLED: "Not installed — click Installer to fetch and install",
     ProductStateReasonCode.PROBE_FAILED: "Could not check — probe failed",
 }
 
@@ -45,7 +45,14 @@ def action_label(state: ProductState) -> str:
 
 def action_enabled(state: ProductState) -> bool:
     """Return whether the primary action button should be enabled."""
-    return state.launchable
+    if state.launchable:
+        return True
+    # Enable Installer for products that are not installed (or have a
+    # broken runtime — runtime creation happens before install).
+    if not state.installed:
+        return True
+    # Installed but not launchable: button stays disabled.
+    return False
 
 
 def action_tooltip(state: ProductState) -> str:
@@ -54,7 +61,7 @@ def action_tooltip(state: ProductState) -> str:
         return f"Launch {state.display_name}"
     if state.installed and not state.launchable:
         return "Launch contract not satisfied — product is installed but cannot be launched"
-    return "Installation support coming in the next milestone"
+    return f"Install {state.display_name}"
 
 
 # ---------------------------------------------------------------------------

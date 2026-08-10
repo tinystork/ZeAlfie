@@ -215,7 +215,7 @@ class TestPresentation:
             reason="not installed",
         )
         assert "Not installed" in state_label(s)
-        assert "Installer coming" in state_label(s)
+        assert "Installer" in state_label(s)
 
     def test_state_label_installed_launchable(self):
         s = _make_state(
@@ -272,8 +272,8 @@ class TestPresentation:
         assert action_enabled(s) is True
 
     def test_action_enabled_not_launchable(self):
-        s = _make_state("test", launchable=False)
-        assert action_enabled(s) is False
+        s = _make_state("test", installed=False, launchable=False)
+        assert action_enabled(s) is True
 
     def test_action_enabled_installed_not_launchable(self):
         s = _make_state("test", installed=True, launchable=False,
@@ -292,7 +292,7 @@ class TestPresentation:
 
     def test_action_tooltip_not_installed(self):
         s = _make_state("test", installed=False, launchable=False)
-        assert "next milestone" in action_tooltip(s)
+        assert "Install Test" in action_tooltip(s)
 
     def test_runtime_summary_absent(self):
         s = runtime_summary("ABSENT", 0, 0, 4)
@@ -831,4 +831,803 @@ class TestNullableInitialState:
         finally:
             card.close()
             card.deleteLater()
+            qapp.processEvents()
+
+# ===========================================================================
+# D.4.1G: GUI install wiring tests
+# ===========================================================================
+
+
+class FakeInstallService(FakeService):
+    """FakeService that also records install_product calls.
+
+    Supports post_install_shell_state to simulate the state
+    transition observable after a successful install: the first
+    collect_product_state() returns the initial shell, and after
+    the first successful install_product() the fake transparently
+    switches to the post-install shell.
+    """
+
+    def __init__(
+        self,
+        descriptors: tuple[ProductDescriptor, ...] = (),
+        shell_state: ProductShellState | None = None,
+        spawn_result: SpawnedLaunch | None = None,
+        spawn_raises: Exception | None = None,
+        *,
+        install_result: DeploymentResult | None = None,
+        install_raises: Exception | None = None,
+        post_install_shell_state: ProductShellState | None = None,
+    ) -> None:
+        super().__init__(
+            descriptors=descriptors,
+            shell_state=shell_state,
+            spawn_result=spawn_result,
+            spawn_raises=spawn_raises,
+        )
+        self._install_result = install_result
+        self._install_raises = install_raises
+        self._post_install_shell_state = post_install_shell_state
+        self.install_calls: list[dict] = []
+
+    def install_product(
+        self, product_id, *, resolver=None, fetcher=None, work_root=None,
+        dependency_wheelhouse=None, probe_distribution=None,
+    ):
+        self.install_calls.append({
+            "product_id": product_id,
+            "resolver": resolver,
+            "fetcher": fetcher,
+            "work_root": work_root,
+        })
+        if self._install_raises:
+            raise self._install_raises
+        result = self._install_result
+        if result is None:
+            from zealfie.runtime.model import DeploymentResult
+            result = DeploymentResult(success=True, active_slot_id="rt-fake-slot")
+        if result.success and self._post_install_shell_state is not None:
+            self._shell_state = self._post_install_shell_state
+        return result
+
+
+class TestInstallPresentation:
+    """Updated presentation tests reflecting installer-is-active."""
+
+    def test_state_label_not_installed(self):
+        s = _make_state(
+            "test", reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        assert "Not installed" in state_label(s)
+        assert "Installer" in state_label(s)
+
+    def test_action_enabled_not_installed(self):
+        """Not-installed products have the Installer button enabled."""
+        s = _make_state("test", installed=False, launchable=False)
+        assert action_enabled(s) is True
+
+    def test_action_enabled_installed_not_launchable_still_disabled(self):
+        """Installed-but-not-launchable still disabled."""
+        s = _make_state("test", installed=True, launchable=False,
+                        reason_code=ProductStateReasonCode.INSTALLED_NOT_LAUNCHABLE)
+        assert action_enabled(s) is False
+
+    def test_action_enabled_runtime_absent_enabled(self):
+        """Products with RUNTIME_ABSENT → Installer enabled."""
+        s = _make_state("test", installed=False, launchable=False,
+                        reason_code=ProductStateReasonCode.RUNTIME_ABSENT)
+        assert action_enabled(s) is True
+
+    def test_action_tooltip_not_installed(self):
+        """Not-installed tooltip shows 'Install <name>'."""
+        s = _make_state("test", display_name="TestApp", installed=False, launchable=False)
+        assert "Install TestApp" in action_tooltip(s)
+
+    def test_action_tooltip_installed_not_launchable(self):
+        """Installed-not-launchable still shows contract message."""
+        s = _make_state("test", installed=True, launchable=False,
+                        reason_code=ProductStateReasonCode.INSTALLED_NOT_LAUNCHABLE)
+        assert "contract" in action_tooltip(s).lower()
+
+    def test_state_label_never_shows_next_milestone(self):
+        """NOT_INSTALLED label no longer says 'coming in the next milestone'."""
+        s = _make_state("test",
+                        reason_code=ProductStateReasonCode.NOT_INSTALLED,
+                        reason="not installed")
+        label = state_label(s)
+        assert "next milestone" not in label
+        assert "Installer" in label
+
+
+class TestInstallCardSmoke:
+    """ProductCard install button smoke tests (headless)."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qapp):
+        return qapp
+
+    def _fake_deps(self):
+        """Return fake resolver/fetcher/work_root for testing."""
+        return (
+            lambda o, r, ref: "a" * 40,
+            lambda o, r, sha: b"zip",
+            Path("/tmp/fake-work"),
+        )
+
+    def test_installer_button_enabled_for_not_installed(self, qapp):
+        """Not-installed products get enabled Installer button."""
+        from zealfie.gui.product_card import ProductCard
+
+        descriptor = _make_descriptor("zesolver", "ZeSolver")
+        state = _make_state(
+            "zesolver", "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        resolver, fetcher, work_root = self._fake_deps()
+        service = FakeInstallService(descriptors=(descriptor,))
+
+        card = ProductCard(
+            descriptor=descriptor,
+            state=state,
+            service=service,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            btn = card._action_button
+            assert btn.isEnabled() is True
+            assert "Installer" in btn.text()
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_install_button_disabled_when_deps_missing(self, qapp):
+        """Installer button click with missing deps shows error."""
+        from zealfie.gui.product_card import ProductCard
+
+        descriptor = _make_descriptor("zesolver", "ZeSolver")
+        state = _make_state(
+            "zesolver", "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        service = FakeInstallService(descriptors=(descriptor,))
+
+        # No resolver/fetcher/work_root passed
+        card = ProductCard(
+            descriptor=descriptor,
+            state=state,
+            service=service,
+        )
+        try:
+            card._on_action_clicked()
+            status = card._status_label.text()
+            assert "install dependencies" in status.lower() or "not configured" in status.lower()
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_install_click_calls_service_install_product(self, qapp):
+        """Clicking Installer calls service.install_product with correct args."""
+        from zealfie.gui.product_card import ProductCard
+
+        resolver, fetcher, work_root = self._fake_deps()
+
+        descriptor = _make_descriptor("zesolver", "ZeSolver")
+        state = _make_state(
+            "zesolver", "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        service = FakeInstallService(descriptors=(descriptor,))
+
+        card = ProductCard(
+            descriptor=descriptor,
+            state=state,
+            service=service,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            btn = card._action_button
+            btn.click()
+            # After debounce, check calls
+            card._on_debounce_done()  # trigger debounce synchronously
+
+            assert len(service.install_calls) == 1
+            call = service.install_calls[0]
+            assert call["product_id"] == "zesolver"
+            assert call["resolver"] is resolver
+            assert call["fetcher"] is fetcher
+            assert call["work_root"] == work_root
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_install_success_emits_signal_and_keeps_button_disabled(self, qapp):
+        """Successful install emits install_succeeded signal; button stays
+        disabled after debounce (awaiting authoritative refresh)."""
+        from zealfie.gui.product_card import ProductCard
+        from zealfie.runtime.model import DeploymentResult
+
+        resolver, fetcher, work_root = self._fake_deps()
+
+        descriptor = _make_descriptor("zesolver", "ZeSolver")
+        state = _make_state(
+            "zesolver", "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        service = FakeInstallService(
+            descriptors=(descriptor,),
+            install_result=DeploymentResult(
+                success=True, active_slot_id="rt-newslot0000",
+            ),
+        )
+
+        signals = []
+        card = ProductCard(
+            descriptor=descriptor,
+            state=state,
+            service=service,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        card.install_succeeded.connect(lambda pid: signals.append(pid))
+        try:
+            btn = card._action_button
+            assert "Installer" in btn.text()
+            btn.click()
+
+            # Signal must have been emitted for the product id
+            assert signals == ["zesolver"], f"Expected signal, got {signals}"
+
+            # Success message visible
+            status = card._status_label.text()
+            assert "complete" in status.lower() or "Installation" in status
+
+            # After debounce, button stays disabled (awaiting refresh)
+            card._on_debounce_done()
+            assert btn.isEnabled() is False, (
+                "Button should stay disabled awaiting refresh from MainWindow"
+            )
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_install_failure_shows_error(self, qapp):
+        """Failed install DeploymentResult shows error."""
+        from zealfie.gui.product_card import ProductCard
+        from zealfie.runtime.model import DeploymentResult
+
+        resolver, fetcher, work_root = self._fake_deps()
+
+        descriptor = _make_descriptor("zesolver", "ZeSolver")
+        state = _make_state(
+            "zesolver", "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        service = FakeInstallService(
+            descriptors=(descriptor,),
+            install_result=DeploymentResult(
+                success=False, reason="deployment plan blocked",
+            ),
+        )
+
+        card = ProductCard(
+            descriptor=descriptor,
+            state=state,
+            service=service,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            card._on_action_clicked()
+            card._on_debounce_done()
+            status = card._status_label.text()
+            assert "failed" in status.lower()
+            assert "blocked" in status.lower()
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_install_exception_shows_error(self, qapp):
+        """Exception during install shows user-friendly error."""
+        from zealfie.gui.product_card import ProductCard
+
+        resolver, fetcher, work_root = self._fake_deps()
+
+        descriptor = _make_descriptor("zesolver", "ZeSolver")
+        state = _make_state(
+            "zesolver", "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        service = FakeInstallService(
+            descriptors=(descriptor,),
+            install_raises=RuntimeError("simulated install failure"),
+        )
+
+        card = ProductCard(
+            descriptor=descriptor,
+            state=state,
+            service=service,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            card._on_action_clicked()
+            card._on_debounce_done()
+            status = card._status_label.text()
+            assert "Error" in status
+            assert "simulated" in status
+            assert "Traceback" not in status
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_installed_not_launchable_button_disabled(self):
+        """Installed-but-not-launchable: button stays disabled."""
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        descriptors = (
+            _make_descriptor("zemosaic", "ZeMosaic"),
+        )
+        products = (
+            _make_state(
+                "zemosaic", "ZeMosaic",
+                installed=True, launchable=False, version="1.0.0",
+                reason_code=ProductStateReasonCode.INSTALLED_NOT_LAUNCHABLE,
+                reason="contract missing",
+            ),
+        )
+        service = FakeInstallService(
+            descriptors=descriptors,
+            shell_state=_make_shell_state(products, runtime_state=RuntimeState.READY),
+        )
+        window = ZeAlfieMainWindow(
+            service=service,
+            # Pass install deps so cards have full wiring
+            resolver=lambda o, r, ref: "a" * 40,
+            fetcher=lambda o, r, sha: b"zip",
+            work_root=Path("/tmp/fake-work"),
+        )  # type: ignore[arg-type]
+
+        card = window._cards["zemosaic"]
+        assert card._state.installed is True
+        assert card._state.launchable is False
+        assert card._action_button.isEnabled() is False
+        assert "Installer" in card._action_button.text()
+
+
+class TestInstallWiringThroughMainWindow:
+    """MainWindow forwards install deps to ProductCards."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qapp):
+        return qapp
+
+    def test_main_window_forwards_install_deps_to_cards(self):
+        """MainWindow passes resolver/fetcher/work_root to ProductCard."""
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        resolver = lambda o, r, ref: "b" * 40
+        fetcher = lambda o, r, sha: b"test-zip"
+        work_root = Path("/tmp/fake-install-work")
+
+        descriptors = (
+            _make_descriptor("zesolver", "ZeSolver"),
+        )
+        products = (
+            _make_state(
+                "zesolver", "ZeSolver",
+                installed=False, launchable=False,
+                reason_code=ProductStateReasonCode.NOT_INSTALLED,
+                reason="not installed",
+            ),
+        )
+        service = FakeInstallService(
+            descriptors=descriptors,
+            shell_state=_make_shell_state(products, runtime_state=RuntimeState.READY),
+        )
+        window = ZeAlfieMainWindow(
+            service=service,  # type: ignore[arg-type]
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+
+        card = window._cards["zesolver"]
+        assert card._resolver is resolver
+        assert card._fetcher is fetcher
+        assert card._work_root == work_root
+
+# ===========================================================================
+# D.4.1G1: Install Signal Through MainWindow tests
+# ===========================================================================
+
+
+class TestInstallSignalThroughMainWindow:
+    """ProductCard install_succeeded signal → MainWindow._refresh().
+
+    Covers the full cross-boundary flow:
+    card click → install → signal → refresh → new state applied.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qapp):
+        return qapp
+
+    def _fake_deps(self):
+        """Return fake resolver/fetcher/work_root for testing."""
+        return (
+            lambda o, r, ref: "a" * 40,
+            lambda o, r, sha: b"zip",
+            Path("/tmp/fake-install-work"),
+        )
+
+    # ── 1. Success → installed+launchable ─────────────────────────────
+
+    def test_install_success_installed_launchable_refresh(self, qapp):
+        """Successful install → install_succeeded → refresh → Lancer button active."""
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        resolver, fetcher, work_root = self._fake_deps()
+        pid = "zesolver"
+
+        # Pre-install: not installed, not launchable
+        pre_state = _make_state(
+            pid, "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        pre_shell = _make_shell_state(
+            (pre_state,), runtime_state=RuntimeState.READY,
+        )
+
+        # Post-install: installed + launchable
+        post_state = _make_state(
+            pid, "ZeSolver",
+            installed=True, launchable=True, version="1.0.0",
+            reason_code=ProductStateReasonCode.INSTALLED_LAUNCHABLE,
+            reason="ok", managed=ManagedStatus.MANAGED,
+        )
+        post_shell = _make_shell_state(
+            (post_state,), runtime_state=RuntimeState.READY,
+        )
+
+        service = FakeInstallService(
+            descriptors=(_make_descriptor(pid, "ZeSolver"),),
+            shell_state=pre_shell,
+            post_install_shell_state=post_shell,
+        )
+
+        window = ZeAlfieMainWindow(
+            service=service,  # type: ignore[arg-type]
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            card = window._cards[pid]
+            btn = card._action_button
+            assert btn is not None
+            assert "Installer" in btn.text()
+
+            # Record initial collect_calls after constructor refresh
+            collect_before = service.collect_calls
+            assert collect_before >= 1
+
+            # Click install
+            btn.click()
+
+            # Verify exactly 1 install_product call
+            assert len(service.install_calls) == 1
+            assert service.install_calls[0]["product_id"] == pid
+
+            # collect_product_state must have been called again (refresh)
+            assert service.collect_calls > collect_before, (
+                "collect_product_state should have been called again after install signal"
+            )
+
+            # Card state must now reflect installed+launchable
+            assert card._state.installed is True
+            assert card._state.launchable is True
+
+            # Debounce done: button should show "Lancer" and be active
+            card._on_debounce_done()
+            assert btn.isEnabled() is True, (
+                f"Button should be enabled after refresh, got disabled"
+            )
+            assert "Lancer" in btn.text(), (
+                f"Expected 'Lancer' button, got {btn.text()!r}"
+            )
+
+            # A second click should now trigger spawn (not install)
+            btn.click()
+            assert card._spawning is True or service.spawn_calls == [pid], (
+                f"Second click should spawn, not install; "
+                f"spawn_calls={service.spawn_calls}, install_calls count={len(service.install_calls)}"
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    # ── 2. Success → installed non-launchable ─────────────────────────
+
+    def test_install_success_installed_not_launchable(self, qapp):
+        """Install succeeds but product stays non-launchable → button disabled."""
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        resolver, fetcher, work_root = self._fake_deps()
+        pid = "zemosaic"
+
+        pre_state = _make_state(
+            pid, "ZeMosaic",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        pre_shell = _make_shell_state(
+            (pre_state,), runtime_state=RuntimeState.READY,
+        )
+
+        post_state = _make_state(
+            pid, "ZeMosaic",
+            installed=True, launchable=False, version="1.0.0",
+            reason_code=ProductStateReasonCode.INSTALLED_NOT_LAUNCHABLE,
+            reason="contract missing",
+        )
+        post_shell = _make_shell_state(
+            (post_state,), runtime_state=RuntimeState.READY,
+        )
+
+        service = FakeInstallService(
+            descriptors=(_make_descriptor(pid, "ZeMosaic"),),
+            shell_state=pre_shell,
+            post_install_shell_state=post_shell,
+        )
+
+        window = ZeAlfieMainWindow(
+            service=service,  # type: ignore[arg-type]
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            card = window._cards[pid]
+            btn = card._action_button
+
+            collect_before = service.collect_calls
+
+            btn.click()
+            assert len(service.install_calls) == 1
+
+            # Refresh triggered
+            assert service.collect_calls > collect_before
+
+            # State applied: installed but not launchable
+            assert card._state.installed is True
+            assert card._state.launchable is False
+
+            card._on_debounce_done()
+            assert btn.isEnabled() is False, (
+                "Button should be disabled for installed-not-launchable"
+            )
+            # No second install should be possible
+            assert len(service.install_calls) == 1, (
+                "No second install call expected"
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    # ── 3. Failure (DeploymentResult success=False) ───────────────────
+
+    def test_install_failure_no_extra_refresh(self, qapp):
+        """DeploymentResult.success=False: no install_succeeded signal,
+        no extra refresh, button re-tryable after debounce."""
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+        from zealfie.runtime.model import DeploymentResult
+
+        resolver, fetcher, work_root = self._fake_deps()
+        pid = "zesolver"
+
+        pre_state = _make_state(
+            pid, "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        pre_shell = _make_shell_state(
+            (pre_state,), runtime_state=RuntimeState.READY,
+        )
+
+        service = FakeInstallService(
+            descriptors=(_make_descriptor(pid, "ZeSolver"),),
+            shell_state=pre_shell,
+            install_result=DeploymentResult(
+                success=False, reason="deployment plan blocked",
+            ),
+        )
+
+        window = ZeAlfieMainWindow(
+            service=service,  # type: ignore[arg-type]
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            card = window._cards[pid]
+            btn = card._action_button
+
+            collect_before = service.collect_calls
+
+            btn.click()
+
+            # Error message visible
+            status = card._status_label.text()
+            assert "failed" in status.lower()
+            assert "blocked" in status.lower()
+
+            # No extra collect_product_state call (no signal emitted)
+            assert service.collect_calls == collect_before, (
+                "No extra collect_product_state call expected for failed install"
+            )
+
+            # After debounce, button should be re-tryable
+            card._on_debounce_done()
+            assert btn.isEnabled() is True, (
+                "Button should be re-tryable after failed install"
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    # ── 4. Exception during install ───────────────────────────────────
+
+    def test_install_exception_no_signal_retry_allowed(self, qapp):
+        """Exception during install: no success signal, clean error, retry allowed."""
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        resolver, fetcher, work_root = self._fake_deps()
+        pid = "zesolver"
+
+        pre_state = _make_state(
+            pid, "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        pre_shell = _make_shell_state(
+            (pre_state,), runtime_state=RuntimeState.READY,
+        )
+
+        service = FakeInstallService(
+            descriptors=(_make_descriptor(pid, "ZeSolver"),),
+            shell_state=pre_shell,
+            install_raises=RuntimeError("simulated install failure"),
+        )
+
+        window = ZeAlfieMainWindow(
+            service=service,  # type: ignore[arg-type]
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            card = window._cards[pid]
+            btn = card._action_button
+
+            collect_before = service.collect_calls
+
+            btn.click()
+
+            # User-friendly error, no traceback
+            status = card._status_label.text()
+            assert "Error" in status
+            assert "simulated" in status
+            assert "Traceback" not in status
+
+            # No extra collect call (no signal emitted)
+            assert service.collect_calls == collect_before
+
+            # After debounce, button re-tryable
+            card._on_debounce_done()
+            assert btn.isEnabled() is True, (
+                "Button should be re-tryable after exception"
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    # ── 5. Fix: install success → signal → disabled until refresh ─────
+
+    def test_install_success_button_stays_disabled_until_refresh(self, qapp):
+        """After install success, the 'Installer' button stays disabled after
+        debounce — it does NOT revert to the stale installed=False state.
+        Only after a full refresh delivering the new state does the button
+        become actionable (either Lancer or disabled).
+        """
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        resolver, fetcher, work_root = self._fake_deps()
+        pid = "zesolver"
+
+        pre_state = _make_state(
+            pid, "ZeSolver",
+            installed=False, launchable=False,
+            reason_code=ProductStateReasonCode.NOT_INSTALLED,
+            reason="not installed",
+        )
+        pre_shell = _make_shell_state(
+            (pre_state,), runtime_state=RuntimeState.READY,
+        )
+
+        post_state = _make_state(
+            pid, "ZeSolver",
+            installed=True, launchable=True, version="1.0.0",
+            reason_code=ProductStateReasonCode.INSTALLED_LAUNCHABLE,
+            reason="ok", managed=ManagedStatus.MANAGED,
+        )
+        post_shell = _make_shell_state(
+            (post_state,), runtime_state=RuntimeState.READY,
+        )
+
+        service = FakeInstallService(
+            descriptors=(_make_descriptor(pid, "ZeSolver"),),
+            shell_state=pre_shell,
+            post_install_shell_state=post_shell,
+        )
+
+        window = ZeAlfieMainWindow(
+            service=service,  # type: ignore[arg-type]
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        try:
+            card = window._cards[pid]
+            btn = card._action_button
+
+            # Click install
+            btn.click()
+
+            # At this point the signal has fired and refresh has run.
+            # Verify new state is applied
+            assert card._state.installed is True
+            assert card._state.launchable is True
+
+            # Simulate debounce: button should become Lancer (active)
+            card._on_debounce_done()
+            assert btn.isEnabled() is True
+            assert "Lancer" in btn.text()
+        finally:
+            window.close()
+            window.deleteLater()
             qapp.processEvents()
