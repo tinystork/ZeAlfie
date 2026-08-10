@@ -14,11 +14,18 @@ M1-2D.4.1A: registry authority — common deployment core accepts explicit
             :class:`ComponentRegistry`; launch resolves effective registry
             from :class:`SelectionStore` when the selection file exists,
             falling back to the legacy packaged registry otherwise.
+M1-2D.4.1B: Remote product artifact preparation — source → exact SHA →
+            staged wheel → VerifiedArtifact.  Turns a
+            :class:`~zealfie.products.catalog.ProductDescriptor` with a
+            ``remote_source`` into a local verified wheel artifact
+            without installing it or mutating the shared runtime.
 """
 
 from __future__ import annotations
 
+import hashlib
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from zealfie.components.model import ComponentDefinition
@@ -59,8 +66,14 @@ from zealfie.releases.manifest import (
     ReleaseManifestError,
     parse_release_manifest_file,
 )
-from zealfie.releases.model import HostTarget
+from zealfie.releases.model import (
+    ArtifactEntry,
+    HostTarget,
+    ReleaseManifest,
+    VerifiedArtifact,
+)
 from zealfie.releases.resolver import ReleaseResolutionError, resolve_local_release
+from zealfie.releases.verifier import verify_artifact
 from zealfie.runtime.deployment import apply_deployment_plan
 from zealfie.runtime.manager import SharedRuntime
 from zealfie.runtime.model import (
@@ -75,6 +88,16 @@ from zealfie.runtime.planning import (
     build_deployment_plan,
 )
 from zealfie.runtime.probe import probe_runtime_distribution
+from zealfie.sources import (
+    ResolvedSource,
+    SourceRefResolver,
+    resolve_source,
+)
+from zealfie.sources.acquisition import (
+    ArchiveFetcher,
+    acquire_source,
+    build_wheel_from_staged,
+)
 
 
 class OfflineReleaseError(ValueError):
@@ -114,6 +137,51 @@ class LaunchScriptNotFoundError(LaunchPreparationError):
 
 
 # ---------------------------------------------------------------------------
+# M1-2D.4.1B: Product install preparation errors
+# ---------------------------------------------------------------------------
+
+
+class ProductInstallPreparationError(RuntimeError):
+    """Raised when remote product artifact preparation fails.
+
+    Wraps all lower-level failures (unknown product, missing remote
+    source, resolution failure, acquisition failure, build failure,
+    verification failure) into a single application-layer error family.
+    """
+
+
+class RemoteSourceUnavailableError(ProductInstallPreparationError):
+    """Raised when a product has no ``remote_source`` metadata.
+
+    Preparation from remote source requires the product descriptor to
+    carry a :class:`~zealfie.sources.RemoteSource`.  This error is
+    raised before any resolver, fetcher, or build call is made so that
+    callers can detect the condition early and provide a clear message.
+    """
+
+
+# ---------------------------------------------------------------------------
+# M1-2D.4.1B: Prepared product artifact
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedProductArtifact:
+    """A product whose remote source has been resolved, built into a
+    wheel, and verified — ready to hand off to the deployment pipeline.
+
+    No installation has occurred.  The shared runtime and selection
+    store are untouched.
+    """
+
+    product_id: str
+    component_id: str
+    resolved_source: ResolvedSource
+    wheel_path: Path
+    verified_artifact: VerifiedArtifact
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -149,6 +217,12 @@ class ZeAlfieService:
     resolves the effective registry from the ``SelectionStore`` when
     the selection file exists, falling back to the legacy packaged
     registry otherwise.
+
+    M1-2D.4.1B adds ``prepare_product_artifact`` for remote-source
+    → exact-SHA → staged-wheel → VerifiedArtifact preparation,
+    producing a :class:`PreparedProductArtifact` ready for the
+    existing deployment pipeline without installing or mutating the
+    shared runtime.
 
     The **managed** set in the product shell is now driven by the
     ``SelectionStore`` (what the user wants), not by the packaged
@@ -203,6 +277,148 @@ class ZeAlfieService:
     # 6. (M1-1C) The release directory serves as the local dependency
     #    wheelhouse.  Dependency ``.whl`` files live in the same
     #    top-level directory as component manifests and wheel artifacts.
+
+    # ------------------------------------------------------------------
+    # D.4.1B: Remote product artifact preparation
+    # ------------------------------------------------------------------
+
+    def prepare_product_artifact(
+        self,
+        product_id: str,
+        *,
+        resolver: SourceRefResolver,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+    ) -> PreparedProductArtifact:
+        """Prepare a verified wheel artifact from a product's remote source.
+
+        Full pipeline: catalog lookup → resolve branch ref to exact SHA →
+        fetch and stage source archive → build wheel → verify through
+        existing release verification chain.
+
+        The caller controls *work_root*; staging and wheel output live
+        under it.  The shared runtime, selection store, and
+        ``desired-products.toml`` are **never** mutated.
+
+        Parameters
+        ----------
+        product_id:
+            The product to prepare.  Must exist in the service's catalog.
+        resolver:
+            Injectable ``(owner, repo, ref) → 40-char-hex-SHA`` callable.
+            Tests inject fakes; production resolves against GitHub.
+        fetcher:
+            Injectable ``(owner, repo, commit_sha) → bytes`` callable.
+            Tests inject fakes; production downloads the archive.
+        work_root:
+            Base directory for staging and wheel output.  Must exist
+            and be a directory.  Callers should use a dedicated prep
+            root (tests use ``tmp_path`` or ``basetemp``).
+
+        Returns
+        -------
+        PreparedProductArtifact
+            The resolved source (exact SHA provenance), built wheel path,
+            and :class:`VerifiedArtifact` proof.
+
+        Raises
+        ------
+        UnknownProductError
+            If *product_id* is not in the product catalog.
+        RemoteSourceUnavailableError
+            If the product descriptor has no ``remote_source``.
+        SourceResolutionError
+            If the resolver cannot resolve the ref to a commit SHA.
+        AcquisitionError
+            If the fetcher fails or the archive is invalid.
+        ArtifactRejectionError
+            If the built wheel fails verification (identity, version,
+            entry-point contract, or integrity check).
+        """
+        # 1. Lookup in catalog — UnknownProductError for unknown product.
+        desc = self._catalog.get(product_id)
+
+        # 2. Guard: remote_source must be present.
+        if desc.remote_source is None:
+            raise RemoteSourceUnavailableError(
+                f"product {product_id!r} has no remote source — "
+                f"cannot prepare from remote"
+            )
+
+        # 3. Resolve branch/tag ref to exact 40-char commit SHA.
+        resolved = resolve_source(desc.remote_source, resolver=resolver)
+
+        # 4. Ensure work_root exists.
+        work_root.mkdir(parents=True, exist_ok=True)
+
+        # 5. Acquire source archive and extract to staging directory.
+        #    The context manager cleans up the staging dir after the
+        #    wheel is built (the wheel lives in work_root independently).
+        with acquire_source(
+            resolved, fetcher=fetcher, stage_root=work_root,
+        ) as staged:
+            # 6. Build wheel from the staged source.
+            wheel_path = build_wheel_from_staged(
+                staged, output_dir=work_root,
+            )
+
+        # 7. Compute SHA256 and size of the built wheel.
+        wheel_size = wheel_path.stat().st_size
+        sha256_hash = hashlib.sha256()
+        with open(wheel_path, "rb") as fh:
+            while chunk := fh.read(1 << 20):  # 1 MiB chunks
+                sha256_hash.update(chunk)
+        wheel_sha256 = sha256_hash.hexdigest()
+
+        # 8. Inspect wheel for identity metadata (version, distribution_name).
+        from zealfie.building import inspect_wheel
+
+        info = inspect_wheel(wheel_path)
+
+        # 9. Materialize a single-product ComponentRegistry from the
+        #    product descriptor — mirrors materialize_desired_components.
+        component_def = ComponentDefinition(
+            component_id=desc.product_id,
+            display_name=desc.display_name,
+            distribution_name=desc.distribution_name,
+            launch_entry_points=desc.launch_entry_points,
+            required_extras=desc.required_extras,
+        )
+        registry = ComponentRegistry([component_def])
+
+        # 10. Synthesize a single-artifact ReleaseManifest from the
+        #     built wheel's observed identity and integrity.
+        artifact_entry = ArtifactEntry(
+            filename=wheel_path.name,
+            size=wheel_size,
+            sha256=wheel_sha256,
+        )
+        manifest = ReleaseManifest(
+            schema_version=1,
+            component_id=desc.product_id,
+            version=info.version,
+            artifacts=(artifact_entry,),
+        )
+
+        # 11. Verify through the existing release verification chain.
+        #     This checks: path safety, size, SHA256, wheel identity,
+        #     version match, distribution name match, and entry-point
+        #     contract.  Raises ArtifactRejectionError on any failure.
+        verified = verify_artifact(
+            manifest,
+            registry=registry,
+            artifact_root=wheel_path.parent,
+        )
+
+        # 12. Return the prepared artifact — no runtime mutation has
+        #     occurred, no install, no selection persistence.
+        return PreparedProductArtifact(
+            product_id=desc.product_id,
+            component_id=desc.product_id,
+            resolved_source=resolved,
+            wheel_path=wheel_path,
+            verified_artifact=verified,
+        )
 
     # ------------------------------------------------------------------
     # D.4.1A: Internal helpers with explicit registry
