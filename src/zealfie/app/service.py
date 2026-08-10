@@ -767,6 +767,85 @@ class ZeAlfieService:
 
 
     # ------------------------------------------------------------------
+    # D.4.1E: Public service install_product orchestration
+    # ------------------------------------------------------------------
+
+    def install_product(
+        self,
+        product_id: str,
+        *,
+        resolver: SourceRefResolver,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        dependency_wheelhouse: Path | None = None,
+        probe_distribution=None,
+    ) -> DeploymentResult:
+        """Install a single product from its remote source.
+
+        Full orchestration: prepare → plan → apply → persist selection
+        only on success.  Delegates to:
+
+        * :meth:`prepare_product_artifact` (D.4.1B): remote source
+          resolution, fetch, build, and verification.
+        * :meth:`install_prepared_product_deployment` (D.4.1D):
+          planning, transactional apply, and post-success selection
+          persistence.
+
+        This is service-layer orchestration only.  It must not duplicate
+        source resolution, fetch, build, verify, planning, apply, or
+        selection persistence logic.
+
+        **Exception propagation:** errors from the preparation and
+        prepared-install layers propagate without wrapping.  Callers
+        receive the exact exception from the first failing step.
+
+        Parameters
+        ----------
+        product_id:
+            The product to install.  Must exist in the product catalog
+            with a ``remote_source``.
+        resolver:
+            Injectable ``(owner, repo, ref) → 40-char-hex-SHA`` callable.
+        fetcher:
+            Injectable ``(owner, repo, commit_sha) → bytes`` callable.
+        work_root:
+            Base directory for staging and wheel output.
+        dependency_wheelhouse:
+            Optional wheelhouse directory for dependency resolution.
+        probe_distribution:
+            Injectable probe callable for READY runtime planning.
+
+        Returns
+        -------
+        DeploymentResult
+            The exact result from the transactional deployment engine.
+
+        Raises
+        ------
+        UnknownProductError
+            If *product_id* is not in the product catalog.
+        RemoteSourceUnavailableError
+            If the product descriptor has no ``remote_source``.
+        SourceResolutionError
+            If the resolver cannot resolve the ref to a commit SHA.
+        ArtifactRejectionError
+            If the built wheel fails verification.
+        CorruptSelectionError
+            If the selection store file is present but unreadable.
+        """
+        prepared = self.prepare_product_artifact(
+            product_id,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        return self.install_prepared_product_deployment(
+            [prepared],
+            dependency_wheelhouse=dependency_wheelhouse,
+            probe_distribution=probe_distribution,
+        )
+
+    # ------------------------------------------------------------------
     # D.4.1A: Internal helpers with explicit registry
     # ------------------------------------------------------------------
 

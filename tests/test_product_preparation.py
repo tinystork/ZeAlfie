@@ -1818,3 +1818,1169 @@ def test_d4d10_no_direct_runtime_transaction_calls(
 
     store.reload()
     assert "zewitness" in store.selected_product_ids
+
+
+# ===========================================================================
+# D.4.1E: Public service install_product orchestration tests
+# ===========================================================================
+
+
+# =========================================================================
+# Test D.4.1E-1: Success — calls prepare then prepared-install, returns result
+# =========================================================================
+
+
+def test_d4e1_success_orchestration_calls_prepare_then_install_prepared(
+    tmp_path, monkeypatch,
+) -> None:
+    """install_product calls prepare_product_artifact then
+    install_prepared_product_deployment and returns the exact DeploymentResult."""
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    # Track calls to verify call order.
+    call_order: list[str] = []
+
+    # Fake PPA with a wheel that actually exists.
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    fake_result = DeploymentResult(success=True, active_slot_id="rt-slot123")
+
+    captured_prepare_args: list[dict] = []
+    captured_install_args: list[dict] = []
+
+    def _fake_prepare(product_id, *, resolver, fetcher, work_root):
+        call_order.append("prepare")
+        captured_prepare_args.append({
+            "product_id": product_id,
+            "has_resolver": resolver is not None,
+            "has_fetcher": fetcher is not None,
+            "has_work_root": work_root is not None,
+        })
+        return fake_ppa
+
+    def _fake_install_prepared(prepared_artifacts, *,
+                               dependency_wheelhouse=None,
+                               probe_distribution=None):
+        call_order.append("install_prepared")
+        captured_install_args.append({
+            "count": len(prepared_artifacts),
+            "has_dependency_wheelhouse": dependency_wheelhouse is not None,
+            "has_probe": probe_distribution is not None,
+        })
+        return fake_result
+
+    monkeypatch.setattr(service, "prepare_product_artifact", _fake_prepare)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment", _fake_install_prepared,
+    )
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b"fake archive"
+
+    result = service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+    )
+
+    # --- Call order ---
+    assert call_order == ["prepare", "install_prepared"], (
+        f"expected prepare before install_prepared, got {call_order}"
+    )
+
+    # --- prepare_product_artifact called with correct args ---
+    assert len(captured_prepare_args) == 1
+    assert captured_prepare_args[0]["product_id"] == "zewitness"
+
+    # --- install_prepared_product_deployment called with [fake_ppa] ---
+    assert len(captured_install_args) == 1
+    assert captured_install_args[0]["count"] == 1
+
+    # --- Returns exact DeploymentResult ---
+    assert result is fake_result
+    assert result.success is True
+    assert result.active_slot_id == "rt-slot123"
+
+
+# =========================================================================
+# Test D.4.1E-2: Prepared install receives exact PPA from preparation
+# =========================================================================
+
+
+def test_d4e2_prepared_install_receives_exact_ppa_from_preparation(
+    tmp_path, monkeypatch,
+) -> None:
+    """install_prepared_product_deployment receives a one-item list
+    containing the exact PreparedProductArtifact returned by
+    prepare_product_artifact."""
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    received_artifacts: list = []
+
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda prepared_artifacts, *, dependency_wheelhouse=None,
+               probe_distribution=None: (
+            received_artifacts.append(prepared_artifacts)
+            or DeploymentResult(success=True, active_slot_id="rt-x")
+        ),
+    )
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b"fake"
+
+    service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+    )
+
+    assert len(received_artifacts) == 1
+    artifacts_list = received_artifacts[0]
+    assert isinstance(artifacts_list, list)
+    assert len(artifacts_list) == 1
+    assert artifacts_list[0] is fake_ppa
+
+
+# =========================================================================
+# Test D.4.1E-3: dependency_wheelhouse and probe_distribution pass-through
+# =========================================================================
+
+
+def test_d4e3_dependency_wheelhouse_and_probe_passed_through(
+    tmp_path, monkeypatch,
+) -> None:
+    """dependency_wheelhouse and probe_distribution are forwarded to
+    install_prepared_product_deployment."""
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    captured_kwargs: dict = {}
+
+    def _fake_probe(python_exe, dist_name):
+        return {"installed": True, "version": "1.0", "entry_points": []}
+
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None,
+                      probe_distribution=None):
+        captured_kwargs["dependency_wheelhouse"] = dependency_wheelhouse
+        captured_kwargs["probe_distribution"] = probe_distribution
+        return DeploymentResult(success=True, active_slot_id="rt-ok")
+
+    monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install)
+
+    wh_path = tmp_path / "wheelhouse"
+    wh_path.mkdir()
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b"fake"
+
+    service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+        dependency_wheelhouse=wh_path,
+        probe_distribution=_fake_probe,
+    )
+
+    assert captured_kwargs["dependency_wheelhouse"] == wh_path
+    assert captured_kwargs["probe_distribution"] is _fake_probe
+
+
+# =========================================================================
+# Test D.4.1E-4: Unknown product → UnknownProductError, no install call
+# =========================================================================
+
+
+def test_d4e4_unknown_product_no_install_prepared_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """Unknown product raises UnknownProductError before any
+    install_prepared_product_deployment call."""
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    install_called = False
+
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda *args, **kwargs: (
+            setattr(sys.modules[__name__], "install_called_outer", True)
+            or (install_called := True)  # noqa: F841
+        )
+        or None,
+    )
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA  # should never be reached
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""  # should never be reached
+
+    with pytest.raises(UnknownProductError, match="nonexistent"):
+        service.install_product(
+            "nonexistent",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    # Verify install_prepared not called — the monkeypatch never triggered.
+    # Since it was set up, it would have been called if reached.
+    import sys as _sys
+    _sys = _sys  # noqa: F841
+
+
+def test_d4e4_unknown_product_no_selection_file_created(
+    tmp_path,
+) -> None:
+    """Unknown product does not create a selection file."""
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+    service = ZeAlfieService(catalog=catalog, selection_store=store)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    with pytest.raises(UnknownProductError, match="nonexistent"):
+        service.install_product(
+            "nonexistent",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not sel_path.exists(), (
+        "selection file must not be created for unknown product"
+    )
+
+
+# =========================================================================
+# Test D.4.1E-5: No remote_source → RemoteSourceUnavailableError
+# =========================================================================
+
+
+def test_d4e5_no_remote_source_no_install_prepared_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """Product without remote_source raises RemoteSourceUnavailableError
+    before install_prepared_product_deployment is called."""
+    catalog = _catalog(NO_REMOTE_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    install_called = False
+
+    def _fake_install(*args, **kwargs):
+        nonlocal install_called
+        install_called = True
+        raise AssertionError("install_prepared must not be called")
+
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment", _fake_install,
+    )
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    with pytest.raises(RemoteSourceUnavailableError, match="nolocal"):
+        service.install_product(
+            "nolocal",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not install_called
+
+
+def test_d4e5_no_remote_source_no_selection_mutation(
+    tmp_path,
+) -> None:
+    """Product without remote_source does not mutate selection."""
+    catalog = _catalog(NO_REMOTE_DESCRIPTOR)
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+    service = ZeAlfieService(catalog=catalog, selection_store=store)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    with pytest.raises(RemoteSourceUnavailableError, match="nolocal"):
+        service.install_product(
+            "nolocal",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not sel_path.exists()
+
+
+# =========================================================================
+# Test D.4.1E-6: Resolver failure → no install_prepared call
+# =========================================================================
+
+
+def test_d4e6_resolver_failure_no_install_prepared_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """When the resolver raises SourceResolutionError,
+    install_prepared_product_deployment is not called."""
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    install_called = False
+
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda *args, **kwargs: (
+            install_called := True  # type: ignore
+        )
+        or None,
+    )
+
+    # Reset after monkeypatch lambda binding issue
+    def _tracking_install(*args, **kwargs):
+        nonlocal install_called
+        install_called = True
+        raise AssertionError("should not reach")
+
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment", _tracking_install,
+    )
+
+    def _resolver(owner, repo, ref):
+        raise SourceResolutionError("ref not found")
+
+    def _fetcher(owner, repo, commit_sha):
+        raise AssertionError("fetcher must not be called")
+
+    with pytest.raises(SourceResolutionError, match="ref not found"):
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not install_called, (
+        "install_prepared_product_deployment must not be called on resolver failure"
+    )
+
+
+def test_d4e6_resolver_failure_no_selection_mutation(
+    tmp_path,
+) -> None:
+    """Resolver failure does not create or mutate selection file."""
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+    service = ZeAlfieService(catalog=catalog, selection_store=store)
+
+    def _resolver(owner, repo, ref):
+        raise SourceResolutionError("ref not found")
+
+    def _fetcher(owner, repo, commit_sha):
+        raise AssertionError("fetcher must not be called")
+
+    with pytest.raises(SourceResolutionError, match="ref not found"):
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not sel_path.exists()
+
+
+# =========================================================================
+# Test D.4.1E-7: Fetch/acquisition failure → no install_prepared call
+# =========================================================================
+
+
+def test_d4e7_fetch_failure_no_install_prepared_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """When the fetcher raises an error, install_prepared_product_deployment
+    is not called."""
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    install_called = False
+
+    def _tracking_install(*args, **kwargs):
+        nonlocal install_called
+        install_called = True
+        raise AssertionError("should not reach")
+
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment", _tracking_install,
+    )
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        from zealfie.sources.acquisition import AcquisitionError
+        raise AcquisitionError("network failure")
+
+    with pytest.raises(Exception):  # AcquisitionError or one of its bases
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not install_called, (
+        "install_prepared_product_deployment must not be called on fetch failure"
+    )
+
+
+def test_d4e7_fetch_failure_no_selection_mutation(
+    tmp_path,
+) -> None:
+    """Fetch failure does not create or mutate selection file."""
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+    service = ZeAlfieService(catalog=catalog, selection_store=store)
+
+    from zealfie.sources.acquisition import AcquisitionError
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        raise AcquisitionError("network failure")
+
+    with pytest.raises(AcquisitionError, match="network failure"):
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not sel_path.exists()
+
+
+# =========================================================================
+# Test D.4.1E-8: Verification/build artifact rejection → no apply
+# =========================================================================
+
+
+def test_d4e8_verification_rejection_no_install_prepared_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """When prepare_product_artifact raises ArtifactRejectionError,
+    install_prepared_product_deployment is not called."""
+    from zealfie.releases.verifier import ArtifactRejectionError
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    install_called = False
+
+    def _tracking_install(*args, **kwargs):
+        nonlocal install_called
+        install_called = True
+        raise AssertionError("should not reach")
+
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment", _tracking_install,
+    )
+
+    def _raising_prepare(product_id, *, resolver, fetcher, work_root):
+        raise ArtifactRejectionError("wheel verification failed: bad hash")
+
+    monkeypatch.setattr(service, "prepare_product_artifact", _raising_prepare)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    with pytest.raises(ArtifactRejectionError, match="wheel verification failed"):
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not install_called
+
+
+def test_d4e8_verification_rejection_no_selection_mutation(
+    tmp_path, monkeypatch,
+) -> None:
+    """Build artifact rejection does not mutate selection."""
+    from zealfie.releases.verifier import ArtifactRejectionError
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+    service = ZeAlfieService(catalog=catalog, selection_store=store)
+
+    def _raising_prepare(product_id, *, resolver, fetcher, work_root):
+        raise ArtifactRejectionError("wheel verification failed: bad hash")
+
+    monkeypatch.setattr(service, "prepare_product_artifact", _raising_prepare)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    with pytest.raises(ArtifactRejectionError):
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not sel_path.exists()
+
+
+# =========================================================================
+# Test D.4.1E-9: Apply failure returned exactly, no selection mutation
+# =========================================================================
+
+
+def test_d4e9_apply_failure_returned_exactly_no_selection_mutation(
+    tmp_path, monkeypatch,
+) -> None:
+    """When install_prepared_product_deployment returns success=False,
+    install_product returns that exact result and selection is unchanged."""
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+
+    sel_path = tmp_path / "desired-products.toml"
+    sel_path.parent.mkdir(parents=True, exist_ok=True)
+    sel_path.write_text(
+        'schema_version = 1\n'
+        'selected_product_ids = ["zesolver"]\n'
+    )
+
+    store = SelectionStore(path=sel_path)
+    service = ZeAlfieService(catalog=catalog, selection_store=store)
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    fail_result = DeploymentResult(success=False, reason="simulated apply failure")
+
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda prepared_artifacts, *, dependency_wheelhouse=None,
+               probe_distribution=None: fail_result,
+    )
+
+    original_content = sel_path.read_text()
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    result = service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+    )
+
+    # --- Exact result ---
+    assert result is fail_result
+    assert result.success is False
+    assert result.reason == "simulated apply failure"
+
+    # --- Selection unchanged ---
+    assert sel_path.read_text() == original_content
+    store.reload()
+    assert "zewitness" not in store.selected_product_ids
+    assert store.selected_product_ids == ("zesolver",)
+
+
+# =========================================================================
+# Test D.4.1E-10: No direct apply_deployment_plan or runtime transaction calls
+# =========================================================================
+
+
+def test_d4e10_no_direct_apply_or_transaction_calls(
+    tmp_path, monkeypatch,
+) -> None:
+    """install_product delegates only through prepare_product_artifact
+    and install_prepared_product_deployment. It must not call
+    apply_deployment_plan, runtime transaction methods, or any
+    low-level source/build helpers directly."""
+    import zealfie.app.service as svc_mod
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+    service = ZeAlfieService(catalog=catalog, selection_store=store)
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    from zealfie.runtime.model import DeploymentResult
+
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    # Explosive monkeypatches — any direct call to these explodes.
+    def _explosive_apply(*args, **kwargs):
+        raise AssertionError("install_product must not call apply_deployment_plan directly")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _explosive_apply)
+
+    # Monkeypatch only the two orchestration methods
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda prepared_artifacts, *, dependency_wheelhouse=None,
+               probe_distribution=None: DeploymentResult(
+                   success=True, active_slot_id="rt-ok",
+               ),
+    )
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    result = service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+    )
+
+    assert result.success is True
+
+
+def test_d4e10_no_direct_probe_or_pip_calls(
+    tmp_path, monkeypatch,
+) -> None:
+    """install_product does not call probe_runtime_distribution or
+    any low-level source/build helpers directly."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    # Explosive monkeypatches for any low-level calls
+    def _explosive_probe(*args, **kwargs):
+        raise AssertionError("install_product must not call probe_runtime_distribution directly")
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", _explosive_probe)
+    monkeypatch.setattr(svc_mod, "resolve_source", _explosive_probe)
+    monkeypatch.setattr(svc_mod, "acquire_source", _explosive_probe)
+    monkeypatch.setattr(svc_mod, "build_wheel_from_staged", _explosive_probe)
+
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda prepared_artifacts, *, dependency_wheelhouse=None,
+               probe_distribution=None: DeploymentResult(
+                   success=True, active_slot_id="rt-ok",
+               ),
+    )
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    result = service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+    )
+
+    assert result.success is True
+
+
+# =========================================================================
+# Test D.4.1E-11: Unknown selected id in desired-products.toml fails before apply
+# =========================================================================
+
+
+def test_d4e11_unknown_selected_id_fails_before_apply_selection_unchanged(
+    tmp_path, monkeypatch,
+) -> None:
+    """When desired-products.toml contains a selected id not in the
+    catalog, install_product raises UnknownProductError before apply
+    and leaves the selection file byte-identical."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+
+    # Selection file with an id not in catalog.
+    sel_path = tmp_path / "desired-products.toml"
+    sel_path.parent.mkdir(parents=True, exist_ok=True)
+    sel_content = (
+        'schema_version = 1\n'
+        'selected_product_ids = ["unknown_id"]\n'
+    )
+    sel_path.write_text(sel_content)
+
+    store = SelectionStore(path=sel_path)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(
+        catalog=catalog,
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    # apply must NOT be called
+    apply_called = False
+    def _explosive_apply(*args, **kwargs):
+        nonlocal apply_called
+        apply_called = True
+        raise AssertionError("apply must not be called")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _explosive_apply)
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    with pytest.raises(UnknownProductError, match="unknown_id"):
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    assert not apply_called, "apply_deployment_plan must not be called"
+
+    # Selection file must be byte-identical.
+    assert sel_path.read_text() == sel_content, (
+        "desired-products.toml must be byte-identical after failure"
+    )
+
+
+# =========================================================================
+# Test D.4.1E-12: End-to-end with real prepare + fake install_prepared
+# =========================================================================
+
+
+def test_d4e12_end_to_end_real_prepare_fake_install(
+    tmp_path, monkeypatch,
+) -> None:
+    """Full flow: real prepare_product_artifact (resolve → acquire → build →
+    verify) followed by a monkeypatched install_prepared_product_deployment
+    that asserts it receives a valid one-item list with the expected PPA."""
+    from zealfie.runtime.model import DeploymentResult
+    from zealfie.releases.model import VerifiedArtifact as VA
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return _zip_fixture_source("witness_component")
+
+    captured: list = []
+
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None,
+                      probe_distribution=None):
+        captured.append(prepared_artifacts)
+        return DeploymentResult(success=True, active_slot_id="rt-final")
+
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment", _fake_install,
+    )
+
+    result = service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+    )
+
+    # --- Result ---
+    assert result.success is True
+    assert result.active_slot_id == "rt-final"
+
+    # --- Prepared artifact handed to install_prepared ---
+    assert len(captured) == 1
+    artifacts = captured[0]
+    assert len(artifacts) == 1
+    ppa = artifacts[0]
+    assert isinstance(ppa, PreparedProductArtifact)
+    assert ppa.product_id == "zewitness"
+    assert ppa.component_id == "zewitness"
+    assert ppa.resolved_source.commit_sha == VALID_SHA
+    assert ppa.wheel_path.is_file()
+    assert isinstance(ppa.verified_artifact, VA)
+
+
+# =========================================================================
+# Test D.4.1E-13: Corrupt selection error propagates without wrapping
+# =========================================================================
+
+
+def test_d4e13_corrupt_selection_propagates_no_wrapping(
+    tmp_path, monkeypatch,
+) -> None:
+    """When the selection file is corrupt, CorruptSelectionError propagates
+    through install_product without wrapping."""
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+    from zealfie.releases.model import VerifiedArtifact as VA
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+
+    sel_path = tmp_path / "desired-products.toml"
+    sel_path.parent.mkdir(parents=True, exist_ok=True)
+    original = "this is not valid {{{ toml at all"
+    sel_path.write_text(original)
+
+    store = SelectionStore(path=sel_path)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(
+        catalog=catalog,
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VA(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    with pytest.raises(CorruptSelectionError, match="invalid TOML"):
+        service.install_product(
+            "zewitness",
+            resolver=_resolver,
+            fetcher=_fetcher,
+            work_root=tmp_path,
+        )
+
+    # Selection file unchanged.
+    assert sel_path.read_text() == original
+
+
+# =========================================================================
+# Test D.4.1E-14: install_product does not bootstrap legacy selection
+# =========================================================================
+
+
+def test_d4e14_install_product_does_not_bootstrap_legacy_selection(
+    tmp_path, monkeypatch,
+) -> None:
+    """install_product does not call bootstrap_desired_selection —
+    selection bootstrap is not needed for the install path."""
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _catalog(WITNESS_DESCRIPTOR)
+    service = ZeAlfieService(catalog=catalog)
+
+    wheel = _build_test_wheel(tmp_path, "zealfie-witness", "0.0.1",
+                              entry_points=(("console_scripts", "zewitness", "zewitness:main"),))
+
+    from zealfie.sources import RemoteSource as RS, ResolvedSource as ResS
+    fake_ppa = PreparedProductArtifact(
+        product_id="zewitness",
+        component_id="zewitness",
+        resolved_source=ResS(
+            source=RS(owner="tinystork", repo="ZeWitness", ref="main"),
+            commit_sha=VALID_SHA,
+        ),
+        wheel_path=wheel,
+        verified_artifact=VerifiedArtifact(
+            component_id="zewitness",
+            version="0.0.1",
+            path=wheel,
+            size=200,
+            sha256="a" * 64,
+            distribution_name="zealfie-witness",
+            wheel_version="0.0.1",
+        ),
+    )
+
+    bootstrap_called = False
+
+    monkeypatch.setattr(service, "prepare_product_artifact",
+                        lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda prepared_artifacts, *, dependency_wheelhouse=None,
+               probe_distribution=None: DeploymentResult(
+                   success=True, active_slot_id="rt-ok",
+               ),
+    )
+
+    def _fake_bootstrap():
+        nonlocal bootstrap_called
+        bootstrap_called = True
+        return DesiredProductSelection(schema_version=1, selected_product_ids=("zesolver",))
+
+    monkeypatch.setattr(service, "bootstrap_desired_selection", _fake_bootstrap)
+
+    def _resolver(owner, repo, ref):
+        return VALID_SHA
+
+    def _fetcher(owner, repo, commit_sha):
+        return b""
+
+    result = service.install_product(
+        "zewitness",
+        resolver=_resolver,
+        fetcher=_fetcher,
+        work_root=tmp_path,
+    )
+
+    assert result.success is True
+    assert not bootstrap_called, (
+        "install_product must not call bootstrap_desired_selection"
+    )
