@@ -46,12 +46,26 @@ from zealfie.sources import (
     resolve_source,
 )
 
+# M1-2D.3: Selection store and materialization re-exported.
+from zealfie.products.selection import (
+    CorruptSelectionError,
+    DesiredProductSelection,
+    SelectionStore,
+    SelectionStoreError,
+    default_selection_path,
+    desired_component_registry,
+    materialize_desired_components,
+    validate_selection_against_catalog,
+)
+
 # M1-2B: SpawnedLaunch re-exported so that GUI consumers import from the
 # application layer.
 from zealfie.launching import SpawnedLaunch
 
 __all__ = [
     "ComponentNotInstalledError",
+    "CorruptSelectionError",
+    "DesiredProductSelection",
     "FULL_NAME",
     "InvalidRemoteSourceError",
     "LaunchContractNotSatisfiedError",
@@ -67,6 +81,8 @@ __all__ = [
     "RemoteSource",
     "ResolvedSource",
     "RuntimeStatus",
+    "SelectionStore",
+    "SelectionStoreError",
     "SourceError",
     "SourceRefResolver",
     "SourceResolutionError",
@@ -74,8 +90,12 @@ __all__ = [
     "UnknownProductError",
     "ZeAlfieService",
     "collect_status",
+    "default_selection_path",
+    "desired_component_registry",
     "format_component_status",
     "format_status",
+    "materialize_desired_components",
     "resolve_source",
     "startup_message",
+    "validate_selection_against_catalog",
 ]

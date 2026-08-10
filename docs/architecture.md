@@ -851,28 +851,45 @@ Each product descriptor records:
 * ``launch_entry_points`` (public entry-point contracts);
 * ``required_extras`` (canonicalised extra names for dependency resolution).
 
-The catalog is **deliberately separate** from the component registry
-(``components.toml`` + ``ComponentRegistry``).  These are distinct concepts:
+The catalog is **deliberately separate** from the user's desired-product
+selection and from the component registries.  These are distinct concepts:
 
 | Concept | Source | Owned By | Purpose |
 |---------|--------|----------|---------|
 | Product Catalog | ``products.toml`` | ``ProductCatalog`` | What ZeAlfie knows about |
-| Desired Product Set | ``components.toml`` | ``ComponentRegistry`` | What the user chose to manage/install |
+| Desired Product Selection | ``desired-products.toml`` | ``SelectionStore`` / ``DesiredProductSelection`` | What the user chose to manage |
+| Component Registry (materialized) | catalog + selection | ``ComponentRegistry`` | Technical representation of the desired component set (derived, not primary) |
+| Component Registry (packaged, pre-D4) | ``components.toml`` | ``ComponentRegistry`` (default) | Deployment/launch contract until D.4 |
 | Managed Runtime State | Shared runtime slots | ``SharedRuntime`` | What is actually installed |
 | Product State | Read model derived at call time | ``ProductShellState`` | Observed snapshot |
 
 Adding a product to the catalog **never** forces it into deployment planning,
-release resolution, or the component registry.  The catalog describes
-knowledge; the registry describes intent.
+release resolution, or the user's selection.  The catalog describes
+knowledge; the selection store describes intent; the component registry
+materialized from catalog + selection is the derived technical representation
+of the desired component set.
 
 ### Desired Product Set
 
-The component registry (``components.toml``) defines the **desired product
-set** — the products the user has chosen to manage and install through
-ZeAlfie's deployment pipeline.  The M1-2A catalog may contain 4 known
-products while the desired set remains ZeSolver-only.  This is deliberate:
-the registry's ``available_ids()`` drives ``plan_offline_deployment`` and
-release resolution, not the catalog.
+The **desired product selection** — the products the user has chosen to
+manage — is persisted by the ``SelectionStore`` (``desired-products.toml``),
+independently of the catalog and the runtime.  The M1-2A catalog may contain
+4 known products while the selection remains ZeSolver-only.  The
+``ComponentRegistry`` materialized from catalog + selection
+(``desired_component_registry``) is the technical representation of that
+desired component set.
+
+Pre-D4, the deployment pipeline (``plan_offline_deployment``, release
+resolution, and launch preparation) still resolves against the packaged
+registry (``components.toml``); D.4 is expected to switch installation
+orchestration to the materialized registry.
+
+D.4 must also perform a one-shot legacy-preserving bootstrap before the
+first mutation of the desired selection: when ``desired-products.toml`` is
+absent, initialise it from the packaged legacy registry after validating ids
+against the product catalog, then apply the user's new delta additively.  A
+present selection file, including an explicit empty selection, is
+authoritative and must not be re-bootstrapped.
 
 ### Managed Runtime State
 
@@ -912,7 +929,8 @@ process.
    * Probe exception or malformed payload → ``PROBE_FAILED``.
 
 4. **Managed vs Unmanaged** is an orthogonal axis.  A product's ``managed``
-   status reflects whether it appears in the component registry.  An
+   status reflects whether its id appears in the user's persisted selection
+   (the ``SelectionStore``).  An
    unmanaged product that happens to be present in the runtime will still
    report ``installed=True`` — the probe does not skip unmanaged products.
    The ``managed`` field documents intent; ``installed`` documents fact.
@@ -936,8 +954,8 @@ The product shell is exposed through ``ZeAlfieService``:
   every known product against the current runtime.
 * ``get_product_state(product_id)`` — single ``ProductState``, raising
   ``UnknownProductError`` on unknown ids.
-* ``managed_product_ids`` — property returning the set of ids currently
-  in the component registry (the desired product set).
+* ``managed_product_ids`` — property returning the set of ids in the user's
+  selection store (the desired product set).
 
 All product-shell methods are read-only.  No mutation, no installation,
 no launch.

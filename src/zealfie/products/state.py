@@ -11,10 +11,12 @@ State determination rules:
    contract is satisfied in that runtime.  Launchability is never
    inferred from catalog knowledge alone.
 
-3. **Managed** indicates whether the product appears in the current
-   component (deployment) registry — i.e. whether the user has chosen to
-   manage/install it.  Unmanaged products are known but not currently
-   selected for deployment planning.
+3. **Managed** indicates whether the product id appears in the user's
+   persisted selection (``SelectionStore``) — i.e. whether the user has
+   chosen to manage it.  Unmanaged products are known but not currently
+   selected by the user.  The ``ComponentRegistry`` is a technical
+   representation materialized from that selection, not the source of the
+   user's choice.
 
 4. **Unknown products** are rejected with a typed
    :class:`~zealfie.products.catalog.UnknownProductError`.
@@ -65,14 +67,13 @@ class ProductStateReasonCode(StrEnum):
 
 
 class ManagedStatus(StrEnum):
-    """Whether a known product is currently managed by ZeAlfie's
-    deployment contract."""
+    """Whether a known product is currently in the user's selection."""
 
     MANAGED = "MANAGED"
-    """Product is in the component registry — selected for deployment."""
+    """Product is in the user's selection — selected for management."""
 
     UNMANAGED = "UNMANAGED"
-    """Product is in the catalog but not in the component registry."""
+    """Product is in the catalog but not in the user's selection."""
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +156,10 @@ def collect_product_state(
     runtime_status:
         Current ``SharedRuntime.status()`` observation.
     managed_component_ids:
-        The set of component ids currently in the deployment registry
-        (i.e. products the user chose to manage).
+        The set of product ids the user chose to manage (from the
+        selection store). Products in this set are reported as
+        ``managed``. The parameter is intentionally generic so this
+        function stays pure and testable.
     probe_fn:
         Callable ``(runtime_python: str, distribution_name: str) -> dict``
         with the same signature as

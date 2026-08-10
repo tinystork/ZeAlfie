@@ -337,8 +337,10 @@ def test_catalog_has_4_but_registry_can_have_1():
     assert set(catalog.available_ids()) != set(registry.available_ids())
 
 
-def test_service_managed_product_ids_independent_from_catalog():
-    """ZeAlfieService.managed_product_ids comes from registry, not catalog."""
+def test_service_managed_product_ids_independent_from_catalog(tmp_path):
+    """ZeAlfieService.managed_product_ids comes from the user's selection
+    store, independent from both the registry and the catalog."""
+    from zealfie.products.selection import SelectionStore
     registry = ComponentRegistry([
         ComponentDefinition(
             component_id="zesolver",
@@ -347,7 +349,10 @@ def test_service_managed_product_ids_independent_from_catalog():
             launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
         ),
     ])
-    service = ZeAlfieService(registry=registry)
+    # Selection store has zesolver selected.
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    store.select("zesolver", catalog=default_catalog())
+    service = ZeAlfieService(registry=registry, selection_store=store)
     assert service.managed_product_ids == frozenset({"zesolver"})
     # The catalog still has 4 products regardless.
     assert len(service.catalog) == 4
@@ -1040,7 +1045,7 @@ class _FakeServiceRuntime:
         return self._status
 
 
-def test_service_collect_product_state_with_absent_runtime():
+def test_service_collect_product_state_with_absent_runtime(tmp_path):
     """ZeAlfieService.collect_product_state works with ABSENT runtime."""
     registry = ComponentRegistry([
         ComponentDefinition(
@@ -1050,9 +1055,13 @@ def test_service_collect_product_state_with_absent_runtime():
             launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
         ),
     ])
+    from zealfie.products.selection import SelectionStore
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    store.select("zesolver", catalog=default_catalog())
     service = ZeAlfieService(
         registry=registry,
         runtime=_FakeServiceRuntime(_absent_status()),
+        selection_store=store,
     )
     shell = service.collect_product_state()
     assert isinstance(shell, ProductShellState)

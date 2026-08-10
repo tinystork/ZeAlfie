@@ -7,6 +7,9 @@ M1-0A: runtime component launch (prepare_launch_plan, launch_component).
 M1-1C: shared runtime dependency resolution wired into plan_offline_deployment.
 M1-2B: non-blocking managed product launch (spawn_component).
 M1-2A: product catalog and product-shell read model (list_products, collect_product_state, get_product_state).
+M1-2D.3: user selection store and desired-component materialization
+         (select_product, desired_selection,
+          materialize_desired_components, desired_component_registry).
 """
 
 from __future__ import annotations
@@ -33,6 +36,13 @@ from zealfie.products.catalog import (
     ProductCatalog,
     ProductDescriptor,
     default_catalog,
+)
+from zealfie.products.selection import (
+    DesiredProductSelection,
+    SelectionStore,
+    desired_component_registry as _desired_component_registry,
+    materialize_desired_components as _materialize_desired_components,
+    validate_selection_against_catalog as _validate_selection_against_catalog,
 )
 from zealfie.products.state import (
     ProductShellState,
@@ -115,9 +125,18 @@ class ZeAlfieService:
     M1-2B adds ``spawn_component`` for non-blocking launch.
     M1-2A adds ``list_products``, ``collect_product_state``, and
     ``get_product_state`` for the product-shell read model.
+    M1-2D.3 adds ``select_product``, ``desired_selection``,
+    ``materialize_desired_components``, and
+    ``desired_component_registry`` for the user selection store and
+    desired-component materialization.
 
-    Dependencies (registry, runtime, catalog, host) are injectable so
-    tests can supply synthetic instances.
+    The **managed** set in the product shell is now driven by the
+    ``SelectionStore`` (what the user wants), not by the packaged
+    ``ComponentRegistry``.  The ``ComponentRegistry`` remains the
+    deployment/launch contract for pre-D4 paths.
+
+    Dependencies (registry, runtime, catalog, host, selection_store)
+    are injectable so tests can supply synthetic instances.
     """
 
     def __init__(
@@ -127,11 +146,13 @@ class ZeAlfieService:
         runtime: SharedRuntime | None = None,
         catalog: ProductCatalog | None = None,
         host: HostTarget | None = None,
+        selection_store: SelectionStore | None = None,
     ) -> None:
         self._registry = registry or default_registry()
         self._runtime = runtime or SharedRuntime()
         self._catalog = catalog or default_catalog()
         self._host = host or HostTarget.from_current_host()
+        self._selection_store = selection_store or SelectionStore()
 
     # ------------------------------------------------------------------
     # Release directory convention
@@ -571,17 +592,19 @@ class ZeAlfieService:
     def catalog(self) -> ProductCatalog:
         """The product catalog (all known products).
 
-        Distinct from the component registry which describes "what
-        the user chose to manage".
+        Distinct from the user's selection (``SelectionStore``), which
+        records what the user chose to manage; the packaged
+        ``ComponentRegistry`` remains the pre-D4 deployment/launch
+        contract.
         """
         return self._catalog
 
     def list_products(self) -> tuple[ProductDescriptor, ...]:
         """Return all known product descriptors from the catalog.
 
-        This is the "what ZeAlfie knows" listing — distinct from
-        the component registry which describes "what the user chose
-        to manage".
+        This is the "what ZeAlfie knows" listing — distinct from the
+        user's selection (``SelectionStore``), which records what the
+        user chose to manage.
         """
         return self._catalog.list()
 
@@ -593,14 +616,20 @@ class ZeAlfieService:
         """Collect product state for every known product against the
         current managed runtime.
 
-        The *managed* set is derived from the current component registry
-        (deployment contract).  Products in the catalog but not in the
-        registry are ``UNMANAGED``.
+        Validates the current selection against the product catalog
+        before collecting state.  Raises
+        :class:`~zealfie.products.catalog.UnknownProductError` if any
+        selected product id is unknown.
+
+        The *managed* set is derived from the user's selection store
+        (the products the user has explicitly chosen to manage), not
+        from the packaged component registry.
 
         This is a read-only operation.  No mutation, no installation,
         no launch.
         """
-        managed_ids = frozenset(self._registry.available_ids())
+        self._validate_selection()
+        managed_ids = frozenset(self._selection_store.selected_product_ids)
         return collect_product_state(
             self._catalog,
             self._runtime.status(),
@@ -616,12 +645,19 @@ class ZeAlfieService:
     ) -> ProductState:
         """Collect state for a single product against the current runtime.
 
+        Validates the current selection against the product catalog before
+        collecting state.
+
+        The *managed* status is derived from the user's selection store.
+
         Raises :class:`~zealfie.products.catalog.UnknownProductError` if
-        *product_id* is not in the product catalog.
+        *product_id* is not in the product catalog or if any selected
+        product id is unknown.
 
         This is a read-only operation.
         """
-        managed_ids = frozenset(self._registry.available_ids())
+        self._validate_selection()
+        managed_ids = frozenset(self._selection_store.selected_product_ids)
         return get_product_state(
             self._catalog,
             product_id,
@@ -632,12 +668,96 @@ class ZeAlfieService:
 
     @property
     def managed_product_ids(self) -> frozenset[str]:
-        """Return the set of product ids currently selected for
-        management (deployment registry).
+        """Return the set of product ids currently selected by the user
+        as managed (from the selection store).
 
-        These are products the user has chosen to manage/install;
-        they correspond to the ``components.toml`` entries."""
-        return frozenset(self._registry.available_ids())
+        Validates every selected id against the product catalog.  Raises
+        :class:`~zealfie.products.catalog.UnknownProductError` if any
+        selected id is unknown.
+
+        This is the user's explicit choice.  Pre-D4, deployment and
+        launch still use the ``ComponentRegistry``.
+        """
+        self._validate_selection()
+        return frozenset(self._selection_store.selected_product_ids)
+
+    # ------------------------------------------------------------------
+    # M1-2D.3: Selection store and materialization
+    # ------------------------------------------------------------------
+
+    def _validate_selection(self) -> None:
+        """Validate that every currently-selected product id exists in
+        the product catalog.
+
+        Raises :class:`~zealfie.products.catalog.UnknownProductError` if
+        any selected product id is unknown.  Called by
+        :meth:`managed_product_ids`, :meth:`collect_product_state`, and
+        :meth:`get_product_state` to ensure unknown persisted ids are
+        surfaced as errors rather than disappearing silently.
+        """
+        _validate_selection_against_catalog(
+            self._catalog,
+            self._selection_store.current_selection(),
+        )
+
+    @property
+    def selection_store(self) -> SelectionStore:
+        """The user selection store."""
+        return self._selection_store
+
+    def select_product(self, product_id: str) -> DesiredProductSelection:
+        """Select a product for management and persist the choice.
+
+        * Idempotent — selecting an already-selected product is a no-op.
+        * Raises :class:`~zealfie.products.catalog.UnknownProductError`
+          for unknown product ids without mutating the persisted file.
+
+        This does NOT install the product, build wheels, or mutate the
+        runtime.  It only records the user's intent.
+        """
+        return self._selection_store.select(product_id, catalog=self._catalog)
+
+    def desired_selection(self) -> DesiredProductSelection:
+        """Return the current user selection.
+
+        This is the raw "what the user wants to manage" store view,
+        persisted across sessions independently of the runtime or
+        catalog.  Catalog-interpreting paths such as
+        :meth:`managed_product_ids`, :meth:`collect_product_state`, and
+        :meth:`materialize_desired_components` validate selected ids
+        before use.
+        """
+        return self._selection_store.current_selection()
+
+    def materialize_desired_components(
+        self,
+    ) -> tuple[ComponentDefinition, ...]:
+        """Materialize the user's selection into component definitions.
+
+        Converts every selected product descriptor to a
+        :class:`~zealfie.components.model.ComponentDefinition`.
+        Unknown selected ids raise
+        :class:`~zealfie.products.catalog.UnknownProductError`.
+
+        This is a pure read — no mutation, no network, no install.
+        """
+        return _materialize_desired_components(
+            self._catalog,
+            self._selection_store.current_selection(),
+        )
+
+    def desired_component_registry(self) -> ComponentRegistry:
+        """Return a :class:`ComponentRegistry` built from the user's
+        selection against the product catalog.
+
+        Convenience wrapper around :meth:`materialize_desired_components`.
+
+        This does NOT replace the deployment/launch registry.
+        """
+        return _desired_component_registry(
+            self._catalog,
+            self._selection_store.current_selection(),
+        )
 
 
 # ---------------------------------------------------------------------------

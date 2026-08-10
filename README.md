@@ -43,7 +43,7 @@ zealfie-gui
 ```
 
 The product shell:
-* displays all known managed products as individual product cards;
+* displays all known products as individual product cards (with managed/installed/launchable state);
 * shows human-readable state labels derived from runtime probe results;
 * provides a **Lancer** button for each launchable product;
 * includes a **Refresh** toolbar button (or F5) to re-probe runtime state;
@@ -78,7 +78,7 @@ zealfie --version
 zealfie status
 ```
 
-`status` reports the current ZeAlfie runtime and the known managed components from the local packaged manifest.
+`status` reports the current ZeAlfie runtime and the known components from the local packaged manifest.
 
 `Installed` means the component's Python distribution is present in the active Python environment metadata. A component can be known by the manifest but not installed in the current environment.
 
