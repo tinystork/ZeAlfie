@@ -29,6 +29,8 @@ from zealfie.app import (
     ProductInstallPreparationError,
     RemoteSourceUnavailableError,
     UnknownProductError,
+    CorruptSelectionError,
+    SelectionStore,
     ZeAlfieService,
 )
 from zealfie.components.model import ComponentDefinition, EntryPointContract
@@ -1256,3 +1258,563 @@ def test_dependency_wheelhouse_passed_through_none_by_default(
 
     plan = service.plan_prepared_product_deployment([ppa])
     assert plan.dependency_lock is None
+# ===========================================================================
+# D.4.1D: Apply prepared product deployment
+# ===========================================================================
+
+# Re-uses helpers from the D.4.1B/D.4.1C section above:
+#   _make_ppa, _planning_catalog, _dual_catalog, _catalog,
+#   _ZEWITNESS_EP, _ZESOLVER_EP, witness_wheel (conftest)
+
+from pathlib import Path
+
+import pytest
+
+
+# =========================================================================
+# Test D.4.1D-1: Valid prepared artifact → calls apply once, returns result
+# =========================================================================
+
+
+def test_d4d1_valid_calls_apply_once_returns_result(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """install_prepared_product_deployment with a valid prepared artifact
+    calls apply_deployment_plan exactly once with a plan from D.4.1C and
+    a ProductCatalog-derived registry; returns the exact DeploymentResult."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    fake_result = DeploymentResult(success=True, active_slot_id="rt-test1234")
+    apply_calls = []
+
+    def _fake_apply(plan, *, registry, runtime):
+        apply_calls.append((plan, registry, runtime))
+        return fake_result
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _fake_apply)
+
+    sel_path = tmp_path / "desired-products.toml"
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=SelectionStore(path=sel_path),
+    )
+
+    result = service.install_prepared_product_deployment([ppa])
+
+    # --- Apply called exactly once ---
+    assert len(apply_calls) == 1, "apply_deployment_plan must be called exactly once"
+    called_plan, called_registry, called_runtime = apply_calls[0]
+
+    # --- Plan: from D.4.1C ---
+    assert called_plan is not None
+    assert not called_plan.blocked
+    assert len(called_plan.desired_state.components) == 1
+    assert called_plan.desired_state.components[0].component_id == "zewitness"
+
+    # --- Registry: ProductCatalog-derived ---
+    assert called_registry is not None
+    definition = called_registry.get("zewitness")
+    assert definition.distribution_name == "zealfie-witness"
+
+    # --- Runtime: service's runtime ---
+    assert called_runtime is service._runtime
+    assert result is fake_result
+
+
+# =========================================================================
+# Test D.4.1D-2: Successful result persists product id to selection
+# =========================================================================
+
+
+def test_d4d2_success_persists_product_id(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """After apply_deployment_plan returns success=True, the product id
+    is persisted to desired-products.toml."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    monkeypatch.setattr(
+        svc_mod, "apply_deployment_plan",
+        lambda plan, *, registry, runtime: DeploymentResult(
+            success=True, active_slot_id="rt-test1111",
+        ),
+    )
+
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    assert not sel_path.exists(), "selection file must not exist before install"
+
+    result = service.install_prepared_product_deployment([ppa])
+
+    assert result.success is True
+    assert sel_path.exists(), "selection file must exist after successful apply"
+
+    store.reload()
+    assert "zewitness" in store.selected_product_ids
+    assert store.selected_product_ids == ("zewitness",)
+
+
+# =========================================================================
+# Test D.4.1D-3: Failed DeploymentResult does not persist selection
+# =========================================================================
+
+
+def test_d4d3_failed_result_no_selection_persist(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """When apply_deployment_plan returns success=False, the selection
+    store is not modified."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    monkeypatch.setattr(
+        svc_mod, "apply_deployment_plan",
+        lambda plan, *, registry, runtime: DeploymentResult(
+            success=False, reason="simulated failure",
+        ),
+    )
+
+    sel_path = tmp_path / "desired-products.toml"
+    sel_path.parent.mkdir(parents=True, exist_ok=True)
+    sel_path.write_text(
+        'schema_version = 1\n'
+        'selected_product_ids = ["zesolver"]\n'
+    )
+
+    store = SelectionStore(path=sel_path)
+
+    service = ZeAlfieService(
+        catalog=_dual_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    original_content = sel_path.read_text()
+
+    result = service.install_prepared_product_deployment([ppa])
+
+    assert result.success is False
+    assert result.reason == "simulated failure"
+    assert sel_path.read_text() == original_content, (
+        "desired-products.toml must not be modified on failed apply"
+    )
+    store.reload()
+    assert "zewitness" not in store.selected_product_ids
+    assert store.selected_product_ids == ("zesolver",)
+
+
+# =========================================================================
+# Test D.4.1D-4: Planning/validation error → no apply, no selection write
+# =========================================================================
+
+
+def test_d4d4_empty_artifacts_no_apply_no_selection(
+    tmp_path, monkeypatch,
+) -> None:
+    """Empty artifacts → ProductDeploymentPlanningError before apply;
+    selection store untouched, apply_deployment_plan not called."""
+    import zealfie.app.service as svc_mod
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    apply_called = False
+
+    def _explosive_apply(*args, **kwargs):
+        nonlocal apply_called
+        apply_called = True
+        raise AssertionError("apply must not be called")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _explosive_apply)
+
+    sel_path = tmp_path / "desired-products.toml"
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        selection_store=SelectionStore(path=sel_path),
+    )
+
+    with pytest.raises(ProductDeploymentPlanningError, match="at least one"):
+        service.install_prepared_product_deployment([])
+
+    assert not apply_called, "apply_deployment_plan must not be called"
+    assert not sel_path.exists(), "selection file must not be created"
+
+
+def test_d4d4_mismatch_error_no_apply_no_selection(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """Artifact mismatch → ProductDeploymentPlanningError before apply;
+    no apply call, no selection write."""
+    import zealfie.app.service as svc_mod
+    from zealfie.app.service import ProductDeploymentPlanningError
+
+    ppa = _make_ppa("zewitness", "different", witness_wheel)
+
+    apply_called = False
+
+    def _explosive_apply(*args, **kwargs):
+        nonlocal apply_called
+        apply_called = True
+        raise AssertionError("apply must not be called")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _explosive_apply)
+
+    sel_path = tmp_path / "desired-products.toml"
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        selection_store=SelectionStore(path=sel_path),
+    )
+
+    with pytest.raises(ProductDeploymentPlanningError,
+                       match="product_id.*!=.*component_id"):
+        service.install_prepared_product_deployment([ppa])
+
+    assert not apply_called, "apply_deployment_plan must not be called"
+    assert not sel_path.exists(), "selection file must not be created"
+
+
+# =========================================================================
+# Test D.4.1D-5: Corrupt existing selection file → fail before apply
+# =========================================================================
+
+
+def test_d4d5_corrupt_selection_fails_before_apply(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """When the selection store file is corrupt (invalid TOML),
+    CorruptSelectionError is raised before apply is called."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    apply_called = False
+
+    def _explosive_apply(*args, **kwargs):
+        nonlocal apply_called
+        apply_called = True
+        raise AssertionError("apply must not be called")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _explosive_apply)
+
+    sel_path = tmp_path / "desired-products.toml"
+    sel_path.parent.mkdir(parents=True, exist_ok=True)
+    sel_path.write_text("this is not valid {{{ toml")
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=SelectionStore(path=sel_path),
+    )
+
+    with pytest.raises(CorruptSelectionError, match="invalid TOML"):
+        service.install_prepared_product_deployment([ppa])
+
+    assert not apply_called, "apply must not be called on corrupt selection"
+
+
+# =========================================================================
+# Test D.4.1D-6: Unknown product id → UnknownProductError, no apply/selection
+# =========================================================================
+
+
+def test_d4d6_unknown_product_no_apply_no_selection(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """Prepared artifact with product_id not in catalog raises
+    UnknownProductError before apply is called."""
+    import zealfie.app.service as svc_mod
+
+    ppa = _make_ppa("nobody", "nobody", witness_wheel)
+
+    apply_called = False
+
+    def _explosive_apply(*args, **kwargs):
+        nonlocal apply_called
+        apply_called = True
+        raise AssertionError("apply must not be called")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _explosive_apply)
+
+    sel_path = tmp_path / "desired-products.toml"
+    service = ZeAlfieService(
+        catalog=_planning_catalog("zewitness"),
+        selection_store=SelectionStore(path=sel_path),
+    )
+
+    with pytest.raises(UnknownProductError, match="nobody"):
+        service.install_prepared_product_deployment([ppa])
+
+    assert not apply_called, "apply_deployment_plan must not be called"
+    assert not sel_path.exists(), "selection file must not be created"
+
+
+# =========================================================================
+# Test D.4.1D-7: Existing selected ids preserved; new id added after success
+# =========================================================================
+
+
+def test_d4d7_existing_ids_preserved_new_added_after_success(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """When desired-products.toml already contains 'zesolver', installing
+    'zewitness' preserves 'zesolver' and adds 'zewitness' only after success."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    monkeypatch.setattr(
+        svc_mod, "apply_deployment_plan",
+        lambda plan, *, registry, runtime: DeploymentResult(
+            success=True, active_slot_id="rt-test2222",
+        ),
+    )
+
+    sel_path = tmp_path / "desired-products.toml"
+    sel_path.parent.mkdir(parents=True, exist_ok=True)
+    sel_path.write_text(
+        'schema_version = 1\n'
+        'selected_product_ids = ["zesolver"]\n'
+    )
+
+    store = SelectionStore(path=sel_path)
+
+    service = ZeAlfieService(
+        catalog=_dual_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    assert store.selected_product_ids == ("zesolver",)
+
+    result = service.install_prepared_product_deployment([ppa])
+
+    assert result.success is True
+
+    store.reload()
+    assert store.selected_product_ids == ("zesolver", "zewitness"), (
+        f"expected ('zesolver', 'zewitness'), got {store.selected_product_ids}"
+    )
+
+
+# =========================================================================
+# Test D.4.1D-8: Multi-product success persists all ids
+# =========================================================================
+
+
+def test_d4d8_multi_product_success_persists_all_ids(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """Two prepared artifacts applied successfully → both ids persisted."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+
+    ppa1 = _make_ppa("zewitness", "zewitness", witness_wheel)
+    ppa2 = _make_ppa("zesolver", "zesolver", witness_wheel, dist_name="zealfie-solver")
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    monkeypatch.setattr(
+        svc_mod, "apply_deployment_plan",
+        lambda plan, *, registry, runtime: DeploymentResult(
+            success=True, active_slot_id="rt-test3333",
+        ),
+    )
+
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+
+    service = ZeAlfieService(
+        catalog=_dual_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    assert not sel_path.exists()
+
+    result = service.install_prepared_product_deployment([ppa1, ppa2])
+
+    assert result.success is True
+
+    store.reload()
+    assert store.selected_product_ids == ("zesolver", "zewitness"), (
+        f"expected ('zesolver', 'zewitness'), got {store.selected_product_ids}"
+    )
+
+
+# =========================================================================
+# Test D.4.1D-9: Legacy registry with unrelated ids → catalog authoritative
+# =========================================================================
+
+
+def test_d4d9_legacy_registry_unrelated_ids_no_effect(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """A legacy registry with ids not in the product catalog must not affect
+    the apply registry; ProductCatalog descriptor remains authoritative."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+    from zealfie.components.registry import UnknownComponentError
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    legacy_reg = ComponentRegistry([
+        ComponentDefinition(
+            component_id="irrelevant",
+            display_name="Irrelevant",
+            distribution_name="irrelevant-lib",
+            launch_entry_points=(EntryPointContract("console_scripts", "irrelevant"),),
+        ),
+    ])
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+    apply_calls = []
+
+    def _fake_apply(plan, *, registry, runtime):
+        apply_calls.append((plan, registry, runtime))
+        return DeploymentResult(success=True, active_slot_id="rt-test4444")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _fake_apply)
+
+    sel_path = tmp_path / "desired-products.toml"
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        registry=legacy_reg,
+        runtime=_FakeAbsentRt(),
+        selection_store=SelectionStore(path=sel_path),
+    )
+
+    result = service.install_prepared_product_deployment([ppa])
+
+    assert result.success is True
+    assert len(apply_calls) == 1
+    __, called_registry, ___ = apply_calls[0]
+
+    assert sorted(called_registry.available_ids()) == ["zewitness"]
+    definition = called_registry.get("zewitness")
+    assert definition.distribution_name == "zealfie-witness"
+
+    with pytest.raises(UnknownComponentError):
+        called_registry.get("irrelevant")
+
+
+# =========================================================================
+# Test D.4.1D-10: No direct runtime transaction in service path
+# =========================================================================
+
+
+def test_d4d10_no_direct_runtime_transaction_calls(
+    tmp_path, witness_wheel, monkeypatch,
+) -> None:
+    """The service delegates only to apply_deployment_plan — no direct
+    runtime.begin_transaction(), install_local_wheel(), etc."""
+    import zealfie.app.service as svc_mod
+    from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+
+    ppa = _make_ppa("zewitness", "zewitness", witness_wheel)
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake"),
+            )
+
+        def begin_transaction(self):
+            raise AssertionError("service must not call runtime.begin_transaction()")
+
+        def install_local_wheel(self, *args, **kwargs):
+            raise AssertionError("service must not call runtime.install_local_wheel()")
+
+        def validate_candidate(self, *args, **kwargs):
+            raise AssertionError("service must not call runtime.validate_candidate()")
+
+        def activate(self, *args, **kwargs):
+            raise AssertionError("service must not call runtime.activate()")
+
+    apply_called = False
+
+    def _safe_apply(plan, *, registry, runtime):
+        nonlocal apply_called
+        apply_called = True
+        return DeploymentResult(success=True, active_slot_id="rt-test5555")
+
+    monkeypatch.setattr(svc_mod, "apply_deployment_plan", _safe_apply)
+
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+
+    service = ZeAlfieService(
+        catalog=_planning_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+    )
+
+    result = service.install_prepared_product_deployment([ppa])
+
+    assert apply_called, "apply_deployment_plan must be called"
+    assert result.success is True
+
+    store.reload()
+    assert "zewitness" in store.selected_product_ids

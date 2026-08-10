@@ -49,6 +49,7 @@ from zealfie.products.catalog import (
     default_catalog,
 )
 from zealfie.products.selection import (
+    CorruptSelectionError,
     DesiredProductSelection,
     bootstrap_selection_from_legacy_registry,
     SelectionStore,
@@ -547,6 +548,223 @@ class ZeAlfieService:
         return _desired_state_from_prepared_artifacts(
             prepared_artifacts
         )
+
+
+
+
+    # ------------------------------------------------------------------
+
+    # D.4.1D: Apply prepared product deployment
+
+    # ------------------------------------------------------------------
+
+
+
+    def install_prepared_product_deployment(
+
+        self,
+
+        prepared_artifacts: Sequence[PreparedProductArtifact],
+
+        *,
+
+        dependency_wheelhouse: Path | None = None,
+
+        probe_distribution=None,
+
+    ) -> DeploymentResult:
+
+        """Apply a prepared product deployment to the shared runtime.
+
+
+
+        Full pipeline: preflight selection store → plan via D.4.1C →
+
+        apply via existing transactional :func:`apply_deployment_plan` →
+
+        persist product selection only on success.
+
+
+
+        **No remote source resolution, fetch, build, or network I/O.**
+
+        This gate expects already-prepared product artifacts and
+
+        delegates to the existing deployment engine.
+
+
+
+        Mutation ordering guarantees
+
+        ----------------------------
+
+        Before apply (read-only preflight):
+
+        1. Validate selection store is readable (corrupt → fail).
+
+        2. Validate existing selection against product catalog.
+
+        3. Validate prepared artifacts (non-empty, no duplicates,
+
+           no mismatches) via D.4.1C validator.
+
+        4. Validate every product_id in catalog (UnknownProductError).
+
+        5. Build read-only deployment plan via
+
+           :meth:`plan_prepared_product_deployment`.
+
+        6. Build catalog-derived :class:`ComponentRegistry`.
+
+
+
+        Apply (runtime mutation via engine):
+
+        7. Call :func:`apply_deployment_plan` with plan + registry.
+
+           The existing engine handles venv creation, dependency
+
+           materialization, component installation, validation, and
+
+           atomic activation.
+
+
+
+        After success only:
+
+        8. Persist installed product ids to
+
+           ``desired-products.toml``, preserving any pre-existing
+
+           selected ids.  The selection store is never touched on
+
+           any failure path.
+
+
+
+        Parameters
+
+        ----------
+
+        prepared_artifacts:
+
+            One or more prepared product artifacts from D.4.1B.
+
+        dependency_wheelhouse:
+
+            Optional directory containing dependency wheels.
+
+        probe_distribution:
+
+            Injectable probe callable for READY runtime planning.
+
+
+
+        Returns
+
+        -------
+
+        DeploymentResult
+
+            *success=True* with the new active slot id on
+
+            successful apply.  *success=False* with a reason
+
+            string on any failure.
+
+
+
+        Raises
+
+        ------
+
+        ProductDeploymentPlanningError
+
+            If *prepared_artifacts* is empty, contains duplicate ids,
+
+            or has artifact-id mismatches.
+
+        UnknownProductError
+
+            If any prepared artifact's *product_id* is not in the
+
+            product catalog.
+
+        CorruptSelectionError
+
+            If the selection store file is present but unreadable.
+
+        """
+
+        # ---- 1. Preflight: validate selection store is readable ------
+
+        try:
+
+            existing_selection = self._selection_store.current_selection()
+
+        except CorruptSelectionError:
+
+            raise  # Fail before apply — no mutation to runtime or selection.
+
+
+
+        # ---- 2. Preflight: validate existing selection vs catalog ----
+
+        _validate_selection_against_catalog(self._catalog, existing_selection)
+
+
+
+        # ---- 3-5. Plan via D.4.1C (validates artifacts, catalog) ----
+
+        plan = self.plan_prepared_product_deployment(
+
+            prepared_artifacts,
+
+            dependency_wheelhouse=dependency_wheelhouse,
+
+            probe_distribution=probe_distribution,
+
+        )
+
+
+
+        # ---- 6. Build catalog-derived ComponentRegistry --------------
+
+        registry = self._registry_for_prepared_products(prepared_artifacts)
+
+
+
+        # ---- 7. Apply via existing transactional engine --------------
+
+        result = apply_deployment_plan(
+
+            plan,
+
+            registry=registry,
+
+            runtime=self._runtime,
+
+        )
+
+
+
+        # ---- 8. Persist selection only after successful activation ---
+
+        if result.success:
+
+            for pa in prepared_artifacts:
+
+                self._selection_store.select(
+
+                    pa.product_id, catalog=self._catalog,
+
+                )
+
+
+
+        return result
+
+
 
     # ------------------------------------------------------------------
     # D.4.1A: Internal helpers with explicit registry
