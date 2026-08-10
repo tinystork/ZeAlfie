@@ -1940,8 +1940,8 @@ def test_required_extras_passed_to_resolver(monkeypatch) -> None:
 
     monkeypatch.setattr(
         svc_mod.ZeAlfieService,
-        "resolve_offline_release_set",
-        lambda self, rd: fake_state,
+        "_resolve_release_set_for_registry",
+        lambda self, registry, rd: fake_state,
     )
 
     plan = service.plan_offline_deployment(rd)
@@ -2074,3 +2074,429 @@ def test_dependency_resolution_error_preserves_original_detail(
     msg = str(exc_info.value)
     assert "shared runtime dependency resolution failed" in msg
     assert "unobtainium" in msg
+
+
+# ===========================================================================
+# D.4.1A — Registry authority + common deployment core
+# ===========================================================================
+
+from zealfie.components import UnknownComponentError as _UnknownCompError
+from zealfie.products.catalog import ProductCatalog, ProductDescriptor
+from zealfie.products.selection import SelectionStore
+
+
+def _d41a_catalog() -> ProductCatalog:
+    """Catalog with zesolver (legacy) and zemosaic (new, not in legacy)."""
+    return ProductCatalog((
+        ProductDescriptor(
+            product_id="zesolver",
+            display_name="ZeSolver",
+            distribution_name="ZeSolver",
+            launch_entry_points=(EntryPointContract("gui_scripts", "zesolver"),),
+            description="Optical solver",
+        ),
+        ProductDescriptor(
+            product_id="zemosaic",
+            display_name="ZeMosaic",
+            distribution_name="ZeMosaic",
+            launch_entry_points=(EntryPointContract("gui_scripts", "zemosaic"),),
+            description="Mosaic planner",
+        ),
+    ))
+
+
+_LEGACY_ZS_DEF = ComponentDefinition(
+    "zesolver",
+    "ZeSolver",
+    "ZeSolver",
+    (EntryPointContract("gui_scripts", "zesolver"),),
+)
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 1: Legacy plan/apply paths still use legacy registry
+# ---------------------------------------------------------------------------
+
+def test_legacy_plan_uses_legacy_registry(tmp_path, witness_wheel):
+    """resolve_offline_release_set and plan_offline_deployment still
+    use the legacy packaged registry (self._registry) by default."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    fn = "zealfie_witness-0.0.1-py3-none-any.whl"
+    w1 = _copy_wheel_as(witness_wheel, rd, fn)
+    _write_manifest(rd, "zewitness", "0.0.1", fn, _sha256(w1), w1.stat().st_size)
+
+    # Service with a legacy registry that only has zewitness.
+    legacy = ComponentRegistry([WITNESS_DEF])
+    service = ZeAlfieService(
+        registry=legacy,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    # Call the public (compatibility) methods.
+    desired = service.resolve_offline_release_set(rd)
+    assert len(desired.components) == 1
+    assert desired.components[0].component_id == "zewitness"
+
+    plan = service.plan_offline_deployment(rd)
+    assert len(plan.steps) == 1
+    assert plan.steps[0].component_id == "zewitness"
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 2: Explicit registry planning resolves manifests for
+#                 the explicit registry
+# ---------------------------------------------------------------------------
+
+def test_explicit_registry_resolve_uses_explicit_registry(
+    tmp_path, witness_wheel, witness2_wheel
+):
+    """_resolve_release_set_for_registry resolves manifests for the
+    explicit registry, not self._registry."""
+    # Separate release dirs: each contains only the manifests its
+    # registry knows about, so the fail-closed unknown-manifest
+    # validation does not reject extras.
+    rd_legacy = tmp_path / "release_legacy"
+    rd_legacy.mkdir()
+    fn1 = "zealfie_witness-0.0.1-py3-none-any.whl"
+    w1 = _copy_wheel_as(witness_wheel, rd_legacy, fn1)
+    _write_manifest(rd_legacy, "zewitness", "0.0.1", fn1, _sha256(w1), w1.stat().st_size)
+
+    rd_explicit = tmp_path / "release_explicit"
+    rd_explicit.mkdir()
+    fn2 = "zealfie_witness2-0.1.0-py3-none-any.whl"
+    w2 = _copy_wheel_as(witness2_wheel, rd_explicit, fn2)
+    _write_manifest(rd_explicit, "zewitness2", "0.1.0", fn2, _sha256(w2), w2.stat().st_size)
+
+    legacy = ComponentRegistry([WITNESS_DEF])
+    explicit = ComponentRegistry([WITNESS2_DEF])
+
+    service = ZeAlfieService(
+        registry=legacy,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    # Public method uses legacy → only zewitness.
+    desired_legacy = service.resolve_offline_release_set(rd_legacy)
+    assert [c.component_id for c in desired_legacy.components] == ["zewitness"]
+
+    # Explicit method uses explicit → only zewitness2.
+    desired_explicit = service._resolve_release_set_for_registry(explicit, rd_explicit)
+    assert [c.component_id for c in desired_explicit.components] == ["zewitness2"]
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 3: Explicit registry plan uses explicit registry
+# ---------------------------------------------------------------------------
+
+def test_explicit_registry_plan_uses_explicit_registry(
+    tmp_path, witness2_wheel, monkeypatch
+):
+    """_plan_deployment_for_registry passes the explicit registry to
+    build_deployment_plan."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    # Release dir only contains zewitness2 manifest — matches the
+    # explicit registry so fail-closed validation passes.
+    fn2 = "zealfie_witness2-0.1.0-py3-none-any.whl"
+    w2 = _copy_wheel_as(witness2_wheel, rd, fn2)
+    _write_manifest(rd, "zewitness2", "0.1.0", fn2, _sha256(w2), w2.stat().st_size)
+
+    legacy = ComponentRegistry([WITNESS_DEF])
+    explicit = ComponentRegistry([WITNESS2_DEF])
+
+    service = ZeAlfieService(
+        registry=legacy,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    # Capture the registry passed to build_deployment_plan.  Must
+    # patch zealfie.app.service because service.py imports the name
+    # directly (not via the planning module).
+    captured_registries: list[ComponentRegistry] = []
+    from zealfie.app import service as _svc_mod
+    original_build = _svc_mod.build_deployment_plan
+
+    def _capture_build(desired_state, *, registry, runtime_status, dependency_lock):
+        captured_registries.append(registry)
+        return original_build(
+            desired_state,
+            registry=registry,
+            runtime_status=runtime_status,
+            dependency_lock=dependency_lock,
+        )
+
+    monkeypatch.setattr(_svc_mod, "build_deployment_plan", _capture_build)
+
+    # Call explicit variant.
+    plan = service._plan_deployment_for_registry(explicit, rd)
+    assert len(captured_registries) == 1
+    # Verify the explicit registry (not legacy) was passed.
+    assert captured_registries[0] is explicit
+    assert captured_registries[0] is not legacy
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 4: Explicit registry apply uses explicit registry
+# ---------------------------------------------------------------------------
+
+def test_explicit_registry_apply_uses_explicit_registry(
+    tmp_path, witness2_wheel, monkeypatch
+):
+    """_apply_deployment_for_registry passes the explicit registry into
+    apply_deployment_plan."""
+    rd = tmp_path / "release"
+    rd.mkdir()
+
+    # Release dir only contains zewitness2 manifest — matches the
+    # explicit registry so fail-closed validation passes.
+    fn2 = "zealfie_witness2-0.1.0-py3-none-any.whl"
+    w2 = _copy_wheel_as(witness2_wheel, rd, fn2)
+    _write_manifest(rd, "zewitness2", "0.1.0", fn2, _sha256(w2), w2.stat().st_size)
+
+    legacy = ComponentRegistry([WITNESS_DEF])
+    explicit = ComponentRegistry([WITNESS2_DEF])
+
+    service = ZeAlfieService(
+        registry=legacy,
+        runtime=_FakeSharedRuntime(_absent_status()),
+    )
+
+    # Capture the registry passed to apply_deployment_plan.
+    captured: list[ComponentRegistry] = []
+    from zealfie.app import service as _svc_mod
+    def _capture_apply(plan, *, registry, runtime):
+        captured.append(registry)
+        # Don't apply for real — just capture.
+        from zealfie.runtime.model import DeploymentResult
+        return DeploymentResult(success=True, reason="fake")
+
+    monkeypatch.setattr(_svc_mod, "apply_deployment_plan", _capture_apply)
+
+    service._apply_deployment_for_registry(explicit, rd)
+    assert len(captured) == 1
+    assert captured[0] is explicit
+    assert captured[0] is not legacy
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 5: Launch when selection file absent uses legacy registry
+# ---------------------------------------------------------------------------
+
+def test_launch_absent_selection_file_uses_legacy_registry(tmp_path):
+    """When the selection file does NOT exist, launch resolves components
+    from the legacy packaged registry."""
+    catalog = _d41a_catalog()
+    registry = ComponentRegistry([_LEGACY_ZS_DEF])
+
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    # File does NOT exist.
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake/runtime"),
+            )
+
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeAbsentRt(),
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    # zemosaic is NOT in the legacy registry → UnknownComponentError.
+    with pytest.raises(_UnknownCompError):
+        service.prepare_launch_plan("zemosaic")
+
+    # zesolver IS in the legacy registry → proceeds to runtime check.
+    with pytest.raises(LaunchPreparationError, match="absent"):
+        service.prepare_launch_plan("zesolver")
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 6: Launch when selection file exists uses desired registry
+# ---------------------------------------------------------------------------
+
+def test_launch_existing_selection_file_uses_desired_registry(tmp_path):
+    """When the selection file exists, launch resolves components from
+    the materialized desired registry, finding a product absent from
+    the legacy registry but present in catalog/selection."""
+    catalog = _d41a_catalog()
+    registry = ComponentRegistry([_LEGACY_ZS_DEF])
+
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    # Select zemosaic (NOT in legacy registry).
+    store.select("zemosaic", catalog=catalog)
+    # Now the selection file exists with ["zemosaic"].
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake/runtime"),
+            )
+
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeAbsentRt(),
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    # zesolver is NOT in the desired registry (selection only has zemosaic)
+    # → UnknownComponentError.
+    with pytest.raises(_UnknownCompError):
+        service.prepare_launch_plan("zesolver")
+
+    # zemosaic IS in the desired registry → proceeds to runtime check.
+    with pytest.raises(LaunchPreparationError, match="absent"):
+        service.prepare_launch_plan("zemosaic")
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 7: Present empty selection is authoritative
+# ---------------------------------------------------------------------------
+
+def test_launch_empty_selection_authoritative(tmp_path):
+    """When the selection file exists and is explicitly empty, the desired
+    registry is empty → legacy-only components are unknown / not launchable."""
+    catalog = _d41a_catalog()
+    registry = ComponentRegistry([_LEGACY_ZS_DEF])
+
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    # Write an explicit empty selection.
+    store_path = tmp_path / "sel.toml"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.write_text("schema_version = 1\nselected_product_ids = []\n")
+    assert store_path.exists()
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake/runtime"),
+            )
+
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeAbsentRt(),
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    # zesolver is in the legacy registry but the desired registry is empty
+    # → UnknownComponentError.
+    with pytest.raises(_UnknownCompError):
+        service.prepare_launch_plan("zesolver")
+
+    # zemosaic is also not in the empty desired registry.
+    with pytest.raises(_UnknownCompError):
+        service.prepare_launch_plan("zemosaic")
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 8: Launch registry resolution does not bootstrap
+# ---------------------------------------------------------------------------
+
+def test_launch_registry_resolution_no_bootstrap_side_effect(tmp_path):
+    """Calling prepare_launch_plan must NOT create the selection file
+    as a side effect.  Only reads if the file already exists."""
+    catalog = _d41a_catalog()
+    registry = ComponentRegistry([_LEGACY_ZS_DEF])
+
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    assert not store.path.exists(), "selection file should not exist yet"
+
+    class _FakeAbsentRt:
+        def status(self):
+            return RuntimeStatus(
+                state=RuntimeState.ABSENT,
+                runtime_root=Path("/fake/runtime"),
+            )
+
+    service = ZeAlfieService(
+        registry=registry,
+        runtime=_FakeAbsentRt(),
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    # Launch prep with absent selection file → uses legacy registry.
+    with pytest.raises(LaunchPreparationError, match="absent"):
+        service.prepare_launch_plan("zesolver")
+
+    # Verify no file was created as a side effect.
+    assert not store.path.exists(), (
+        "prepare_launch_plan must not create the selection file "
+        "(no bootstrap mutation)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# D.4.1A Test 9: _resolve_launch_registry returns correct registry
+# ---------------------------------------------------------------------------
+
+def test_resolve_launch_registry_absent_file_returns_legacy(tmp_path):
+    """_resolve_launch_registry returns self._registry when file absent."""
+    catalog = _d41a_catalog()
+    registry = ComponentRegistry([_LEGACY_ZS_DEF])
+    store = SelectionStore(path=tmp_path / "sel.toml")
+
+    service = ZeAlfieService(
+        registry=registry,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    resolved = service._resolve_launch_registry()
+    assert resolved is registry
+    assert resolved is service._registry
+
+
+def test_resolve_launch_registry_existing_file_returns_desired(tmp_path):
+    """_resolve_launch_registry materializes desired registry when file
+    exists."""
+    catalog = _d41a_catalog()
+    registry = ComponentRegistry([_LEGACY_ZS_DEF])
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    store.select("zemosaic", catalog=catalog)
+    assert store.path.exists()
+
+    service = ZeAlfieService(
+        registry=registry,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    resolved = service._resolve_launch_registry()
+    assert resolved is not registry
+    # The resolved registry has zemosaic from the selection.
+    assert "zemosaic" in resolved.available_ids()
+    # But NOT zesolver (not in the selection).
+    assert "zesolver" not in resolved.available_ids()
+
+
+def test_resolve_launch_registry_empty_file_returns_empty_registry(tmp_path):
+    """_resolve_launch_registry with an explicit empty selection file
+    returns an empty registry."""
+    catalog = _d41a_catalog()
+    registry = ComponentRegistry([_LEGACY_ZS_DEF])
+    store = SelectionStore(path=tmp_path / "sel.toml")
+    store_path = tmp_path / "sel.toml"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.write_text("schema_version = 1\nselected_product_ids = []\n")
+    assert store_path.exists()
+
+    service = ZeAlfieService(
+        registry=registry,
+        catalog=catalog,
+        selection_store=store,
+    )
+
+    resolved = service._resolve_launch_registry()
+    assert resolved is not registry
+    assert resolved.available_ids() == ()

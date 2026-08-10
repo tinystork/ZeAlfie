@@ -10,6 +10,10 @@ M1-2A: product catalog and product-shell read model (list_products, collect_prod
 M1-2D.3: user selection store and desired-component materialization
          (select_product, desired_selection,
           materialize_desired_components, desired_component_registry).
+M1-2D.4.1A: registry authority — common deployment core accepts explicit
+            :class:`ComponentRegistry`; launch resolves effective registry
+            from :class:`SelectionStore` when the selection file exists,
+            falling back to the legacy packaged registry otherwise.
 """
 
 from __future__ import annotations
@@ -136,6 +140,16 @@ class ZeAlfieService:
     ``ComponentRegistry``.  ``select_product`` guarantees the bootstrap
     before any additive mutation.
 
+    M1-2D.4.1A adds explicit-registry variants to the deployment core
+    (``_resolve_release_set_for_registry``,
+    ``_plan_deployment_for_registry``,
+    ``_apply_deployment_for_registry``,
+    ``_prepare_launch_plan_for_registry``) so that future install
+    orchestration can pass a candidate desired registry.  Launch now
+    resolves the effective registry from the ``SelectionStore`` when
+    the selection file exists, falling back to the legacy packaged
+    registry otherwise.
+
     The **managed** set in the product shell is now driven by the
     ``SelectionStore`` (what the user wants), not by the packaged
     ``ComponentRegistry``.  The ``ComponentRegistry`` remains the
@@ -191,13 +205,13 @@ class ZeAlfieService:
     #    top-level directory as component manifests and wheel artifacts.
 
     # ------------------------------------------------------------------
-    # resolve_offline_release_set
+    # D.4.1A: Internal helpers with explicit registry
     # ------------------------------------------------------------------
 
-    def resolve_offline_release_set(
-        self, release_dir: Path
+    def _resolve_release_set_for_registry(
+        self, registry: ComponentRegistry, release_dir: Path
     ) -> DesiredRuntimeState:
-        """Resolve a complete offline release set from *release_dir*.
+        """Resolve a complete offline release set using *registry*.
 
         Reads every manifest, resolves each to a
         :class:`VerifiedArtifact` via the safe local release resolver,
@@ -206,7 +220,7 @@ class ZeAlfieService:
         This is a read-only operation.  No filesystem mutation.
         """
         # Every known component must have a manifest.
-        expected_ids = frozenset(self._registry.available_ids())
+        expected_ids = frozenset(registry.available_ids())
 
         if not expected_ids:
             raise OfflineReleaseError(
@@ -245,7 +259,7 @@ class ZeAlfieService:
             try:
                 verified = resolve_local_release(
                     manifest,
-                    registry=self._registry,
+                    registry=registry,
                     artifact_root=rd,
                     host=self._host,
                 )
@@ -280,13 +294,30 @@ class ZeAlfieService:
         return DesiredRuntimeState(components=tuple(desired_components))
 
     # ------------------------------------------------------------------
-    # plan_offline_deployment
+    # resolve_offline_release_set  (compatibility wrapper)
     # ------------------------------------------------------------------
 
-    def plan_offline_deployment(
+    def resolve_offline_release_set(
         self, release_dir: Path
+    ) -> DesiredRuntimeState:
+        """Resolve a complete offline release set from *release_dir*
+        using the legacy packaged :class:`ComponentRegistry`.
+
+        This is a read-only operation.  No filesystem mutation.
+        """
+        return self._resolve_release_set_for_registry(
+            self._registry, release_dir
+        )
+
+    # ------------------------------------------------------------------
+    # D.4.1A: plan_offline_deployment_for_registry
+    # ------------------------------------------------------------------
+
+    def _plan_deployment_for_registry(
+        self, registry: ComponentRegistry, release_dir: Path
     ) -> DeploymentPlan:
-        """Plan a full offline deployment from *release_dir*.
+        """Plan a full offline deployment from *release_dir* using
+        *registry* as the component authority.
 
         Resolves the complete release set for all registry components,
         builds the desired runtime state, then resolves shared runtime
@@ -296,19 +327,21 @@ class ZeAlfieService:
 
         This is a read-only operation.  No filesystem mutation.
         """
-        desired_state = self.resolve_offline_release_set(release_dir)
+        desired_state = self._resolve_release_set_for_registry(
+            registry, release_dir
+        )
         runtime_status = self._runtime.status()
 
         # M1-1C: Resolve shared runtime dependencies from the local
         # wheelhouse.  The wheelhouse is the release directory itself
         # (manifests + wheels coexist at the top level).
         # Primary wheels come from already-verified component artifacts.
-        # Active extras come from the trusted component registry's
+        # Active extras come from the explicit *registry*'s
         # ``required_extras`` (already canonicalised by the model).
         try:
             primary_wheels: list[tuple[Path, frozenset[str]]] = []
             for dc in desired_state.components:
-                definition = self._registry.get(dc.component_id)
+                definition = registry.get(dc.component_id)
                 primary_wheels.append(
                     (
                         dc.artifact.path,
@@ -328,19 +361,36 @@ class ZeAlfieService:
 
         return build_deployment_plan(
             desired_state,
-            registry=self._registry,
+            registry=registry,
             runtime_status=runtime_status,
             dependency_lock=lock,
         )
 
     # ------------------------------------------------------------------
-    # apply_offline_deployment   (M0-9.2)
+    # plan_offline_deployment  (compatibility wrapper)
     # ------------------------------------------------------------------
 
-    def apply_offline_deployment(
+    def plan_offline_deployment(
         self, release_dir: Path
+    ) -> DeploymentPlan:
+        """Plan a full offline deployment from *release_dir* using the
+        legacy packaged :class:`ComponentRegistry`.
+
+        This is a read-only operation.  No filesystem mutation.
+        """
+        return self._plan_deployment_for_registry(
+            self._registry, release_dir
+        )
+
+    # ------------------------------------------------------------------
+    # D.4.1A: _apply_deployment_for_registry
+    # ------------------------------------------------------------------
+
+    def _apply_deployment_for_registry(
+        self, registry: ComponentRegistry, release_dir: Path
     ) -> DeploymentResult:
-        """Apply a complete offline deployment from *release_dir*.
+        """Apply a complete offline deployment from *release_dir* using
+        *registry* as the component authority.
 
         Re-resolves the release set and re-plans fresh at call time
         — a previously generated ``DeploymentPlan`` is never reused
@@ -350,11 +400,28 @@ class ZeAlfieService:
         This mutates the shared runtime: creates a candidate slot,
         installs all components, validates, and atomically activates.
         """
-        plan = self.plan_offline_deployment(release_dir)
+        plan = self._plan_deployment_for_registry(registry, release_dir)
         return apply_deployment_plan(
             plan,
-            registry=self._registry,
+            registry=registry,
             runtime=self._runtime,
+        )
+
+    # ------------------------------------------------------------------
+    # apply_offline_deployment   (compatibility wrapper)
+    # ------------------------------------------------------------------
+
+    def apply_offline_deployment(
+        self, release_dir: Path
+    ) -> DeploymentResult:
+        """Apply a complete offline deployment from *release_dir* using
+        the legacy packaged :class:`ComponentRegistry`.
+
+        This mutates the shared runtime: creates a candidate slot,
+        installs all components, validates, and atomically activates.
+        """
+        return self._apply_deployment_for_registry(
+            self._registry, release_dir
         )
 
     # ------------------------------------------------------------------
@@ -373,14 +440,52 @@ class ZeAlfieService:
         return self._runtime.rollback()
 
     # ------------------------------------------------------------------
-    # M1-0A: prepare_launch_plan
+    # D.4.1A: Launch registry resolution
     # ------------------------------------------------------------------
 
-    def prepare_launch_plan(self, component_id: str) -> LaunchPlan:
-        """Prepare a :class:`LaunchPlan` for *component_id* from the
-        active shared runtime.
+    def _resolve_launch_registry(self) -> ComponentRegistry:
+        """Resolve the effective registry for launch preparation.
 
-        The component MUST be declared in the trusted registry and its
+        **Rule (read-only, no bootstrap):**
+
+        * If the selection file does **not** exist: return the legacy
+          packaged :class:`ComponentRegistry` (``self._registry``) —
+          backward compatibility, including pre-D4 paths and offline
+          workflows.
+        * If the selection file **does** exist (including an explicit
+          empty selection): materialize a :class:`ComponentRegistry`
+          from the :class:`SelectionStore` via the product catalog.
+          This ensures a newly installed product selected in
+          ``desired-products.toml`` is launchable even when absent
+          from the packaged ``components.toml``.
+
+        An explicit empty selection is authoritative: a present-empty
+        file produces an empty desired registry, making legacy-only
+        components unknown / not launchable.
+
+        **No bootstrap side effect.**  This method does NOT call
+        :meth:`bootstrap_desired_selection`.  It only reads the
+        selection file if it already exists.
+        """
+        if self._selection_store.path.exists():
+            return _desired_component_registry(
+                self._catalog,
+                self._selection_store.current_selection(),
+            )
+        return self._registry
+
+    # ------------------------------------------------------------------
+    # D.4.1A: _prepare_launch_plan_for_registry
+    # ------------------------------------------------------------------
+
+    def _prepare_launch_plan_for_registry(
+        self, registry: ComponentRegistry, component_id: str
+    ) -> LaunchPlan:
+        """Prepare a :class:`LaunchPlan` for *component_id* from the
+        active shared runtime, resolving component metadata from
+        *registry*.
+
+        The component MUST be declared in *registry* and its
         distribution MUST be installed in the active runtime slot with a
         satisfied launch contract.  The resolved entry-point script is
         located inside the runtime's scripts directory — never the dev
@@ -391,7 +496,7 @@ class ZeAlfieService:
         Raises
         ------
         UnknownComponentError
-            If *component_id* is not in the trusted registry.
+            If *component_id* is not in *registry*.
         LaunchPreparationError
             If the runtime is ABSENT or BROKEN.
         ComponentNotInstalledError
@@ -404,9 +509,9 @@ class ZeAlfieService:
             If the matched entry-point script cannot be found inside the
             runtime scripts directory.
         """
-        # --- 1. Resolve component from trusted registry --------------------
+        # --- 1. Resolve component from registry ----------------------------
         try:
-            definition = self._registry.get(component_id)
+            definition = registry.get(component_id)
         except UnknownComponentError:
             raise  # let CLI surface it directly
 
@@ -475,6 +580,41 @@ class ZeAlfieService:
             component_id=component_id,
             executable=script_path,
         )
+
+    # ------------------------------------------------------------------
+    # M1-0A: prepare_launch_plan  (D.4.1A: resolves launch registry)
+    # ------------------------------------------------------------------
+
+    def prepare_launch_plan(self, component_id: str) -> LaunchPlan:
+        """Prepare a :class:`LaunchPlan` for *component_id* from the
+        active shared runtime.
+
+        **D.4.1A:** resolves the effective registry via
+        :meth:`_resolve_launch_registry` — if the selection file
+        exists (including explicit empty), the desired registry is
+        used; otherwise the legacy packaged registry is used.  No
+        bootstrap mutation occurs.
+
+        This is a read-only operation; no process is started.
+
+        Raises
+        ------
+        UnknownComponentError
+            If *component_id* is not in the effective registry.
+        LaunchPreparationError
+            If the runtime is ABSENT or BROKEN.
+        ComponentNotInstalledError
+            If the component's distribution is not installed in the
+            runtime.
+        LaunchContractNotSatisfiedError
+            If the installed distribution does not declare any of the
+            expected entry-point contracts.
+        LaunchScriptNotFoundError
+            If the matched entry-point script cannot be found inside the
+            runtime scripts directory.
+        """
+        registry = self._resolve_launch_registry()
+        return self._prepare_launch_plan_for_registry(registry, component_id)
 
     # ------------------------------------------------------------------
     # M1-0A: launch_component

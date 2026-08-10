@@ -1016,11 +1016,16 @@ def test_managed_vs_installed_are_independent(tmp_path):
 # ===========================================================================
 
 
-def test_service_launch_still_uses_registry_not_selection(tmp_path):
-    """prepare_launch_plan still resolves components from the registry,
-    not from the selection store."""
+def test_service_launch_respects_selection_when_file_exists(tmp_path):
+    """D.4.1A: When the selection file exists, prepare_launch_plan uses
+    the materialized desired registry from the SelectionStore, not the
+    legacy packaged ComponentRegistry.
+
+    zesolver is in the legacy registry but NOT in the selection → unknown.
+    zemosaic is NOT in the legacy registry but IS in the selection →
+    proceeds past registry check."""
     from zealfie.app.service import LaunchPreparationError
-    from zealfie.runtime.model import RuntimeReasonCode
+    from zealfie.components.registry import UnknownComponentError
 
     catalog = _make_catalog()
     registry = ComponentRegistry([
@@ -1033,13 +1038,10 @@ def test_service_launch_still_uses_registry_not_selection(tmp_path):
     ])
 
     store = SelectionStore(path=tmp_path / "sel.toml")
-    # zemosaic is in the catalog and selected, but NOT in the registry.
+    # zemosaic is in the catalog and selected, but NOT in the legacy registry.
     store.select("zemosaic", catalog=catalog)
 
-    # ABSENT runtime — launch will fail at the runtime check, but the
-    # component resolution step uses the registry.
-
-    # Inject a fake ABSENT runtime so we don't depend on the real machine.
+    # Inject a fake ABSENT runtime.
     class _FakeAbsentRuntime:
         def status(self):
             return RuntimeStatus(
@@ -1054,14 +1056,13 @@ def test_service_launch_still_uses_registry_not_selection(tmp_path):
         selection_store=store,
     )
 
-    # zesolver is in the registry → launch prep proceeds to runtime check.
-    with pytest.raises(LaunchPreparationError, match="absent"):
+    # zesolver is NOT in the selection → UnknownComponentError.
+    with pytest.raises(UnknownComponentError):
         service.prepare_launch_plan("zesolver")
 
-    # zemosaic is NOT in the registry → UnknownComponentError.
-    from zealfie.components.registry import UnknownComponentError
-
-    with pytest.raises(UnknownComponentError):
+    # zemosaic IS in the selection (desired registry) → proceeds to
+    # runtime check.
+    with pytest.raises(LaunchPreparationError, match="absent"):
         service.prepare_launch_plan("zemosaic")
 
 
