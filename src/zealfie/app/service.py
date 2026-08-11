@@ -19,6 +19,12 @@ M1-2D.4.1B: Remote product artifact preparation — source → exact SHA →
             :class:`~zealfie.products.catalog.ProductDescriptor` with a
             ``remote_source`` into a local verified wheel artifact
             without installing it or mutating the shared runtime.
+M1-2D.4.2C: Service integration — dependency acquisition before
+            planning/apply in ``install_product``.  Auto-acquires
+            dependency wheelhouse via ``PipWheelhouseAcquirer`` when
+            the caller does not supply ``dependency_wheelhouse``.
+            Acquired staging is cleaned in ``finally`` after plan/
+            apply/TOCTOU/install/activation.
 """
 
 from __future__ import annotations
@@ -32,8 +38,19 @@ from zealfie.components.model import ComponentDefinition
 from zealfie.components.registry import ComponentRegistry, UnknownComponentError, default_registry
 from zealfie.dependencies import (
     DependencyResolutionError,
+    PipWheelhouseAcquirer,
+    build_acquisition_request,
     resolve_runtime_dependencies,
 )
+from zealfie.dependencies.acquisition import (
+    AcquisitionTransportError,
+    DependencyAcquisitionResult,
+)
+from zealfie.dependencies.models import (
+    ExtraNotFound,
+    MetadataError,
+)
+
 from zealfie.launching import (
     EntryPointScriptNotFoundError,
     LaunchPlan,
@@ -172,6 +189,15 @@ class ProductDeploymentPlanningError(RuntimeError):
     invalid (empty, duplicates, mismatches).
     """
 
+
+class ProductDependencyAcquisitionError(RuntimeError):
+    """Raised when dependency acquisition for a product fails.
+
+    Carries the original cause via ``__cause__`` so callers can
+    inspect the underlying failure without traceback leakage.
+    """
+
+
 # ---------------------------------------------------------------------------
 # M1-2D.4.1B: Prepared product artifact
 # ---------------------------------------------------------------------------
@@ -253,12 +279,18 @@ class ZeAlfieService:
         catalog: ProductCatalog | None = None,
         host: HostTarget | None = None,
         selection_store: SelectionStore | None = None,
+        acquirer: object | None = None,
     ) -> None:
         self._registry = registry or default_registry()
         self._runtime = runtime or SharedRuntime()
         self._catalog = catalog or default_catalog()
         self._host = host or HostTarget.from_current_host()
         self._selection_store = selection_store or SelectionStore()
+        # M1-2D.4.2C: Injectable acquirer for test isolation.
+        if acquirer is not None:
+            self._acquirer = acquirer
+        else:
+            self._acquirer = PipWheelhouseAcquirer()
 
     # ------------------------------------------------------------------
     # Release directory convention
@@ -770,6 +802,12 @@ class ZeAlfieService:
     # D.4.1E: Public service install_product orchestration
     # ------------------------------------------------------------------
 
+
+    # KNOWN DESIGN LIMITATION (M1-2D.4.2C): The acquired wheelhouse is
+    # scoped to a single product install.  Before installing a second
+    # remotely installable product into the same shared runtime, the
+    # full desired product set must be preserved/reconstructed so the
+    # resolver can rebuild a complete dependency lock.
     def install_product(
         self,
         product_id: str,
@@ -790,6 +828,9 @@ class ZeAlfieService:
         * :meth:`install_prepared_product_deployment` (D.4.1D):
           planning, transactional apply, and post-success selection
           persistence.
+        * :class:`PipWheelhouseAcquirer` (D.4.2B → D.4.2C):
+          auto-acquires transitive dependencies when the caller does
+          not supply ``dependency_wheelhouse``.
 
         This is service-layer orchestration only.  It must not duplicate
         source resolution, fetch, build, verify, planning, apply, or
@@ -798,6 +839,9 @@ class ZeAlfieService:
         **Exception propagation:** errors from the preparation and
         prepared-install layers propagate without wrapping.  Callers
         receive the exact exception from the first failing step.
+        Dependency acquisition failures, including product wheel disappearance,
+        Metadata errors, ExtraNotFound, and transport failures, are
+        wrapped in :class:`ProductDependencyAcquisitionError`.
 
         Parameters
         ----------
@@ -830,22 +874,57 @@ class ZeAlfieService:
             If the resolver cannot resolve the ref to a commit SHA.
         ArtifactRejectionError
             If the built wheel fails verification.
+        ProductDependencyAcquisitionError
+            If auto-acquisition fails (product wheel disappeared,
+            Metadata unreadable, extra unknown, transport failure).
+            The original cause is preserved via ``__cause__``.
         CorruptSelectionError
             If the selection store file is present but unreadable.
         """
-        prepared = self.prepare_product_artifact(
-            product_id,
-            resolver=resolver,
-            fetcher=fetcher,
-            work_root=work_root,
-        )
-        return self.install_prepared_product_deployment(
-            [prepared],
-            dependency_wheelhouse=dependency_wheelhouse,
-            probe_distribution=probe_distribution,
-        )
+        # --- 1. Determine whether to auto-acquire dependencies ---
+        auto_acquire = dependency_wheelhouse is None
+        auto_staging: Path | None = None
 
-    # ------------------------------------------------------------------
+        try:
+            # --- 2. Prepare product artifact (D.4.1B) ---
+            prepared = self.prepare_product_artifact(
+                product_id,
+                resolver=resolver,
+                fetcher=fetcher,
+                work_root=work_root,
+            )
+
+            # --- 3. Auto-acquire dependency wheelhouse (D.4.2C) ---
+            if auto_acquire:
+                try:
+                    desc = self._catalog.get(product_id)
+                    req = build_acquisition_request(
+                        prepared.wheel_path,
+                        active_extras=frozenset(desc.required_extras),
+                    )
+                    result: DependencyAcquisitionResult = self._acquirer.acquire(
+                        req, staging_dir=None,
+                    )
+                    auto_staging = result.staging_wheelhouse
+                    dependency_wheelhouse = auto_staging
+                except (FileNotFoundError, MetadataError, ExtraNotFound,
+                        AcquisitionTransportError) as exc:
+                    raise ProductDependencyAcquisitionError(
+                        f"dependency acquisition failed for {product_id!r}: {exc}"
+                    ) from exc
+
+            # --- 4. Plan + apply + persist selection (D.4.1D) ---
+            return self.install_prepared_product_deployment(
+                [prepared],
+                dependency_wheelhouse=dependency_wheelhouse,
+                probe_distribution=probe_distribution,
+            )
+
+        finally:
+            # --- 5. Clean auto-acquired staging ---
+            if auto_staging is not None:
+                _rmtree_best_effort(auto_staging)
+
     # D.4.1A: Internal helpers with explicit registry
     # ------------------------------------------------------------------
 
@@ -1853,3 +1932,19 @@ def _desired_state_from_prepared_artifacts(
         for pa in prepared_artifacts
     )
     return DesiredRuntimeState(components=components)
+
+
+# ---------------------------------------------------------------------------
+# Best-effort rmtree (no third-party dependency for staging cleanup)
+# ---------------------------------------------------------------------------
+
+
+def _rmtree_best_effort(directory: Path) -> None:
+    """Best-effort recursive directory removal; silently ignores all errors."""
+    import shutil as _shutil
+
+    try:
+        if directory.is_dir():
+            _shutil.rmtree(directory)
+    except Exception:
+        pass
