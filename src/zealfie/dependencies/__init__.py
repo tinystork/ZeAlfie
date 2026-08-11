@@ -4,10 +4,23 @@ Pure planning: ``Requires-Dist`` / extras / wheelhouse
 → exact ``RuntimeLock`` → NO MUTATION.
 
 M1-1B will consume ``RuntimeLock`` for materialization.
+
+M1-2D.4.2A adds dependency acquisition contract models
+(``DependencyAcquisitionRequest``, ``DependencyAcquisitionResult``,
+``AcquiredWheel``) and pre-flight validation
+(``build_acquisition_request``).
 """
 
 from __future__ import annotations
 
+from .acquisition import (
+    AcquiredWheel,
+    AcquisitionTransportError,
+    DependencyAcquisitionError,
+    DependencyAcquisitionRequest,
+    DependencyAcquisitionResult,
+    build_acquisition_request,
+)
 from .host_tags import (
     HostTagProvider,
     SysTagProvider,
@@ -29,8 +42,13 @@ from .models import (
 from .resolver import resolve_runtime_dependencies
 
 __all__ = [
+    "AcquiredWheel",
+    "AcquisitionTransportError",
     "AmbiguousDependency",
     "ConstraintConflict",
+    "DependencyAcquisitionError",
+    "DependencyAcquisitionRequest",
+    "DependencyAcquisitionResult",
     "DependencyResolutionError",
     "ExtraNotFound",
     "HostTagProvider",
@@ -41,6 +59,7 @@ __all__ = [
     "RuntimeLock",
     "SysTagProvider",
     "WheelIdentityMismatch",
+    "build_acquisition_request",
     "default_compatible_tags",
     "default_marker_env",
     "resolve_runtime_dependencies",
