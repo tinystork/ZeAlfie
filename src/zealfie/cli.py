@@ -23,6 +23,7 @@ from .app import (
     LaunchScriptNotFoundError,
     ManagedStatus,
     ProductDeploymentPlanningError,
+    ProductDependencyAcquisitionError,
     OfflineReleaseError,
     ProductInstallPreparationError,
     ProductShellState,
@@ -405,6 +406,9 @@ def _handle_install(args, *, stdout: TextIO) -> int:
     except AcquisitionError as exc:
         print(f"cannot fetch source for {args.product_id!r}: {exc}", file=sys.stderr)
         return 9
+    except ProductDependencyAcquisitionError as exc:
+        print(f"cannot acquire dependencies for {args.product_id!r}: {exc}", file=sys.stderr)
+        return 11
     except (
         ArtifactRejectionError, CorruptSelectionError, ProductInstallPreparationError,
         ProductDeploymentPlanningError, PlanningError,

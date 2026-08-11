@@ -908,7 +908,7 @@ class ZeAlfieService:
                     auto_staging = result.staging_wheelhouse
                     dependency_wheelhouse = auto_staging
                 except (FileNotFoundError, MetadataError, ExtraNotFound,
-                        AcquisitionTransportError) as exc:
+                        AcquisitionTransportError, OSError) as exc:
                     raise ProductDependencyAcquisitionError(
                         f"dependency acquisition failed for {product_id!r}: {exc}"
                     ) from exc

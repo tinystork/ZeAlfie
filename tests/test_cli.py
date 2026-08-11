@@ -1753,3 +1753,38 @@ def test_install_planning_error_runtime_returns_3(monkeypatch, tmp_path):
         assert "Traceback" not in stderr.getvalue()
     finally:
         sys.stderr = backup
+
+
+# -- ProductDependencyAcquisitionError -----------------------------------------
+
+
+def test_install_dependency_acquisition_error_returns_11(monkeypatch, tmp_path):
+    """ProductDependencyAcquisitionError → exit 11, clean stderr, no traceback."""
+    from zealfie.app import ProductDependencyAcquisitionError
+
+    cause = OSError("disk full during pip download")
+    service = _FakeInstallService(
+        ProductDependencyAcquisitionError(
+            "dependency acquisition failed for 'zesolver': disk full during pip download"
+        ),
+    )
+    # Set __cause__ on the error to match realistic exception chain
+    service._result_or_error.__cause__ = cause
+
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(cli, "_make_install_deps", lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"))
+    import sys
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver"], stdout=stdout)
+        assert code == 11, f"expected exit 11, got {code}"
+        stderr_text = stderr.getvalue()
+        assert "cannot acquire dependencies for 'zesolver'" in stderr_text
+        assert "disk full" in stderr_text
+        assert "Traceback" not in stderr_text
+        # stdout should be empty — no DeploymentResult on error
+        assert stdout.getvalue() == ""
+    finally:
+        sys.stderr = backup

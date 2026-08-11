@@ -969,3 +969,76 @@ def test_c12_staging_dir_none_passed_to_acquirer(
     # Selection persisted
     store.reload()
     assert "zesolver" in store.selected_product_ids
+
+# ===========================================================================
+# Test 13: Raw OSError from acquirer wrapped as ProductDependencyAcquisitionError
+# ===========================================================================
+
+
+def test_c13_raw_oserror_wrapped_cause_preserved_no_apply_no_selection(
+    tmp_path, witness_wheel, monkeypatch,
+):
+    """Raw OSError (not FileNotFoundError) raised by acquirer.acquire is
+    wrapped into ProductDependencyAcquisitionError with __cause__ preserved;
+    no apply occurs, no selection mutation."""
+    catalog = _planning_catalog(product_id="zesolver")
+
+    # Raw OSError simulating a staging/acquirer disk failure
+    cause = OSError("disk full during pip download")
+    fake_acquirer = _FakeAcquirer(error=cause)
+
+    sel_path = tmp_path / "desired-products.toml"
+    sel_path.parent.mkdir(parents=True, exist_ok=True)
+    store = SelectionStore(path=sel_path)
+    original_content = sel_path.read_text() if sel_path.exists() else ""
+
+    service = ZeAlfieService(
+        catalog=catalog,
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+        acquirer=fake_acquirer,
+    )
+
+    ppa = _make_ppa("zesolver", "zesolver", witness_wheel, dist_name="zealfie-solver")
+
+    def _fake_prepare(product_id, *, resolver, fetcher, work_root):
+        return ppa
+
+    monkeypatch.setattr(service, "prepare_product_artifact", _fake_prepare)
+
+    install_called = False
+
+    def _explosive_install(*args, **kwargs):
+        nonlocal install_called
+        install_called = True
+        raise AssertionError("install_prepared must not be called on OSError")
+
+    monkeypatch.setattr(service, "install_prepared_product_deployment", _explosive_install)
+
+    with pytest.raises(ProductDependencyAcquisitionError) as exc_info:
+        service.install_product(
+            "zesolver",
+            resolver=_fake_resolver,
+            fetcher=_fake_fetcher,
+            work_root=tmp_path / "work",
+            dependency_wheelhouse=None,
+        )
+
+    # Error carries __cause__
+    assert exc_info.value.__cause__ is cause
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert "disk full" in str(exc_info.value)
+    assert "zesolver" in str(exc_info.value)
+
+    # install_prepared was NOT called — no apply, no runtime mutation
+    assert not install_called
+
+    # Selection NOT mutated
+    store.reload()
+    if original_content:
+        assert sel_path.read_text() == original_content
+    else:
+        assert "zesolver" not in store.selected_product_ids
+
+    # acquirer was called exactly once
+    assert len(fake_acquirer.requests) == 1
