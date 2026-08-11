@@ -33,7 +33,22 @@ class PipWheelhouseAcquirer:
 
     The existing resolver globs ``*.whl`` from *staging_wheelhouse*;
     ``acquired`` is the in-memory inventory for deterministic processing.
+
+    Parameters
+    ----------
+    index_url:
+        PEP 503 simple repository index URL passed to ``pip download
+        --index-url``.  Defaults to PyPI (``https://pypi.org/simple``).
+        Set to a ``file://`` local index for offline testing or private
+        index for air-gapped environments.
     """
+
+    def __init__(
+        self,
+        *,
+        index_url: str = "https://pypi.org/simple",
+    ) -> None:
+        self._index_url = index_url
 
     def acquire(
         self,
@@ -84,6 +99,7 @@ class PipWheelhouseAcquirer:
                 product_wheel_path=request.product_wheel_path,
                 active_extras=request.active_extras,
                 dest=staging_dir,
+                index_url=self._index_url,
             )
 
             # ── Build sanitised env ────────────────────────────────────
@@ -149,6 +165,7 @@ def _build_pip_argv(
     product_wheel_path: Path,
     active_extras: frozenset[str],
     dest: Path,
+    index_url: str = "https://pypi.org/simple",
 ) -> list[str]:
     """Build the ``pip download`` arg list (no shell, no --no-deps)."""
     root_req = str(product_wheel_path)
@@ -166,7 +183,7 @@ def _build_pip_argv(
         "--disable-pip-version-check",
         "--only-binary=:all:",
         "--index-url",
-        "https://pypi.org/simple",
+        index_url,
         "--dest",
         str(dest),
         root_req,

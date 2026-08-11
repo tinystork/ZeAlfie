@@ -819,3 +819,78 @@ class TestStagingDirResolution:
         # Clean up auto-created staging
         if result.staging_wheelhouse.exists():
             shutil.rmtree(result.staging_wheelhouse)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 15. Injectable index URL (LOT E)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestInjectableIndexUrl:
+    """Default index is PyPI; injectable index threaded into pip argv."""
+
+    def test_default_index_is_pypi(
+        self, product_wheel_leaf: Path, tmp_path: Path,
+    ) -> None:
+        """Default acquirer uses https://pypi.org/simple as --index-url."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        req = build_acquisition_request(product_wheel_leaf)
+        acquirer = PipWheelhouseAcquirer()
+
+        with mock.patch(
+            "subprocess.run", side_effect=_mock_run_success,
+        ) as m_run:
+            acquirer.acquire(req, staging_dir=staging)
+
+        argv = m_run.call_args[0][0]
+        idx = argv.index("--index-url")
+        assert argv[idx + 1] == "https://pypi.org/simple"
+
+    def test_custom_index_url_threaded_into_argv(
+        self, product_wheel_leaf: Path, tmp_path: Path,
+    ) -> None:
+        """Custom index URL via constructor appears as --index-url value."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        req = build_acquisition_request(product_wheel_leaf)
+        custom_url = "file:///some/local/index/simple"
+        acquirer = PipWheelhouseAcquirer(index_url=custom_url)
+
+        with mock.patch(
+            "subprocess.run", side_effect=_mock_run_success,
+        ) as m_run:
+            acquirer.acquire(req, staging_dir=staging)
+
+        argv = m_run.call_args[0][0]
+        idx = argv.index("--index-url")
+        assert argv[idx + 1] == custom_url
+
+    def test_custom_index_url_does_not_affect_default_constructor(
+        self, product_wheel_leaf: Path, tmp_path: Path,
+    ) -> None:
+        """A custom-index acquirer does not change the default PyPI
+        behaviour of a separate default-constructed acquirer."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        req = build_acquisition_request(product_wheel_leaf)
+
+        # Custom acquirer
+        custom = PipWheelhouseAcquirer(index_url="file:///other")
+        with mock.patch(
+            "subprocess.run", side_effect=_mock_run_success,
+        ) as m_run:
+            custom.acquire(req, staging_dir=staging)
+        argv_custom = m_run.call_args[0][0]
+        idx_c = argv_custom.index("--index-url")
+        assert argv_custom[idx_c + 1] == "file:///other"
+
+        # Default acquirer (separate instance)
+        default = PipWheelhouseAcquirer()
+        with mock.patch(
+            "subprocess.run", side_effect=_mock_run_success,
+        ) as m_run2:
+            default.acquire(req, staging_dir=staging)
+        argv_default = m_run2.call_args[0][0]
+        idx_d = argv_default.index("--index-url")
+        assert argv_default[idx_d + 1] == "https://pypi.org/simple"
