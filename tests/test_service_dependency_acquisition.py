@@ -13,6 +13,13 @@ Tests cover:
 6. Explicit caller-supplied dependency_wheelhouse bypasses acquirer.
 7. Sentinel: required extras from product catalog passed to
    build_acquisition_request / fake acquirer request.
+8-11: Error wrapping, hierarchy, and propagation.
+12: Staging-under-work-root contract: private unique staging dir
+    under work_root, zealfie-acq- prefix, cleaned after success.
+13: Raw OSError wrapping and cleanup.
+14: Wheelhouse exists and contains expected content during
+    install_prepared_product_deployment callback.
+15: Two sequential auto-acquires use different staging dirs.
 
 All tests are FAST — no real network, no pip, no venv, no subprocess.
 """
@@ -117,15 +124,25 @@ def _make_ppa(product_id, component_id, wheel_path, version="1.0",
 
 @dataclass
 class _FakeAcquirer:
-    """Injectable acquirer that returns a predetermined result or raises."""
+    """Injectable acquirer that returns a predetermined result or raises.
+
+    When *staging_dir* is provided (non-None), the fake honours it by
+    creating the directory, placing a sentinel inside, and returning a
+    :class:`DependencyAcquisitionResult` whose ``staging_wheelhouse`` is
+    the exact provided directory so that service cleanup targets the
+    correct private directory.
+    """
 
     result: DependencyAcquisitionResult | None = None
     error: Exception | None = None
     requests: list[DependencyAcquisitionRequest] | None = None
+    staging_dirs: list[Path | None] | None = None
 
     def __post_init__(self):
         if self.requests is None:
             self.requests = []
+        if self.staging_dirs is None:
+            self.staging_dirs = []
 
     def acquire(
         self,
@@ -135,8 +152,20 @@ class _FakeAcquirer:
         timeout_seconds=300,
     ) -> DependencyAcquisitionResult:
         self.requests.append(request)
+        self.staging_dirs.append(
+            Path(staging_dir) if staging_dir is not None else None
+        )
         if self.error is not None:
             raise self.error
+        if staging_dir is not None:
+            # Honour the caller-provided staging directory.
+            _staging = Path(staging_dir)
+            _staging.mkdir(parents=True, exist_ok=True)
+            (_staging / ".sentinel").touch()
+            return DependencyAcquisitionResult(
+                staging_wheelhouse=_staging,
+                acquired=(),
+            )
         if self.result is not None:
             return self.result
         # Default: success with empty acquired wheels
@@ -191,15 +220,8 @@ def test_c1_success_acquisition_wheelhouse_passed_to_plan_apply(
         dist_name="zealfie-solver",
     )
 
-    # --- Fake acquirer returns a staging wheelhouse ---
-    staging = tmp_path / "acq-staging"
-    staging.mkdir()
-    (staging / "dep-1.0-py3-none-any.whl").write_text("fake-dep-wheel")
-    fake_result = DependencyAcquisitionResult(
-        staging_wheelhouse=staging,
-        acquired=(),
-    )
-    fake_acquirer = _FakeAcquirer(result=fake_result)
+    # --- Fake acquirer — service creates its own private staging ---
+    fake_acquirer = _FakeAcquirer()
 
     # --- Selection store ---
     sel_path = tmp_path / "desired-products.toml"
@@ -240,12 +262,14 @@ def test_c1_success_acquisition_wheelhouse_passed_to_plan_apply(
 
     monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install_prepared)
 
+    work_root = tmp_path / "work"
+
     # --- Execute install_product ---
     result = service.install_product(
         "zesolver",
         resolver=_fake_resolver,
         fetcher=_fake_fetcher,
-        work_root=tmp_path / "work",
+        work_root=work_root,
         dependency_wheelhouse=None,  # trigger auto-acquire
     )
 
@@ -256,9 +280,20 @@ def test_c1_success_acquisition_wheelhouse_passed_to_plan_apply(
     # prepare was called
     assert len(prepare_calls) == 1
 
-    # install_prepared was called with the staging wheelhouse
+    # acquirer was called with a non-None staging_dir
+    assert len(fake_acquirer.staging_dirs) == 1
+    svc_staging = fake_acquirer.staging_dirs[0]
+    assert svc_staging is not None
+    assert svc_staging.is_relative_to(work_root), (
+        f"staging {svc_staging} must be under work_root {work_root}"
+    )
+    assert svc_staging.name.startswith("zealfie-acq-"), (
+        f"staging dir must have zealfie-acq- prefix, got {svc_staging.name}"
+    )
+
+    # install_prepared was called with the service-created staging wheelhouse
     assert len(install_calls) == 1
-    assert install_calls[0]["dependency_wheelhouse"] == staging
+    assert install_calls[0]["dependency_wheelhouse"] == svc_staging
 
     # acquirer was called
     assert len(fake_acquirer.requests) == 1
@@ -268,7 +303,11 @@ def test_c1_success_acquisition_wheelhouse_passed_to_plan_apply(
     assert "zesolver" in store.selected_product_ids
 
     # Verify staging is cleaned after success
-    assert not staging.exists(), "auto-acquired staging must be cleaned after success"
+    assert not svc_staging.exists(), "auto-acquired staging must be cleaned after success"
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, f"expected no leftover staging dirs, got {leftovers}"
 
 
 # ===========================================================================
@@ -322,13 +361,15 @@ def test_c2_acquisition_failure_no_apply_no_selection(
 
     monkeypatch.setattr(service, "install_prepared_product_deployment", _explosive_install)
 
+    work_root = tmp_path / "work"
+
     # Execute — should raise ProductDependencyAcquisitionError
     with pytest.raises(ProductDependencyAcquisitionError) as exc_info:
         service.install_product(
             "zesolver",
             resolver=_fake_resolver,
             fetcher=_fake_fetcher,
-            work_root=tmp_path / "work",
+            work_root=work_root,
             dependency_wheelhouse=None,
         )
 
@@ -345,6 +386,18 @@ def test_c2_acquisition_failure_no_apply_no_selection(
 
     # acquirer was called
     assert len(fake_acquirer.requests) == 1
+
+    # Staging was created by service before acquisition raised — must be cleaned
+    assert len(fake_acquirer.staging_dirs) == 1
+    svc_staging = fake_acquirer.staging_dirs[0]
+    assert svc_staging is not None
+    assert not svc_staging.exists(), (
+        "staging must be cleaned even when acquisition fails"
+    )
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, f"expected no leftover staging dirs, got {leftovers}"
 
 
 # ===========================================================================
@@ -424,15 +477,8 @@ def test_c4_apply_failure_staging_cleaned_no_selection(
 
     catalog = _planning_catalog(product_id="zesolver")
 
-    # Fake acquirer returns staging
-    staging = tmp_path / "acq-staging"
-    staging.mkdir()
-    (staging / "dep-1.0-py3-none-any.whl").write_text("fake")
-    fake_result = DependencyAcquisitionResult(
-        staging_wheelhouse=staging,
-        acquired=(),
-    )
-    fake_acquirer = _FakeAcquirer(result=fake_result)
+    # Fake acquirer — service creates its own private staging
+    fake_acquirer = _FakeAcquirer()
 
     sel_path = tmp_path / "desired-products.toml"
     store = SelectionStore(path=sel_path)
@@ -459,11 +505,13 @@ def test_c4_apply_failure_staging_cleaned_no_selection(
 
     monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install)
 
+    work_root = tmp_path / "work"
+
     result = service.install_product(
         "zesolver",
         resolver=_fake_resolver,
         fetcher=_fake_fetcher,
-        work_root=tmp_path / "work",
+        work_root=work_root,
         dependency_wheelhouse=None,
     )
 
@@ -471,8 +519,17 @@ def test_c4_apply_failure_staging_cleaned_no_selection(
     assert result is fake_deploy_result
     assert result.success is False
 
-    # Staging cleaned
-    assert not staging.exists(), "auto-acquired staging must be cleaned after apply failure"
+    # Staging cleaned after apply failure
+    assert len(fake_acquirer.staging_dirs) == 1
+    svc_staging = fake_acquirer.staging_dirs[0]
+    assert svc_staging is not None
+    assert not svc_staging.exists(), (
+        "auto-acquired staging must be cleaned after apply failure"
+    )
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, f"expected no leftover staging dirs, got {leftovers}"
 
     # Selection NOT persisted
     store.reload()
@@ -493,14 +550,8 @@ def test_c5_success_staging_cleaned_selection_persisted(
 
     catalog = _planning_catalog(product_id="zesolver")
 
-    staging = tmp_path / "acq-staging"
-    staging.mkdir()
-    (staging / "dep-1.0-py3-none-any.whl").write_text("fake")
-    fake_result = DependencyAcquisitionResult(
-        staging_wheelhouse=staging,
-        acquired=(),
-    )
-    fake_acquirer = _FakeAcquirer(result=fake_result)
+    # Fake acquirer — service creates its own private staging
+    fake_acquirer = _FakeAcquirer()
 
     sel_path = tmp_path / "desired-products.toml"
     store = SelectionStore(path=sel_path)
@@ -527,17 +578,28 @@ def test_c5_success_staging_cleaned_selection_persisted(
 
     monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install)
 
+    work_root = tmp_path / "work"
+
     result = service.install_product(
         "zesolver",
         resolver=_fake_resolver,
         fetcher=_fake_fetcher,
-        work_root=tmp_path / "work",
+        work_root=work_root,
         dependency_wheelhouse=None,
     )
 
     assert result.success is True
     # Staging cleaned
-    assert not staging.exists(), "auto-acquired staging must be cleaned after success"
+    assert len(fake_acquirer.staging_dirs) == 1
+    svc_staging = fake_acquirer.staging_dirs[0]
+    assert svc_staging is not None
+    assert not svc_staging.exists(), (
+        "auto-acquired staging must be cleaned after success"
+    )
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, f"expected no leftover staging dirs, got {leftovers}"
 
     # Selection persisted
     store.reload()
@@ -642,14 +704,8 @@ def test_c7_required_extras_passed_to_acquisition_request(
         required_extras=("gui",),
     )
 
-    staging = tmp_path / "acq-staging"
-    staging.mkdir()
-    fake_acquirer = _FakeAcquirer(
-        result=DependencyAcquisitionResult(
-            staging_wheelhouse=staging,
-            acquired=(),
-        ),
-    )
+    # Fake acquirer — service creates its own private staging
+    fake_acquirer = _FakeAcquirer()
 
     sel_path = tmp_path / "desired-products.toml"
     store = SelectionStore(path=sel_path)
@@ -690,11 +746,13 @@ def test_c7_required_extras_passed_to_acquisition_request(
 
     monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install)
 
+    work_root = tmp_path / "work"
+
     result = service.install_product(
         "zesolver",
         resolver=_fake_resolver,
         fetcher=_fake_fetcher,
-        work_root=tmp_path / "work",
+        work_root=work_root,
         dependency_wheelhouse=None,
     )
 
@@ -713,7 +771,14 @@ def test_c7_required_extras_passed_to_acquisition_request(
     assert req.product_wheel_path == ppa.wheel_path.resolve()
 
     # Staging cleaned
-    assert not staging.exists()
+    assert len(fake_acquirer.staging_dirs) == 1
+    svc_staging = fake_acquirer.staging_dirs[0]
+    assert svc_staging is not None
+    assert not svc_staging.exists()
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, f"expected no leftover staging dirs, got {leftovers}"
 
 
 # ===========================================================================
@@ -896,16 +961,17 @@ def test_c11_error_hierarchy():
 
 
 # ===========================================================================
-# Test 12: Staging lifecycle — staging_dir=None passed to acquirer
-#          (auto-created staging)
+# Test 12: Staging-under-work-root contract — private unique staging dir
 # ===========================================================================
 
 
-def test_c12_staging_dir_none_passed_to_acquirer(
+def test_c12_staging_under_work_root_private_and_cleaned(
     tmp_path, witness_wheel, monkeypatch,
 ):
-    """install_product passes staging_dir=None to acquirer, so the
-    acquirer auto-creates staging.  Service owns cleanup."""
+    """install_product creates a private unique staging directory under
+    work_root, passes it to acquirer (non-None), and cleans it after
+    success.  The staging dir must have the zealfie-acq- prefix and
+    must not exist after install_product returns."""
     from zealfie.runtime.model import DeploymentResult
 
     catalog = _planning_catalog(product_id="zesolver")
@@ -915,13 +981,23 @@ def test_c12_staging_dir_none_passed_to_acquirer(
 
     class _CapturingAcquirer:
         def acquire(self, request, *, staging_dir=None, timeout_seconds=300):
-            captured_staging_dirs.append(staging_dir)
-            # Create a real staging dir (simulates auto-created)
-            if staging_dir is None:
-                import tempfile
-                staging_dir = Path(tempfile.mkdtemp(prefix="test-acq-"))
+            captured_staging_dirs.append(
+                Path(staging_dir) if staging_dir is not None else None
+            )
+            # Honour the provided staging dir
+            if staging_dir is not None:
+                _staging = Path(staging_dir)
+                _staging.mkdir(parents=True, exist_ok=True)
+                (_staging / ".sentinel").touch()
+                return DependencyAcquisitionResult(
+                    staging_wheelhouse=_staging,
+                    acquired=(),
+                )
+            # Fallback for legacy tests
+            import tempfile
+            _staging = Path(tempfile.mkdtemp(prefix="test-acq-"))
             return DependencyAcquisitionResult(
-                staging_wheelhouse=staging_dir,
+                staging_wheelhouse=_staging,
                 acquired=(),
             )
 
@@ -952,23 +1028,44 @@ def test_c12_staging_dir_none_passed_to_acquirer(
 
     monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install)
 
+    work_root = tmp_path / "work"
+
     result = service.install_product(
         "zesolver",
         resolver=_fake_resolver,
         fetcher=_fake_fetcher,
-        work_root=tmp_path / "work",
+        work_root=work_root,
         dependency_wheelhouse=None,
     )
 
     assert result.success is True
 
-    # Acquirer was called with staging_dir=None
+    # Acquirer received a non-None staging_dir under work_root
     assert len(captured_staging_dirs) == 1
-    assert captured_staging_dirs[0] is None, "install_product must pass staging_dir=None to acquirer"
+    staging = captured_staging_dirs[0]
+    assert staging is not None, (
+        "install_product must pass a non-None staging_dir to acquirer"
+    )
+    assert staging.is_relative_to(work_root), (
+        f"staging {staging} must be under work_root {work_root}"
+    )
+    assert staging.name.startswith("zealfie-acq-"), (
+        f"staging dir must have zealfie-acq- prefix, got {staging.name}"
+    )
+
+    # Cleaned after success
+    assert not staging.exists(), (
+        "auto-acquired staging must be cleaned after success"
+    )
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, f"expected no leftover staging dirs, got {leftovers}"
 
     # Selection persisted
     store.reload()
     assert "zesolver" in store.selected_product_ids
+
 
 # ===========================================================================
 # Test 13: Raw OSError from acquirer wrapped as ProductDependencyAcquisitionError
@@ -980,7 +1077,8 @@ def test_c13_raw_oserror_wrapped_cause_preserved_no_apply_no_selection(
 ):
     """Raw OSError (not FileNotFoundError) raised by acquirer.acquire is
     wrapped into ProductDependencyAcquisitionError with __cause__ preserved;
-    no apply occurs, no selection mutation."""
+    no apply occurs, no selection mutation.  The service-created staging
+    is cleaned in finally."""
     catalog = _planning_catalog(product_id="zesolver")
 
     # Raw OSError simulating a staging/acquirer disk failure
@@ -1015,12 +1113,14 @@ def test_c13_raw_oserror_wrapped_cause_preserved_no_apply_no_selection(
 
     monkeypatch.setattr(service, "install_prepared_product_deployment", _explosive_install)
 
+    work_root = tmp_path / "work"
+
     with pytest.raises(ProductDependencyAcquisitionError) as exc_info:
         service.install_product(
             "zesolver",
             resolver=_fake_resolver,
             fetcher=_fake_fetcher,
-            work_root=tmp_path / "work",
+            work_root=work_root,
             dependency_wheelhouse=None,
         )
 
@@ -1042,3 +1142,200 @@ def test_c13_raw_oserror_wrapped_cause_preserved_no_apply_no_selection(
 
     # acquirer was called exactly once
     assert len(fake_acquirer.requests) == 1
+
+    # Staging created by service must be cleaned even on failure
+    assert len(fake_acquirer.staging_dirs) == 1
+    svc_staging = fake_acquirer.staging_dirs[0]
+    assert svc_staging is not None
+    assert not svc_staging.exists(), (
+        "staging must be cleaned even when acquisition raises OSError"
+    )
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, (
+        f"expected no leftover staging dirs after OSError, got {leftovers}"
+    )
+
+
+# ===========================================================================
+# Test 14: Wheelhouse exists and contains expected content during
+#          install_prepared_product_deployment callback
+# ===========================================================================
+
+
+def test_c14_wheelhouse_present_and_contains_content_during_apply(
+    tmp_path, witness_wheel, monkeypatch,
+):
+    """The auto-acquired dependency wheelhouse exists and contains the
+    expected content (acquirer-written sentinel) when
+    ``install_prepared_product_deployment`` is called, i.e. the
+    wheelhouse is present through planning/apply before cleanup."""
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _planning_catalog(product_id="zesolver")
+
+    fake_acquirer = _FakeAcquirer()
+
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+
+    service = ZeAlfieService(
+        catalog=catalog,
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+        acquirer=fake_acquirer,
+    )
+
+    ppa = _make_ppa("zesolver", "zesolver", witness_wheel, dist_name="zealfie-solver")
+
+    def _fake_prepare(product_id, *, resolver, fetcher, work_root):
+        return ppa
+
+    monkeypatch.setattr(service, "prepare_product_artifact", _fake_prepare)
+
+    # Capture wheelhouse state at install_prepared time
+    wheelhouse_snapshot: list[dict] = []
+
+    fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-c14")
+
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+        # Snapshot wheelhouse state while it should still exist
+        wh = Path(dependency_wheelhouse) if dependency_wheelhouse else None
+        if wh:
+            sentinel_path = wh / ".sentinel"
+            wheelhouse_snapshot.append({
+                "exists": wh.exists(),
+                "is_dir": wh.is_dir(),
+                "sentinel_exists": sentinel_path.exists(),
+                "contents": sorted(p.name for p in wh.iterdir()) if wh.is_dir() else [],
+            })
+        else:
+            wheelhouse_snapshot.append(None)
+        store.select(ppa.product_id, catalog=catalog)
+        return fake_deploy_result
+
+    monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install)
+
+    result = service.install_product(
+        "zesolver",
+        resolver=_fake_resolver,
+        fetcher=_fake_fetcher,
+        work_root=tmp_path / "work",
+        dependency_wheelhouse=None,
+    )
+
+    assert result.success is True
+
+    # Wheelhouse snapshot captured during apply
+    assert len(wheelhouse_snapshot) == 1
+    snap = wheelhouse_snapshot[0]
+    assert snap is not None, "dependency_wheelhouse must not be None during apply"
+    assert snap["exists"], "wheelhouse must exist during apply"
+    assert snap["is_dir"], "wheelhouse must be a directory during apply"
+    assert snap["sentinel_exists"], (
+        "sentinel must exist in wheelhouse during apply"
+    )
+    assert ".sentinel" in snap["contents"], (
+        f"wheelhouse contents during apply: {snap['contents']}"
+    )
+
+    # After install_product returns, wheelhouse is cleaned
+    staging_dir = fake_acquirer.staging_dirs[0]
+    assert not staging_dir.exists(), "staging must be cleaned after service returns"
+
+
+# ===========================================================================
+# Test 15: Two sequential auto-acquires use different staging dirs
+# ===========================================================================
+
+
+def test_c15_two_sequential_acquires_use_different_staging_dirs(
+    tmp_path, witness_wheel, monkeypatch,
+):
+    """Two sequential ``install_product`` calls with auto-acquire each
+    create a different unique staging directory, and both are
+    cleaned after their respective calls."""
+    from zealfie.runtime.model import DeploymentResult
+
+    catalog = _planning_catalog(product_id="zesolver")
+
+    fake_acquirer = _FakeAcquirer()
+
+    sel_path = tmp_path / "desired-products.toml"
+    store = SelectionStore(path=sel_path)
+
+    service = ZeAlfieService(
+        catalog=catalog,
+        runtime=_FakeAbsentRt(),
+        selection_store=store,
+        acquirer=fake_acquirer,
+    )
+
+    ppa = _make_ppa("zesolver", "zesolver", witness_wheel, dist_name="zealfie-solver")
+
+    def _fake_prepare(product_id, *, resolver, fetcher, work_root):
+        return ppa
+
+    monkeypatch.setattr(service, "prepare_product_artifact", _fake_prepare)
+
+    fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-c15")
+
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+        store.select(ppa.product_id, catalog=catalog)
+        return fake_deploy_result
+
+    monkeypatch.setattr(service, "install_prepared_product_deployment", _fake_install)
+
+    work_root = tmp_path / "work"
+
+    # First install
+    result1 = service.install_product(
+        "zesolver",
+        resolver=_fake_resolver,
+        fetcher=_fake_fetcher,
+        work_root=work_root,
+        dependency_wheelhouse=None,
+    )
+    assert result1.success is True
+
+    # Second install
+    result2 = service.install_product(
+        "zesolver",
+        resolver=_fake_resolver,
+        fetcher=_fake_fetcher,
+        work_root=work_root,
+        dependency_wheelhouse=None,
+    )
+    assert result2.success is True
+
+    # Two staging dirs were passed
+    assert len(fake_acquirer.staging_dirs) == 2
+    staging1 = fake_acquirer.staging_dirs[0]
+    staging2 = fake_acquirer.staging_dirs[1]
+
+    # Both non-None
+    assert staging1 is not None
+    assert staging2 is not None
+
+    # Different directories
+    assert staging1 != staging2, (
+        f"sequential auto-acquires must use different staging dirs: "
+        f"{staging1} == {staging2}"
+    )
+
+    # Both under work_root
+    assert staging1.is_relative_to(work_root)
+    assert staging2.is_relative_to(work_root)
+
+    # Both have zealfie-acq- prefix
+    assert staging1.name.startswith("zealfie-acq-")
+    assert staging2.name.startswith("zealfie-acq-")
+
+    # Both cleaned
+    assert not staging1.exists(), "first staging must be cleaned"
+    assert not staging2.exists(), "second staging must be cleaned"
+
+    # No leftover zealfie-acq-* dirs under work_root
+    leftovers = list(work_root.glob("zealfie-acq-*"))
+    assert len(leftovers) == 0, f"expected no leftover staging dirs, got {leftovers}"

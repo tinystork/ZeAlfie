@@ -30,6 +30,7 @@ M1-2D.4.2C: Service integration — dependency acquisition before
 from __future__ import annotations
 
 import hashlib
+import tempfile
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -902,10 +903,10 @@ class ZeAlfieService:
                         prepared.wheel_path,
                         active_extras=frozenset(desc.required_extras),
                     )
-                    result: DependencyAcquisitionResult = self._acquirer.acquire(
-                        req, staging_dir=None,
+                    auto_staging = _private_acquisition_staging(work_root)
+                    self._acquirer.acquire(
+                        req, staging_dir=auto_staging,
                     )
-                    auto_staging = result.staging_wheelhouse
                     dependency_wheelhouse = auto_staging
                 except (FileNotFoundError, MetadataError, ExtraNotFound,
                         AcquisitionTransportError, OSError) as exc:
@@ -1948,3 +1949,13 @@ def _rmtree_best_effort(directory: Path) -> None:
             _shutil.rmtree(directory)
     except Exception:
         pass
+
+
+def _private_acquisition_staging(work_root: Path) -> Path:
+    """Create a private unique dependency staging directory under *work_root*.
+
+    Returns a resolved :class:`Path` to the newly created directory.
+    Callers own cleanup (see :func:`_rmtree_best_effort`).
+    """
+    work_root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="zealfie-acq-", dir=work_root)).resolve()
