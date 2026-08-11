@@ -1,6 +1,7 @@
-"""M1-2C — ZeAlfie main window.
+"""M1-2D.5 — ZeAlfie main window with non-blocking install.
 
-The top-level product shell window hosting product cards and a status bar.
+The top-level product shell window hosting product cards, a status bar,
+and install coordination via a QThread worker.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
+    QProgressBar,
     QScrollArea,
     QSizePolicy,
     QStatusBar,
@@ -24,10 +26,19 @@ from zealfie.app import ProductShellState, ZeAlfieService
 from zealfie.sources.acquisition import ArchiveFetcher
 from zealfie.sources import SourceRefResolver
 
-from .presentation import runtime_summary
+from .presentation import action_enabled, runtime_summary
 from .product_card import ProductCard
+from .install_worker import create_install_thread
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Known UX limitation — shown during active install
+# ---------------------------------------------------------------------------
+
+_KNOWN_LIMITATION_TEXT = (
+    "KNOWN UX LIMITATION: running product installations cannot yet be cancelled."
+)
 
 
 class ZeAlfieMainWindow(QMainWindow):
@@ -35,6 +46,9 @@ class ZeAlfieMainWindow(QMainWindow):
 
     Composition root responsibility: owns the QMainWindow, populates
     product cards, handles refresh, and displays global status.
+
+    **M1-2D.5:** Coordinates product installs via a QThread worker so the
+    GUI stays responsive during synchronous ``install_product`` calls.
 
     Does NOT call subprocess, pip, resolver, deployment, or registry
     internals.  All product interaction routes through ``service``.
@@ -58,6 +72,16 @@ class ZeAlfieMainWindow(QMainWindow):
         self._status_label: QLabel | None = None
         self._error_label: QLabel | None = None
         self._cards_container: QWidget | None = None
+
+        # M1-2D.5: global install coordination
+        self._install_active: bool = False
+        self._active_install_pid: str | None = None
+        self._install_thread: object | None = None  # QThread
+        self._install_worker: object | None = None  # InstallWorker (QObject)
+        self._install_progress_bar: QProgressBar | None = None
+        self._known_limitation_label: QLabel | None = None
+        self._refresh_action: QAction | None = None
+
         self._build_ui()
         self._refresh()
 
@@ -66,7 +90,7 @@ class ZeAlfieMainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        self.setWindowTitle("ZeAlfie \u2014 Astronomy Launcher For Imaging Engines")
+        self.setWindowTitle("ZeAlfie — Astronomy Launcher For Imaging Engines")
         self.resize(580, 500)
 
         # --- Central scroll area ---
@@ -100,6 +124,25 @@ class ZeAlfieMainWindow(QMainWindow):
         self._error_label.setVisible(False)
         central_layout.addWidget(self._error_label)
 
+        # --- Known UX limitation label (hidden unless install active) ---
+        self._known_limitation_label = QLabel(_KNOWN_LIMITATION_TEXT)
+        self._known_limitation_label.setStyleSheet(
+            "color: #e67e22; font-style: italic;"
+        )
+        self._known_limitation_label.setWordWrap(True)
+        self._known_limitation_label.setVisible(False)
+        self._known_limitation_label.setObjectName("knownLimitationLabel")
+        central_layout.addWidget(self._known_limitation_label)
+
+        # --- Indeterminate progress bar (hidden unless install active) ---
+        self._install_progress_bar = QProgressBar()
+        self._install_progress_bar.setMinimum(0)
+        self._install_progress_bar.setMaximum(0)  # indeterminate = honest UX
+        self._install_progress_bar.setVisible(False)
+        self._install_progress_bar.setObjectName("installProgressBar")
+        self._install_progress_bar.setTextVisible(False)
+        central_layout.addWidget(self._install_progress_bar)
+
         # Product cards container
         self._cards_container = QWidget()
         self._cards_container.setObjectName("cardsContainer")
@@ -127,14 +170,14 @@ class ZeAlfieMainWindow(QMainWindow):
         self.setStatusBar(status_bar)
 
         # --- Refresh action (menu + toolbar) ---
-        refresh_action = QAction("&Refresh", self)
-        refresh_action.setShortcut("F5")
-        refresh_action.triggered.connect(self._refresh)
+        self._refresh_action = QAction("&Refresh", self)
+        self._refresh_action.setShortcut("F5")
+        self._refresh_action.triggered.connect(self._refresh)
         menu = self.menuBar().addMenu("&Shell")
-        menu.addAction(refresh_action)
+        menu.addAction(self._refresh_action)
 
         toolbar = self.addToolBar('Shell')
-        toolbar.addAction(refresh_action)
+        toolbar.addAction(self._refresh_action)
 
         # --- Populate cards from catalog ---
         self._populate_cards()
@@ -169,8 +212,8 @@ class ZeAlfieMainWindow(QMainWindow):
                 work_root=self._work_root,
             )
             self._cards[desc.product_id] = card
-            # Connect install_succeeded signal to trigger a full state refresh
-            card.install_succeeded.connect(self._on_install_succeeded)
+            # M1-2D.5: connect install_requested (instead of install_succeeded)
+            card.install_requested.connect(self._on_install_requested)
             # Insert before the stretch at the end
             cards_layout.insertWidget(cards_layout.count() - 1, card)
 
@@ -187,16 +230,22 @@ class ZeAlfieMainWindow(QMainWindow):
     # Refresh
     # ------------------------------------------------------------------
 
-    def _on_install_succeeded(self, product_id: str) -> None:
-        """Install finished; re-collect authoritative state."""
-        self._refresh()
-
     def _refresh(self) -> None:
         """Collect fresh product state from the service and update cards.
 
         Calls ``service.collect_product_state()`` — never probes the
         filesystem or calls subprocess from Qt.
+
+        M1-2D.5: Refuses to run while an install is active.
         """
+        if self._install_active:
+            logger.debug("Refresh blocked — install in progress")
+            if self._status_label:
+                self._status_label.setText(
+                    "Installation in progress — refresh deferred"
+                )
+            return
+
         logger.debug("Refreshing product state")
         try:
             shell: ProductShellState = self._service.collect_product_state()
@@ -236,3 +285,192 @@ class ZeAlfieMainWindow(QMainWindow):
         if self._error_label:
             self._error_label.setText(message)
             self._error_label.setVisible(True)
+
+    # ------------------------------------------------------------------
+    # M1-2D.5: Install coordination via worker thread
+    # ------------------------------------------------------------------
+
+    def _on_install_requested(self, product_id: str) -> None:
+        """Handle an install request from a product card.
+
+        Guards:
+        - Only one install at a time — second request is silently ignored.
+        - Install dependencies must be wired (checked by the card before emitting).
+        """
+        if self._install_active:
+            logger.debug(
+                "Install request for %r ignored — install already active for %r",
+                product_id, self._active_install_pid,
+            )
+            return
+
+        # --- Acquire global install lock ---
+        card = self._cards.get(product_id)
+        if card is None:
+            logger.error("Install requested for unknown product %r", product_id)
+            return
+
+        self._install_active = True
+        self._active_install_pid = product_id
+        self._set_global_install_lock(True)
+
+        # --- Update the requesting card to "in progress" ---
+        card.set_install_in_progress(True)
+
+        # --- Create and start the worker thread ---
+        self._install_thread, self._install_worker = create_install_thread(
+            product_id,
+            self._service,
+            resolver=self._resolver,  # type: ignore[arg-type]
+            fetcher=self._fetcher,    # type: ignore[arg-type]
+            work_root=self._work_root,  # type: ignore[arg-type]
+            parent=self,
+        )
+
+        worker = self._install_worker
+        worker.install_succeeded.connect(self._on_worker_success)
+        worker.install_failed.connect(self._on_worker_failure)
+        # Worker lifecycle is handled in create_install_thread:
+        #   worker.finished → worker.deleteLater (while thread loop alive)
+        #   worker.destroyed → thread.quit
+
+        thread = self._install_thread
+        thread.finished.connect(lambda: self._cleanup_thread(thread))
+
+        self._install_thread.start()
+        logger.info("Install worker started for %r", product_id)
+
+        # Scramble the status bar
+        if self._status_label:
+            self._status_label.setText(
+                f"Installing {card._descriptor.display_name}\u2026"
+            )
+
+    def _set_global_install_lock(self, locked: bool) -> None:
+        """Enable/disable install buttons, progress bar, and refresh action."""
+        # Progress bar visibility
+        if self._install_progress_bar:
+            self._install_progress_bar.setVisible(locked)
+
+        # Known limitation label visibility
+        if self._known_limitation_label:
+            self._known_limitation_label.setVisible(locked)
+
+        # Refresh action: disable during install
+        if self._refresh_action:
+            self._refresh_action.setEnabled(not locked)
+
+        # Cards: disable all install buttons
+        for c in self._cards.values():
+            if locked:
+                c._action_button.setEnabled(False)
+            else:
+                # Re-enable based on current state (unless awaiting refresh)
+                if c._awaiting_install_refresh:
+                    c._action_button.setEnabled(False)
+                elif c._state is not None:
+                    c._action_button.setEnabled(
+                        action_enabled(c._state) and not c._spawning and not c._installing
+                    )
+                else:
+                    c._action_button.setEnabled(False)
+
+    def _on_worker_success(self, product_id: str) -> None:
+        """Install succeeded — collect authoritative state via refresh."""
+        logger.info("Install succeeded for %r; refreshing", product_id)
+        card = self._cards.get(product_id)
+        if card:
+            card._status_label.setText("Installation complete — refreshing\u2026")
+
+        # Refresh to get authoritative state
+        try:
+            shell: ProductShellState = self._service.collect_product_state()
+        except Exception as exc:
+            logger.error("Post-install refresh failed for %r: %s", product_id, exc)
+            # Refresh failed after successful install — safe fallback
+            for c in self._cards.values():
+                c.set_install_complete_refresh_required()
+            if self._status_label:
+                self._status_label.setText("Refresh failed after installation")
+            return
+
+        # Apply new state to all cards
+        if self._error_label and self._cards:
+            self._error_label.setVisible(False)
+
+        for pstate in shell.products:
+            c = self._cards.get(pstate.product_id)
+            if c:
+                c.refresh_state(pstate)
+
+        self._update_status_bar(shell)
+
+    def _on_worker_failure(self, product_id: str, message: str) -> None:
+        """Install failed — show error, allow retry."""
+        logger.warning("Install failed for %r: %s", product_id, message)
+        card = self._cards.get(product_id)
+        if card:
+            card.set_install_error(message)
+
+        if self._status_label:
+            self._status_label.setText("Installation failed")
+
+    def _cleanup_thread(self, thread) -> None:
+        """Release install lock and schedule thread deletion.
+
+        Called when thread.finished fires, after the worker has been
+        deleted and the thread event loop has quit.
+
+        Does NOT call worker.deleteLater() — that is scheduled by
+        create_install_thread while the thread event loop is still alive.
+        Does NOT call QThread.terminate().
+        """
+        if thread is not self._install_thread:
+            # Stale callback from an old thread — ignore
+            return
+
+        # Wait for thread event loop to fully exit (safety, should be stopped)
+        if thread.isRunning():
+            thread.wait(5000)  # 5s timeout
+
+        # Release install lock
+        self._install_active = False
+        self._active_install_pid = None
+        self._set_global_install_lock(False)
+
+        # Schedule thread for deletion on the main event loop
+        thread.deleteLater()
+        self._install_worker = None
+        self._install_thread = None
+
+    # ------------------------------------------------------------------
+    # Close event — reject during active install
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        """Reject close when an install is in progress.
+
+        Does NOT call QThread.terminate().
+        """
+        if self._install_active:
+            if self._status_label:
+                self._status_label.setText(
+                    "Installation in progress — please wait for it to finish."
+                )
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Test helpers (used by test suite)
+    # ------------------------------------------------------------------
+
+    @property
+    def install_active(self) -> bool:
+        """Expose install-active state for test assertions."""
+        return self._install_active
+
+    @property
+    def active_install_pid(self) -> str | None:
+        """The product id currently being installed (if any)."""
+        return self._active_install_pid

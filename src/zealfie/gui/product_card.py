@@ -1,7 +1,10 @@
-"""M1-2C — product card widget for the ZeAlfie product shell.
+"""M1-2D.5 — product card widget for the ZeAlfie product shell.
 
 Each card displays a product's display name, short description,
 user-facing state text, and the primary action button.
+
+Install is no longer triggered directly — the card emits
+``install_requested`` and the MainWindow coordinates a worker thread.
 """
 
 from __future__ import annotations
@@ -43,11 +46,14 @@ class ProductCard(QFrame):
     Shows display name, description, state, and a primary action button
     (Lancer / Installer).  Never calls subprocess, pip, resolver, or
     deployment layers directly — routes through ``ZeAlfieService``.
+
+    For installs, emits ``install_requested`` so the MainWindow can
+    coordinate a worker thread (M1-2D.5).  Does NOT block the UI.
     """
 
-    # Emitted when install_product succeeds; transports product_id.
-    # The MainWindow connects this to trigger a full state refresh.
-    install_succeeded = Signal(str)
+    # Emitted when the user clicks Installer (M1-2D.5).
+    # MainWindow coordinates the actual install in a worker thread.
+    install_requested = Signal(str)  # product_id
 
     def __init__(
         self,
@@ -194,7 +200,7 @@ class ProductCard(QFrame):
         """Handle the primary action button click.
 
         For launchable products: calls ``service.spawn_component``.
-        For not-installed products: calls ``service.install_product``.
+        For not-installed products: emits ``install_requested`` signal.
         For installed-not-launchable: no-op (button is disabled).
         """
         if self._state is None:
@@ -229,7 +235,10 @@ class ProductCard(QFrame):
             self._debounce_timer.start(DEBOUNCE_MS)
 
     def _handle_install(self) -> None:
-        """Install the product from its remote source."""
+        """Emit install_requested — MainWindow coordinates the worker thread.
+
+        Does NOT call service.install_product() directly (M1-2D.5).
+        """
         pid = self._descriptor.product_id
         self._last_spawn_error = None
 
@@ -238,36 +247,48 @@ class ProductCard(QFrame):
             logger.error("Install deps not wired for product %r", pid)
             return
 
-        logger.info("Installing product %r via service", pid)
-        self._set_installing(True)
-        self._action_button.setText("Installing\u2026")
+        logger.info("Requesting install for product %r", pid)
+        self.install_requested.emit(pid)
 
-        try:
-            result = self._service.install_product(
-                pid,
-                resolver=self._resolver,
-                fetcher=self._fetcher,
-                work_root=self._work_root,
+    # ------------------------------------------------------------------
+    # Install state control (called by MainWindow, M1-2D.5)
+    # ------------------------------------------------------------------
+
+    def set_install_in_progress(self, in_progress: bool) -> None:
+        """Update card UI to reflect install in-progress / idle state."""
+        self._set_installing(in_progress)
+        if in_progress:
+            self._action_button.setText("Installation\u2026")
+            self._status_label.setText(
+                f"Installation de {self._descriptor.display_name} en cours\u2026"
             )
-            if result.success:
-                self._status_label.setText(f"Installation complete — {self._descriptor.display_name}")
-                self._awaiting_install_refresh = True
-                self.install_succeeded.emit(pid)
-            else:
-                reason = result.reason or "unknown error"
-                if len(reason) > 120:
-                    reason = reason[:117] + "\u2026"
-                self._status_label.setText(f"Install failed: {reason}")
-                self._last_spawn_error = reason
-        except Exception as exc:
-            logger.error("Install of %r failed: %s", pid, exc)
-            msg = str(exc)
-            if len(msg) > 120:
-                msg = msg[:117] + "\u2026"
-            self._status_label.setText(f"Error: {msg}")
-            self._last_spawn_error = msg
-        finally:
-            self._debounce_timer.start(DEBOUNCE_MS)
+
+    def set_install_error(self, message: str) -> None:
+        """Show a user-friendly install error on the card (no traceback)."""
+        if len(message) > 120:
+            message = message[:117] + "\u2026"
+        self._status_label.setText(f"Install failed: {message}")
+        self._last_spawn_error = message
+        self._set_installing(False)
+
+    def set_install_complete_refresh_required(self) -> None:
+        """Show that install succeeded but refresh failed — safe fallback.
+
+        Button stays disabled; retry/install blocked until a subsequent
+        refresh succeeds.
+        """
+        self._status_label.setText(
+            f"Installation complete — refresh required"
+        )
+        self._awaiting_install_refresh = True
+        # Keep installing flag True so button stays disabled
+        # (we do NOT call _set_installing(False) here)
+        if self._action_button:
+            self._action_button.setEnabled(False)
+
+    # ------------------------------------------------------------------
+    # Debounce
+    # ------------------------------------------------------------------
 
     def _on_debounce_done(self) -> None:
         if self._debounce_timer.isActive():
