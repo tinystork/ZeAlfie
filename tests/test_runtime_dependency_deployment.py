@@ -498,6 +498,7 @@ def test_activation_revalidates_dependencies_before_pointer_switch(
 # =============================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_lock_primary_component_mismatch_fails_before_candidate_creation(
     tmp_path: Path, witness_v1: Path, witness_second: Path,
 ) -> None:
@@ -547,6 +548,7 @@ def test_lock_primary_component_mismatch_fails_before_candidate_creation(
     assert rt.status().active_slot_id == active_before
 
 
+@pytest.mark.zealfie_slow
 def test_lock_primary_version_mismatch_fails_before_candidate(
     tmp_path: Path, witness_v1: Path,
 ) -> None:
@@ -607,6 +609,7 @@ def test_lock_primary_version_mismatch_fails_before_candidate(
 # =============================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_lock_primary_path_mismatch_fails_before_candidate(
     tmp_path: Path, witness_v1: Path, witness_second: Path,
 ) -> None:
@@ -664,6 +667,7 @@ def test_lock_primary_path_mismatch_fails_before_candidate(
 # =============================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_lock_primary_size_mismatch_fails_before_candidate(
     tmp_path: Path, witness_v1: Path,
 ) -> None:
@@ -718,6 +722,7 @@ def test_lock_primary_size_mismatch_fails_before_candidate(
 # =============================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_lock_primary_sha256_mismatch_fails_before_candidate(
     tmp_path: Path, witness_v1: Path,
 ) -> None:

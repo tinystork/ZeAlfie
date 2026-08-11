@@ -485,6 +485,7 @@ def test_missing_entry_point_rejected_by_verification(
 # ===========================================================================
 
 
+@pytest.mark.zealfie_slow
 def test_preparation_does_not_mutate_runtime_or_selection(
     tmp_path: Path,
 ) -> None:
