@@ -34,6 +34,9 @@ from .updates import (
     UpdateStatus,
     check_product_update,
 )
+from .update_checks import (
+    UpdateCheckCoordinator,
+)
 
 # M1-2E E.1: Installed-product provenance re-exported from the runtime layer
 # for consistency with existing re-export patterns.
@@ -125,6 +128,7 @@ __all__ = [
     "SpawnedLaunch",
     "UnknownProductError",
     "UpdateStatus",
+    "UpdateCheckCoordinator",
     "ZeAlfieService",
     "check_product_update",
     "collect_status",
