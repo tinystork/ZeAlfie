@@ -4,8 +4,10 @@ Single-purpose: wraps a single ``service.install_product(…)`` call in a
 QThread so the Qt event loop stays responsive during potentially long
 installation operations.
 
-Deliberately minimal — no queues, no generic job framework, no progress
-events, no cancellation, no async, no thread pool.
+Deliberately minimal — no queues, no generic job framework, no
+cancellation, no async, no thread pool.  Structured backend progress is
+forwarded verbatim through the ``progress`` signal; the worker never
+computes business progress itself.
 """
 
 from __future__ import annotations
@@ -46,6 +48,12 @@ class InstallWorker(QObject):
     #: Emitted (from worker thread) after success/failure, unconditionally.
     finished = Signal()
 
+    #: Emitted (from worker thread) for each backend progress observation.
+    #: The payload is a :class:`~zealfie.app.progress.InstallProgress`
+    #: (frozen dataclass with ``phase``, ``percent``, ``message``).  The
+    #: worker does not compute progress; it only relays the backend's.
+    progress = Signal(object)
+
     def __init__(
         self,
         product_id: str,
@@ -76,6 +84,7 @@ class InstallWorker(QObject):
                 resolver=self._resolver,
                 fetcher=self._fetcher,
                 work_root=self._work_root,
+                progress_callback=self._on_progress,
             )
             if result.success:
                 logger.info("Worker: install succeeded for %r", pid)
@@ -92,6 +101,10 @@ class InstallWorker(QObject):
             self.install_failed.emit(pid, msg)
         finally:
             self.finished.emit()
+
+    def _on_progress(self, progress) -> None:
+        """Relay a backend progress observation to the GUI thread."""
+        self.progress.emit(progress)
 
 
 # ---------------------------------------------------------------------------

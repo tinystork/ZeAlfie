@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -77,6 +78,7 @@ class ProductCard(QFrame):
         self._installing = False
         self._awaiting_install_refresh: bool = False
         self._status_label: QLabel | None = None
+        self._progress_bar: QProgressBar | None = None
         self._action_button: QPushButton | None = None
         self._last_spawn_error: str | None = None
         self._debounce_timer = QTimer(self)
@@ -95,6 +97,8 @@ class ProductCard(QFrame):
         self._state = state
         self._awaiting_install_refresh = False
         self._set_installing(False)
+        if self._progress_bar is not None:
+            self._progress_bar.setVisible(False)
         self._apply_state(state)
 
     @property
@@ -136,6 +140,16 @@ class ProductCard(QFrame):
         self._status_label = QLabel()
         self._status_label.setObjectName("statusLabel")
         layout.addWidget(self._status_label)
+
+        # --- Determinate install progress bar (hidden unless installing) ---
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setObjectName("installProgressBar")
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setFormat("")
+        self._progress_bar.setVisible(False)
+        layout.addWidget(self._progress_bar)
 
         # --- Action button row ---
         btn_layout = QHBoxLayout()
@@ -262,6 +276,29 @@ class ProductCard(QFrame):
             self._status_label.setText(
                 f"Installation de {self._descriptor.display_name} en cours\u2026"
             )
+            if self._progress_bar is not None:
+                self._progress_bar.setValue(0)
+                self._progress_bar.setFormat("")
+                self._progress_bar.setVisible(True)
+
+    def set_install_progress(self, progress) -> None:
+        """Update determinate install progress from a backend observation.
+
+        ``progress`` is a :class:`~zealfie.app.progress.InstallProgress`
+        carrying ``percent`` (0..100) and ``message``.  The card does not
+        compute progress; it only displays the backend's value/text.  The
+        user-facing status label mirrors the progress message so the phase
+        is visible alongside the determinate bar.
+        """
+        if self._progress_bar is None:
+            return
+        percent = int(getattr(progress, "percent", 0) or 0)
+        message = str(getattr(progress, "message", "") or "")
+        if message:
+            self._status_label.setText(message)
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setValue(max(0, min(100, percent)))
+        self._progress_bar.setFormat(message)
 
     def set_install_error(self, message: str) -> None:
         """Show a user-friendly install error on the card (no traceback)."""
@@ -269,6 +306,8 @@ class ProductCard(QFrame):
             message = message[:117] + "\u2026"
         self._status_label.setText(f"Install failed: {message}")
         self._last_spawn_error = message
+        if self._progress_bar is not None:
+            self._progress_bar.setVisible(False)
         self._set_installing(False)
 
     def set_install_complete_refresh_required(self) -> None:

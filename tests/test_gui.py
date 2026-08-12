@@ -873,6 +873,7 @@ class FakeInstallService(FakeService):
     def install_product(
         self, product_id, *, resolver=None, fetcher=None, work_root=None,
         dependency_wheelhouse=None, probe_distribution=None,
+        progress_callback=None,
     ):
         self.install_calls.append({
             "product_id": product_id,

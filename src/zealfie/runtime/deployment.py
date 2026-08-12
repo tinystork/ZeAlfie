@@ -12,6 +12,7 @@ artifact is TOCTOU-revalidated immediately before pip handoff.
 from __future__ import annotations
 
 import hashlib
+import logging
 import sys as _sys
 import venv
 from pathlib import Path as _Path
@@ -38,11 +39,15 @@ from .planning import (
 from .transaction import RuntimeTransaction
 
 
+logger = logging.getLogger(__name__)
+
+
 def apply_deployment_plan(
     plan: DeploymentPlan,
     *,
     registry: ComponentRegistry,
     runtime: SharedRuntime | None = None,
+    progress_callback=None,
 ) -> DeploymentResult:
     """Apply a complete deployment plan to the shared runtime.
 
@@ -81,6 +86,11 @@ def apply_deployment_plan(
         matching every component in the plan's desired state.
     runtime:
         The shared runtime target.  Created with default layout if ``None``.
+    progress_callback:
+        Optional ``Callable[[InstallProgress], None]`` observing the
+        per-package install, validation, and activation boundaries.
+        Observational only; it never affects behaviour, results, or error
+        propagation.
 
     Returns
     -------
@@ -90,6 +100,46 @@ def apply_deployment_plan(
     """
     if runtime is None:
         runtime = SharedRuntime()
+
+    # ---- Progress observation (optional, Qt-free) ---------------------------
+    # Lazy import keeps the runtime layer free of an app-layer top-level
+    # dependency while still emitting the shared InstallProgress contract.
+    from zealfie.app.progress import (
+        PHASE_PERCENT,
+        InstallPhase,
+        InstallProgress,
+        interpolate_percent,
+    )
+
+    def _emit(phase, percent, message):
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    InstallProgress(phase=phase, percent=percent, message=message)
+                )
+            except Exception:
+                logger.debug(
+                    "Progress callback raised during %s; ignoring (observational only)",
+                    getattr(phase, "value", phase),
+                    exc_info=True,
+                )
+
+    dep_names = (
+        [d.name for d in _iter_locked_dependencies(plan.dependency_lock)]
+        if plan.dependency_lock is not None
+        else []
+    )
+    install_names = dep_names + [dc.component_id for dc in plan.desired_state.components]
+    install_counter = {"i": 0}
+
+    def _emit_install(name):
+        total = len(install_names)
+        if total > 0:
+            pct = interpolate_percent(install_counter["i"], total)
+        else:
+            pct = PHASE_PERCENT[InstallPhase.INSTALLING_RUNTIME]
+        install_counter["i"] += 1
+        _emit(InstallPhase.INSTALLING_RUNTIME, pct, f"Installing {name}\u2026")
 
     # ---- 1. Preflight: blocked plan ----------------------------------------
     if plan.blocked:
@@ -184,7 +234,7 @@ def apply_deployment_plan(
     # installs operate on top of a fully-resolved dependency environment.
     if plan.dependency_lock is not None:
         dep_result = _install_locked_dependencies(
-            plan, runtime, txn,
+            plan, runtime, txn, emit_install=_emit_install,
         )
         if dep_result is not None:
             return dep_result
@@ -220,6 +270,7 @@ def apply_deployment_plan(
             )
 
         # Install the component wheel into the candidate.
+        _emit_install(desired.component_id)
         result = runtime.install_local_wheel(
             fresh_artifact.path,
             slot_id=txn.candidate_slot_id,
@@ -239,6 +290,11 @@ def apply_deployment_plan(
         )
 
     # ---- 9. Candidate validation (multi-component) --------------------------
+    _emit(
+        InstallPhase.VALIDATING,
+        PHASE_PERCENT[InstallPhase.VALIDATING],
+        "Validating\u2026",
+    )
     val_status = runtime.validate_candidate(
         txn,
         component_definitions=definitions,
@@ -274,6 +330,11 @@ def apply_deployment_plan(
             )
 
     # ---- 10. Activation (includes pre-activation TOCTOU revalidation) -------
+    _emit(
+        InstallPhase.ACTIVATING,
+        PHASE_PERCENT[InstallPhase.ACTIVATING],
+        "Activating\u2026",
+    )
     act_status = runtime.activate(txn)
 
     if act_status.state != RuntimeState.READY:
@@ -418,6 +479,7 @@ def _install_locked_dependencies(
     plan: DeploymentPlan,
     runtime: SharedRuntime,
     txn: "RuntimeTransaction",
+    emit_install=None,
 ) -> DeploymentResult | None:
     """Install locked non-component dependencies into the candidate slot.
 
@@ -436,6 +498,9 @@ def _install_locked_dependencies(
     # ---- Phase A: TOCTOU + install each non-component dependency ------------
     for dep in _iter_locked_dependencies(lock):
         dep_name = dep.name
+
+        if emit_install is not None:
+            emit_install(dep_name)
 
         # TOCTOU revalidation before pip.
         toctou_err = _revalidate_dependency_wheel(dep)

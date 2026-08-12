@@ -30,11 +30,13 @@ M1-2D.4.2C: Service integration — dependency acquisition before
 from __future__ import annotations
 
 import hashlib
+import logging
 import tempfile
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from zealfie.app.progress import InstallPhase, InstallProgress, PHASE_PERCENT
 from zealfie.components.model import ComponentDefinition
 from zealfie.components.registry import ComponentRegistry, UnknownComponentError, default_registry
 from zealfie.dependencies import (
@@ -117,6 +119,9 @@ from zealfie.sources.acquisition import (
     acquire_source,
     build_wheel_from_staged,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class OfflineReleaseError(ValueError):
@@ -334,6 +339,7 @@ class ZeAlfieService:
         resolver: SourceRefResolver,
         fetcher: ArchiveFetcher,
         work_root: Path,
+        progress_callback=None,
     ) -> PreparedProductArtifact:
         """Prepare a verified wheel artifact from a product's remote source.
 
@@ -359,6 +365,10 @@ class ZeAlfieService:
             Base directory for staging and wheel output.  Must exist
             and be a directory.  Callers should use a dedicated prep
             root (tests use ``tmp_path`` or ``basetemp``).
+        progress_callback:
+            Optional ``Callable[[InstallProgress], None]`` observing the
+            resolve / download / build boundaries.  Observational only;
+            it never affects behaviour or results.
 
         Returns
         -------
@@ -391,6 +401,12 @@ class ZeAlfieService:
             )
 
         # 3. Resolve branch/tag ref to exact 40-char commit SHA.
+        _emit_progress(
+            progress_callback,
+            InstallPhase.RESOLVING_SOURCE,
+            PHASE_PERCENT[InstallPhase.RESOLVING_SOURCE],
+            f"Resolving {desc.display_name}\u2026",
+        )
         resolved = resolve_source(desc.remote_source, resolver=resolver)
 
         # 4. Ensure work_root exists.
@@ -399,10 +415,22 @@ class ZeAlfieService:
         # 5. Acquire source archive and extract to staging directory.
         #    The context manager cleans up the staging dir after the
         #    wheel is built (the wheel lives in work_root independently).
+        _emit_progress(
+            progress_callback,
+            InstallPhase.DOWNLOADING_SOURCE,
+            PHASE_PERCENT[InstallPhase.DOWNLOADING_SOURCE],
+            f"Downloading {desc.display_name}\u2026",
+        )
         with acquire_source(
             resolved, fetcher=fetcher, stage_root=work_root,
         ) as staged:
             # 6. Build wheel from the staged source.
+            _emit_progress(
+                progress_callback,
+                InstallPhase.BUILDING_PRODUCT,
+                PHASE_PERCENT[InstallPhase.BUILDING_PRODUCT],
+                f"Building {desc.display_name}\u2026",
+            )
             wheel_path = build_wheel_from_staged(
                 staged, output_dir=work_root,
             )
@@ -605,6 +633,8 @@ class ZeAlfieService:
 
         probe_distribution=None,
 
+        progress_callback=None,
+
     ) -> DeploymentResult:
 
         """Apply a prepared product deployment to the shared runtime.
@@ -691,6 +721,16 @@ class ZeAlfieService:
 
             Injectable probe callable for READY runtime planning.
 
+        progress_callback:
+
+            Optional ``Callable[[InstallProgress], None]`` observing the
+
+            planning / install / validation / activation / completion
+
+            boundaries.  Observational only; it never affects behaviour,
+
+            results, or error propagation.
+
 
 
         Returns
@@ -749,6 +789,18 @@ class ZeAlfieService:
 
         # ---- 3-5. Plan via D.4.1C (validates artifacts, catalog) ----
 
+        _emit_progress(
+
+            progress_callback,
+
+            InstallPhase.PLANNING_RUNTIME,
+
+            PHASE_PERCENT[InstallPhase.PLANNING_RUNTIME],
+
+            "Planning runtime\u2026",
+
+        )
+
         plan = self.plan_prepared_product_deployment(
 
             prepared_artifacts,
@@ -769,15 +821,43 @@ class ZeAlfieService:
 
         # ---- 7. Apply via existing transactional engine --------------
 
-        result = apply_deployment_plan(
+        _emit_progress(
 
-            plan,
+            progress_callback,
 
-            registry=registry,
+            InstallPhase.INSTALLING_RUNTIME,
 
-            runtime=self._runtime,
+            PHASE_PERCENT[InstallPhase.INSTALLING_RUNTIME],
+
+            "Installing runtime\u2026",
 
         )
+
+        if progress_callback is not None:
+
+            result = apply_deployment_plan(
+
+                plan,
+
+                registry=registry,
+
+                runtime=self._runtime,
+
+                progress_callback=progress_callback,
+
+            )
+
+        else:
+
+            result = apply_deployment_plan(
+
+                plan,
+
+                registry=registry,
+
+                runtime=self._runtime,
+
+            )
 
 
 
@@ -792,6 +872,21 @@ class ZeAlfieService:
                     pa.product_id, catalog=self._catalog,
 
                 )
+
+            ready_message = _completion_message(
+                self._catalog, prepared_artifacts,
+            )
+            _emit_progress(
+
+                progress_callback,
+
+                InstallPhase.COMPLETED,
+
+                PHASE_PERCENT[InstallPhase.COMPLETED],
+
+                ready_message,
+
+            )
 
 
 
@@ -818,6 +913,7 @@ class ZeAlfieService:
         work_root: Path,
         dependency_wheelhouse: Path | None = None,
         probe_distribution=None,
+        progress_callback=None,
     ) -> DeploymentResult:
         """Install a single product from its remote source.
 
@@ -859,6 +955,11 @@ class ZeAlfieService:
             Optional wheelhouse directory for dependency resolution.
         probe_distribution:
             Injectable probe callable for READY runtime planning.
+        progress_callback:
+            Optional ``Callable[[InstallProgress], None]`` observing the
+            prepare / acquire / plan / install / validate / activate /
+            complete boundaries.  Observational only; it never affects
+            behaviour, results, or error propagation.
 
         Returns
         -------
@@ -886,18 +987,40 @@ class ZeAlfieService:
         auto_acquire = dependency_wheelhouse is None
         auto_staging: Path | None = None
 
+        _emit_progress(
+            progress_callback,
+            InstallPhase.PREPARING,
+            PHASE_PERCENT[InstallPhase.PREPARING],
+            f"Preparing {_product_display_name(self._catalog, product_id)}\u2026",
+        )
+
         try:
             # --- 2. Prepare product artifact (D.4.1B) ---
-            prepared = self.prepare_product_artifact(
-                product_id,
-                resolver=resolver,
-                fetcher=fetcher,
-                work_root=work_root,
-            )
+            if progress_callback is not None:
+                prepared = self.prepare_product_artifact(
+                    product_id,
+                    resolver=resolver,
+                    fetcher=fetcher,
+                    work_root=work_root,
+                    progress_callback=progress_callback,
+                )
+            else:
+                prepared = self.prepare_product_artifact(
+                    product_id,
+                    resolver=resolver,
+                    fetcher=fetcher,
+                    work_root=work_root,
+                )
 
             # --- 3. Auto-acquire dependency wheelhouse (D.4.2C) ---
             if auto_acquire:
                 try:
+                    _emit_progress(
+                        progress_callback,
+                        InstallPhase.ACQUIRING_DEPENDENCIES,
+                        PHASE_PERCENT[InstallPhase.ACQUIRING_DEPENDENCIES],
+                        "Acquiring dependencies\u2026",
+                    )
                     desc = self._catalog.get(product_id)
                     req = build_acquisition_request(
                         prepared.wheel_path,
@@ -915,6 +1038,13 @@ class ZeAlfieService:
                     ) from exc
 
             # --- 4. Plan + apply + persist selection (D.4.1D) ---
+            if progress_callback is not None:
+                return self.install_prepared_product_deployment(
+                    [prepared],
+                    dependency_wheelhouse=dependency_wheelhouse,
+                    probe_distribution=probe_distribution,
+                    progress_callback=progress_callback,
+                )
             return self.install_prepared_product_deployment(
                 [prepared],
                 dependency_wheelhouse=dependency_wheelhouse,
@@ -1959,3 +2089,46 @@ def _private_acquisition_staging(work_root: Path) -> Path:
     """
     work_root.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix="zealfie-acq-", dir=work_root)).resolve()
+
+
+def _emit_progress(
+    callback,
+    phase: InstallPhase,
+    percent: int,
+    message: str,
+) -> None:
+    """Invoke the optional progress callback with a single observation.
+
+    No-op when *callback* is ``None``.  Progress is observational only:
+    it must never influence control flow, exceptions, or results.  A
+    callback that raises is logged and swallowed so observation cannot
+    alter install behaviour.
+    """
+    if callback is not None:
+        try:
+            callback(InstallProgress(phase=phase, percent=percent, message=message))
+        except Exception:
+            logger.debug(
+                "Progress callback raised during %s; ignoring (observational only)",
+                phase.value,
+                exc_info=True,
+            )
+
+
+def _product_display_name(catalog, product_id: str) -> str:
+    """Return a product's display name, falling back to its id.
+
+    Never raises: progress messages must not introduce new failure modes.
+    """
+    try:
+        return catalog.get(product_id).display_name
+    except Exception:
+        return str(product_id)
+
+
+def _completion_message(catalog, prepared_artifacts) -> str:
+    """Return the user-facing completion message for a successful install."""
+    if len(prepared_artifacts) == 1:
+        name = _product_display_name(catalog, prepared_artifacts[0].product_id)
+        return f"{name} is ready"
+    return "Installation complete."

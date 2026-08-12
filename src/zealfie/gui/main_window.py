@@ -330,6 +330,7 @@ class ZeAlfieMainWindow(QMainWindow):
         worker = self._install_worker
         worker.install_succeeded.connect(self._on_worker_success)
         worker.install_failed.connect(self._on_worker_failure)
+        worker.progress.connect(card.set_install_progress)
         # Worker lifecycle is handled in create_install_thread:
         #   worker.finished → worker.deleteLater (while thread loop alive)
         #   worker.destroyed → thread.quit

@@ -519,6 +519,58 @@ def test_atomic_success_active_is_b_previous_is_a(
     assert p["version"] == "0.0.2"
 
 
+def test_raising_progress_callback_does_not_abort_apply(
+    tmp_path: Path, witness_v1: Path, witness_v2: Path,
+) -> None:
+    """A progress callback that raises must not alter apply results.
+
+    Progress is observational only: a raising callback is swallowed and
+    the successful deployment still completes and activates atomically.
+    """
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    rt = SharedRuntime(layout=layout)
+    rt.create()
+    active_a = rt.status().active_slot_id
+    rt.install_local_wheel(witness_v1, component_definition=WITNESS_DEF)
+
+    registry = _registry_single()
+    desired = DesiredRuntimeState(components=(_dc("zewitness", "0.0.2", witness_v2),))
+    ready_status = RuntimeStatus(
+        state=RuntimeState.READY,
+        runtime_root=layout.root,
+        active_slot_id=active_a,
+        active_path=layout.slot_path(active_a),
+        python_executable=_slot_python(layout.slot_path(active_a)),
+        python_version="3.14.0",
+    )
+
+    def probe(runtime_python: str, dist_name: str) -> dict:
+        return {
+            "python_version": "3.14.0",
+            "installed": True,
+            "version": "0.0.1",
+            "entry_points": [
+                {"group": "console_scripts", "name": "zewitness",
+                 "value": "zewitness.__main__:main"},
+            ],
+        }
+
+    plan = build_deployment_plan(desired, registry, ready_status,
+                                 probe_distribution=probe)
+
+    def _boom(progress):
+        raise RuntimeError("callback exploded")
+
+    result = apply_deployment_plan(
+        plan, registry=registry, runtime=rt, progress_callback=_boom,
+    )
+    assert result.success is True, f"deployment failed: {result.reason}"
+
+    final = rt.status()
+    assert final.active_slot_id != active_a
+    assert final.previous_slot_id == active_a
+
+
 # ---------------------------------------------------------------------------
 # 8) Artifact TOCTOU: corrupted wheel rejected, active unchanged
 # ---------------------------------------------------------------------------

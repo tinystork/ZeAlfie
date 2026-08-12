@@ -10,6 +10,12 @@ from ._status import (
     format_status,
     startup_message,
 )
+from .progress import (
+    InstallPhase,
+    InstallProgress,
+    PHASE_PERCENT,
+    interpolate_percent,
+)
 from .service import (
     ComponentNotInstalledError,
     LaunchContractNotSatisfiedError,
@@ -74,12 +80,15 @@ __all__ = [
     "CorruptSelectionError",
     "DesiredProductSelection",
     "FULL_NAME",
+    "InstallPhase",
+    "InstallProgress",
     "InvalidRemoteSourceError",
     "LaunchContractNotSatisfiedError",
     "LaunchPreparationError",
     "LaunchScriptNotFoundError",
     "ManagedStatus",
     "OfflineReleaseError",
+    "PHASE_PERCENT",
     "PreparedProductArtifact",
     "ProductDeploymentPlanningError",
     "ProductDependencyAcquisitionError",
@@ -106,6 +115,7 @@ __all__ = [
     "desired_component_registry",
     "format_component_status",
     "format_status",
+    "interpolate_percent",
     "materialize_desired_components",
     "resolve_source",
     "startup_message",
