@@ -1152,6 +1152,7 @@ opens the product shell window.
 src/zealfie/gui/
   __init__.py        # exports main()
   app.py             # composition root: QApplication + run_gui()
+  install_worker.py  # single-install QThread worker wrapper
   main_window.py     # QMainWindow: cards, refresh, status bar, toolbar
   product_card.py    # QFrame: single-product display + action button
   presentation.py    # pure functions: state ↔ label mapping
@@ -1162,9 +1163,15 @@ Responsibilities are separated:
   Testable without a QApplication.
 * ``product_card`` owns a single product's widget subtree and its
   action button click handler.  Routes spawn calls through
-  ``ZeAlfieService.spawn_component``.
+  ``ZeAlfieService.spawn_component`` and emits install requests to the
+  main window.
 * ``main_window`` owns the window-level composition: scroll area,
-  product cards, menu bar, toolbar, and status bar.
+  product cards, menu bar, toolbar, status bar, and single active
+  install coordination.
+* ``install_worker`` is deliberately narrow: one ``QObject`` moved to
+  one ``QThread`` for one synchronous ``service.install_product(...)``
+  call.  It is not a job framework, queue, thread pool, cancellation
+  system, or progress reporter.
 
 ### Service Boundary
 
@@ -1174,6 +1181,8 @@ functions directly.
 All product interaction routes through ``ZeAlfieService``:
 * ``list_products()`` — catalog descriptors;
 * ``collect_product_state()`` — runtime probe results;
+* ``install_product(product_id, resolver, fetcher, work_root)`` —
+  synchronous backend install, called from the GUI worker thread;
 * ``spawn_component(product_id)`` — non-blocking launch.
 
 ### Product Cards and State Mapping
@@ -1183,12 +1192,12 @@ human-readable UI:
 
 | ``reason_code`` | State Label | Action Button |
 |--------------------|--------------|---------------|
-| ``RUNTIME_ABSENT`` | "No runtime — deploy a runtime first" | Installer (disabled) |
-| ``RUNTIME_BROKEN`` | "Runtime broken — check or recreate" | Installer (disabled) |
-| ``NOT_INSTALLED`` | "Not installed — Installer coming in the next milestone" | Installer (disabled) |
+| ``RUNTIME_ABSENT`` | "No runtime — deploy a runtime first" | Installer (enabled) |
+| ``RUNTIME_BROKEN`` | "Runtime broken — check or recreate" | Installer (enabled) |
+| ``NOT_INSTALLED`` | "Not installed — click Installer to fetch and install" | Installer (enabled) |
 | ``INSTALLED_LAUNCHABLE`` | "Ready — click Lancer to start" | Lancer (enabled) |
 | ``INSTALLED_NOT_LAUNCHABLE`` | "Installed but launch contract missing" | Installer (disabled) |
-| ``PROBE_FAILED`` | "Could not check — probe failed" | Installer (disabled) |
+| ``PROBE_FAILED`` | "Could not check — probe failed" | Installer (enabled) |
 
 Never shows raw enum values to users.  All user-facing strings come from
 the ``presentation`` module.
@@ -1206,6 +1215,39 @@ triggered by:
 
 Refresh does **not** call subprocess or filesystem probing from Qt —
 all heavy work stays inside ``ZeAlfieService``.
+
+Refresh is disabled/deferred while a product install is active.  After
+worker success, the main window performs an authoritative
+``collect_product_state()`` refresh before re-enabling the card.
+
+### Install Path (M1-2D.5)
+
+Clicking the **Installer** button on a not-installed product card:
+
+1. emits ``ProductCard.install_requested(product_id)``;
+2. ``ZeAlfieMainWindow`` accepts the request only if no install is
+   already active;
+3. the main window disables install actions globally, disables refresh,
+   shows an indeterminate progress bar, and displays that cancellation
+   is not yet available;
+4. the main window creates one ``QThread`` + ``InstallWorker`` and
+   starts the worker;
+5. the worker calls the synchronous
+   ``service.install_product(product_id, resolver, fetcher, work_root)``
+   off the GUI thread;
+6. the backend remains synchronous and owns the existing GitHub source
+   resolution, archive fetch/build, dependency acquisition, runtime
+   lock/planning, transactional apply, activation, and selection
+   persistence;
+7. dependency acquisition staging is rooted under the supplied
+   ``work_root`` filesystem, not under ``/tmp``;
+8. on success, the main window refreshes authoritative state and the
+   card becomes **Lancer** when ``installed=True`` and
+   ``launchable=True``.
+
+The progress UI is intentionally indeterminate.  There is no
+cancellation, no percentage reporting, no asyncio bridge, no generic job
+manager, and no multi-product desired-state scheduler in this milestone.
 
 ### Launch Path
 
@@ -1243,3 +1285,12 @@ spawned and ZeAlfie does not currently track its lifecycle.
 * No changes to the ZeSolver repository.
 * No custom widget toolkit — PySide6 stock widgets only.
 * No dark/light mode toggle, theme engine, or CSS skinning.
+
+### M1-2D.5 Delta
+
+M1-2D.5 retires the earlier M1-2C placeholder limitation that showed
+Installer but did not perform installs.  The Product Shell can now run a
+single real product install from the **Installer** button without
+blocking the Qt event loop, using the minimal QThread worker described
+above.  The backend service and runtime transaction engine remain
+synchronous and unchanged in shape.
