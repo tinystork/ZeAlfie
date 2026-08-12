@@ -102,6 +102,7 @@ from zealfie.runtime.model import (
     RuntimeState,
     RuntimeStatus,
 )
+from zealfie.runtime.provenance import ProductProvenance, ProductProvenanceStore
 from zealfie.runtime.planning import (
     DeploymentPlan,
     DesiredComponent,
@@ -286,6 +287,7 @@ class ZeAlfieService:
         host: HostTarget | None = None,
         selection_store: SelectionStore | None = None,
         acquirer: object | None = None,
+        provenance_store: ProductProvenanceStore | None = None,
     ) -> None:
         self._registry = registry or default_registry()
         self._runtime = runtime or SharedRuntime()
@@ -297,6 +299,17 @@ class ZeAlfieService:
             self._acquirer = acquirer
         else:
             self._acquirer = PipWheelhouseAcquirer()
+        # M1-2E E.1: installed-product provenance store.  Explicit injection
+        # wins; otherwise derive from the runtime's layout when available
+        # (real SharedRuntime).  Fake runtimes without a layout leave
+        # provenance disabled rather than writing to the real user runtime.
+        if provenance_store is not None:
+            self._provenance_store = provenance_store
+        else:
+            layout = getattr(self._runtime, "layout", None)
+            self._provenance_store = (
+                ProductProvenanceStore(layout) if layout is not None else None
+            )
 
     # ------------------------------------------------------------------
     # Release directory convention
@@ -873,6 +886,10 @@ class ZeAlfieService:
 
                 )
 
+            # ---- 9. Persist provenance only after activation + selection ---
+            # Ordering invariant: provenance is written LAST, so any apply or
+            # selection failure leaves the old active provenance authoritative.
+            self._persist_provenance(prepared_artifacts, result)
             ready_message = _completion_message(
                 self._catalog, prepared_artifacts,
             )
@@ -892,6 +909,45 @@ class ZeAlfieService:
 
         return result
 
+
+
+    # ------------------------------------------------------------------
+    # M1-2E E.1: provenance persistence (post-activation)
+    # ------------------------------------------------------------------
+
+    def _persist_provenance(
+        self,
+        prepared_artifacts: Sequence[PreparedProductArtifact],
+        result: DeploymentResult,
+    ) -> None:
+        """Persist installed-product provenance after successful activation.
+
+        Called only after ``apply_deployment_plan`` returned success and
+        selection persistence succeeded.  Provenance is keyed by the new
+        active slot id so it always describes the active runtime, never a
+        failed candidate.
+
+        A persistence failure here does **not** roll back the runtime: the
+        runtime stays active and provenance readback returns unknown
+        (``None``).  The failure is logged, never raised.
+        """
+        store = self._provenance_store
+        if store is None:
+            return
+        slot_id = result.active_slot_id
+        if not slot_id:
+            return
+        try:
+            store.record(
+                slot_id, _provenance_entries_for(prepared_artifacts)
+            )
+        except Exception:
+            logger.warning(
+                "failed to persist product provenance for slot %r; "
+                "runtime activation is unaffected",
+                slot_id,
+                exc_info=True,
+            )
 
 
     # ------------------------------------------------------------------
@@ -1702,6 +1758,35 @@ class ZeAlfieService:
         """The user selection store."""
         return self._selection_store
 
+    @property
+    def provenance_store(self) -> ProductProvenanceStore | None:
+        """The installed-product provenance store (may be ``None`` when
+        disabled, e.g. for synthetic runtimes without a layout)."""
+        return self._provenance_store
+
+    # ------------------------------------------------------------------
+    # M1-2E E.1: Installed-product provenance readback
+    # ------------------------------------------------------------------
+
+    def active_provenance(self) -> dict[str, ProductProvenance]:
+        """Return provenance for the currently active runtime slot.
+
+        A runtime with no recorded provenance (old runtime, or no provenance
+        store) yields an empty mapping.  Never fabricates a commit SHA.
+        """
+        store = self._provenance_store
+        if store is None:
+            return {}
+        return store.load_active()
+
+    def product_provenance(self, product_id: str) -> ProductProvenance | None:
+        """Return provenance for *product_id* in the active runtime, or
+        ``None`` when unknown (never invented)."""
+        store = self._provenance_store
+        if store is None:
+            return None
+        return store.product_provenance(product_id)
+
     def bootstrap_desired_selection(self) -> DesiredProductSelection:
         """Ensure the selection file is initialised from the legacy
         :class:`~zealfie.components.registry.ComponentRegistry`
@@ -2063,6 +2148,34 @@ def _desired_state_from_prepared_artifacts(
         for pa in prepared_artifacts
     )
     return DesiredRuntimeState(components=components)
+
+
+def _provenance_entries_for(
+    prepared_artifacts: Sequence[PreparedProductArtifact],
+) -> tuple[ProductProvenance, ...]:
+    """Build provenance entries from prepared product artifacts.
+
+    Uses the prepared artifacts as the source of truth: ``resolved_source``
+    (owner/repo/ref, exact commit SHA) and ``verified_artifact`` (version,
+    wheel SHA-256).  ``version`` is the verified artifact's ``version``
+    (equal to ``wheel_version`` for prepared artifacts).
+    """
+    entries: list[ProductProvenance] = []
+    for pa in prepared_artifacts:
+        resolved = pa.resolved_source
+        verified = pa.verified_artifact
+        entries.append(
+            ProductProvenance(
+                product_id=pa.product_id,
+                version=verified.version,
+                source_owner=resolved.source.owner,
+                source_repo=resolved.source.repo,
+                requested_ref=resolved.source.ref,
+                commit_sha=resolved.commit_sha,
+                wheel_sha256=verified.sha256,
+            )
+        )
+    return tuple(entries)
 
 
 # ---------------------------------------------------------------------------

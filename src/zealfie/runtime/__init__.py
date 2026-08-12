@@ -36,6 +36,11 @@ from .planning import (
     build_deployment_plan,
 )
 from .probe import probe_runtime_distribution, probe_runtime_python_version
+from .provenance import (
+    PROVENANCE_SCHEMA_VERSION,
+    ProductProvenance,
+    ProductProvenanceStore,
+)
 from .state import load_active_state, save_active_state
 from .transaction import RuntimeTransaction, generate_slot_id
 
@@ -52,6 +57,9 @@ __all__ = [
     "InstallOutcome",
     "InstallResult",
     "PlanningError",
+    "PROVENANCE_SCHEMA_VERSION",
+    "ProductProvenance",
+    "ProductProvenanceStore",
     "RuntimeLayout",
     "RuntimeReasonCode",
     "RuntimeSlot",

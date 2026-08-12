@@ -30,6 +30,13 @@ from .service import (
     ZeAlfieService,
 )
 
+# M1-2E E.1: Installed-product provenance re-exported from the runtime layer
+# for consistency with existing re-export patterns.
+from zealfie.runtime.provenance import (
+    ProductProvenance,
+    ProductProvenanceStore,
+)
+
 # M1-2A: Product-shell API re-exported from the application layer so that
 # CLI and future GUI consumers import from the application layer, not from
 # zealfie.products internals directly.
@@ -90,6 +97,8 @@ __all__ = [
     "OfflineReleaseError",
     "PHASE_PERCENT",
     "PreparedProductArtifact",
+    "ProductProvenance",
+    "ProductProvenanceStore",
     "ProductDeploymentPlanningError",
     "ProductDependencyAcquisitionError",
     "ProductCatalog",
