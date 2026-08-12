@@ -29,6 +29,7 @@ M1-2D.4.2C: Service integration — dependency acquisition before
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import hashlib
 import logging
 import tempfile
@@ -37,6 +38,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from zealfie.app.progress import InstallPhase, InstallProgress, PHASE_PERCENT
+from zealfie.app.updates import (
+    ProductUpdateResult,
+    UpdateStatus,
+    check_product_update as _check_product_update,
+)
 from zealfie.components.model import ComponentDefinition
 from zealfie.components.registry import ComponentRegistry, UnknownComponentError, default_registry
 from zealfie.dependencies import (
@@ -1786,6 +1792,65 @@ class ZeAlfieService:
         if store is None:
             return None
         return store.product_provenance(product_id)
+
+    # ------------------------------------------------------------------
+    # M1-2E E.2: Read-only update detection
+    # ------------------------------------------------------------------
+
+    def check_product_update(
+        self,
+        product_id: str,
+        *,
+        resolver: SourceRefResolver,
+    ) -> ProductUpdateResult:
+        """Check *product_id* for an available update, read-only.
+
+        Reads the product's active provenance (E.1) and resolves its
+        requested source ref via the injected *resolver*, comparing the
+        resolved commit SHA with the installed commit SHA.
+
+        This is **pure read-only**: it never writes runtime state, the
+        provenance file, the ``active.json`` pointer, or the selection
+        store, and it never installs, launches, or applies anything.
+
+        Outcome mapping (see :func:`zealfie.app.updates.check_product_update`):
+
+        * no active provenance → :attr:`UpdateStatus.PROVENANCE_UNKNOWN`
+        * resolver failure      → :attr:`UpdateStatus.CHECK_FAILED`
+        * same commit           → :attr:`UpdateStatus.UP_TO_DATE`
+        * different commit      → :attr:`UpdateStatus.UPDATE_AVAILABLE`
+
+        Never raises for missing provenance or resolver failure.
+        """
+        return _check_product_update(
+            product_id,
+            self.product_provenance(product_id),
+            resolver=resolver,
+        )
+
+    def check_updates(
+        self,
+        product_ids: Sequence[str] | None = None,
+        *,
+        resolver: SourceRefResolver,
+    ) -> tuple[ProductUpdateResult, ...]:
+        """Check zero or more products for available updates, read-only.
+
+        When *product_ids* is ``None``, every product in the catalog is
+        checked (products without active provenance yield
+        :attr:`UpdateStatus.PROVENANCE_UNKNOWN`).  Explicit ids are
+        checked as given, preserving order; unknown ids yield
+        :attr:`UpdateStatus.PROVENANCE_UNKNOWN` rather than raising.
+
+        Pure read-only — identical guarantees to
+        :meth:`check_product_update`.
+        """
+        if product_ids is None:
+            product_ids = self._catalog.available_ids()
+        return tuple(
+            self.check_product_update(product_id, resolver=resolver)
+            for product_id in product_ids
+        )
 
     def bootstrap_desired_selection(self) -> DesiredProductSelection:
         """Ensure the selection file is initialised from the legacy

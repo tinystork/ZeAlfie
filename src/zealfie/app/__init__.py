@@ -29,6 +29,11 @@ from .service import (
     RemoteSourceUnavailableError,
     ZeAlfieService,
 )
+from .updates import (
+    ProductUpdateResult,
+    UpdateStatus,
+    check_product_update,
+)
 
 # M1-2E E.1: Installed-product provenance re-exported from the runtime layer
 # for consistency with existing re-export patterns.
@@ -97,6 +102,7 @@ __all__ = [
     "OfflineReleaseError",
     "PHASE_PERCENT",
     "PreparedProductArtifact",
+    "ProductUpdateResult",
     "ProductProvenance",
     "ProductProvenanceStore",
     "ProductDeploymentPlanningError",
@@ -118,7 +124,9 @@ __all__ = [
     "SourceResolutionError",
     "SpawnedLaunch",
     "UnknownProductError",
+    "UpdateStatus",
     "ZeAlfieService",
+    "check_product_update",
     "collect_status",
     "default_selection_path",
     "desired_component_registry",
