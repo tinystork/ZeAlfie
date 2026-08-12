@@ -24,7 +24,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from zealfie.app import ProductDescriptor, ProductState, ZeAlfieService
+from zealfie.app import (
+    ProductDescriptor,
+    ProductState,
+    ProductUpdateResult,
+    ZeAlfieService,
+)
 from zealfie.sources.acquisition import ArchiveFetcher
 from zealfie.sources import SourceRefResolver
 
@@ -33,6 +38,7 @@ from .presentation import (
     action_label,
     action_tooltip,
     state_label,
+    update_status_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +84,7 @@ class ProductCard(QFrame):
         self._installing = False
         self._awaiting_install_refresh: bool = False
         self._status_label: QLabel | None = None
+        self._update_label: QLabel | None = None
         self._progress_bar: QProgressBar | None = None
         self._action_button: QPushButton | None = None
         self._last_spawn_error: str | None = None
@@ -100,6 +107,27 @@ class ProductCard(QFrame):
         if self._progress_bar is not None:
             self._progress_bar.setVisible(False)
         self._apply_state(state)
+
+    def set_update_status(self, result: ProductUpdateResult | None) -> None:
+        """Display a product's update-check status (read-only, informational).
+
+        This is deliberately **separate** from install/launch state: the
+        state label and action button are untouched.  ``NOT_CHECKED`` (or
+        ``None``) produces an empty label, which is hidden.  Must only be
+        called on the GUI thread (MainWindow routes it via the bridge).
+        """
+        if self._update_label is None:
+            return
+        text = update_status_label(result)
+        self._update_label.setText(text)
+        self._update_label.setVisible(bool(text))
+
+    @property
+    def update_status_text(self) -> str:
+        """The current user-facing update-status text (``""`` when hidden)."""
+        if self._update_label is None:
+            return ""
+        return self._update_label.text()
 
     @property
     def product_id(self) -> str:
@@ -140,6 +168,12 @@ class ProductCard(QFrame):
         self._status_label = QLabel()
         self._status_label.setObjectName("statusLabel")
         layout.addWidget(self._status_label)
+
+        # --- Update status label (separate from install/launch state) ---
+        self._update_label = QLabel()
+        self._update_label.setObjectName("updateStatusLabel")
+        self._update_label.setVisible(False)
+        layout.addWidget(self._update_label)
 
         # --- Determinate install progress bar (hidden unless installing) ---
         self._progress_bar = QProgressBar()

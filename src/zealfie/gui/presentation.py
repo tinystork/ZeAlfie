@@ -6,7 +6,13 @@ Never shows raw enum names to users.
 
 from __future__ import annotations
 
-from zealfie.app import ManagedStatus, ProductState, ProductStateReasonCode
+from zealfie.app import (
+    ManagedStatus,
+    ProductState,
+    ProductStateReasonCode,
+    ProductUpdateResult,
+    UpdateStatus,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +69,80 @@ def action_tooltip(state: ProductState) -> str:
         return "Launch contract not satisfied — product is installed but cannot be launched"
     return f"Install {state.display_name}"
 
+
+# ---------------------------------------------------------------------------
+# Update status → UI text (M1-2E LOT E.4)
+# ---------------------------------------------------------------------------
+
+
+def _short_sha(sha: str | None) -> str:
+    """Return a short (7-char) form of a commit SHA, or ``""``."""
+    if not sha:
+        return ""
+    sha = str(sha).strip()
+    return sha[:7] if len(sha) >= 7 else sha
+
+
+def _short_error(error: str | None) -> str:
+    """Return a compact, single-line, user-safe error message.
+
+    Collapses whitespace (stripping any traceback-style line breaks) and
+    truncates long messages.  Never returns raw exception/enum names.
+    """
+    if not error:
+        return ""
+    text = str(error)
+    # Defensive: if a raw Python traceback leaked through, drop it and any
+    # trailing frame lines — users never need to see them.
+    marker = "Traceback (most recent call last)"
+    index = text.find(marker)
+    if index != -1:
+        text = text[:index]
+    text = " ".join(text.split())
+    if len(text) > 80:
+        text = text[:77] + "\u2026"
+    return text
+
+
+def update_status_label(result: ProductUpdateResult | None) -> str:
+    """Return a user-facing update-status label for a product card.
+
+    ``result`` is a :class:`~zealfie.app.ProductUpdateResult` (or any
+    object carrying a ``status`` attribute).  Returns ``""`` for
+    ``NOT_CHECKED`` (and for ``None``) so callers can hide the label
+    entirely.  Never returns raw enum names or tracebacks.
+
+    Mapping (M1-2E LOT E.4):
+
+    * ``NOT_CHECKED``        → ``""`` (no scary/error state).
+    * ``CHECKING``           → "Checking for updates…".
+    * ``UP_TO_DATE``         → "Up to date" (subdued, stable).
+    * ``UPDATE_AVAILABLE``   → "Update available (<short latest SHA>)".
+    * ``CHECK_FAILED``       → "Update check failed: <short error>".
+    * ``PROVENANCE_UNKNOWN`` → "Update status unknown".
+    """
+    if result is None:
+        return ""
+    status = getattr(result, "status", None)
+    if status is UpdateStatus.NOT_CHECKED:
+        return ""
+    if status is UpdateStatus.CHECKING:
+        return "Checking for updates\u2026"
+    if status is UpdateStatus.UP_TO_DATE:
+        return "Up to date"
+    if status is UpdateStatus.UPDATE_AVAILABLE:
+        sha = _short_sha(getattr(result, "latest_commit_sha", None))
+        if sha:
+            return f"Update available ({sha})"
+        return "Update available"
+    if status is UpdateStatus.CHECK_FAILED:
+        error = _short_error(getattr(result, "error", None))
+        if error:
+            return f"Update check failed: {error}"
+        return "Update check failed"
+    if status is UpdateStatus.PROVENANCE_UNKNOWN:
+        return "Update status unknown"
+    return ""
 
 # ---------------------------------------------------------------------------
 # Runtime status summary

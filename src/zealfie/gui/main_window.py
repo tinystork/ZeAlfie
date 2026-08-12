@@ -22,13 +22,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from zealfie.app import ProductShellState, ZeAlfieService
+from zealfie.app import (
+    ProductShellState,
+    ProductUpdateResult,
+    UpdateCheckCoordinator,
+    ZeAlfieService,
+)
+from zealfie.app.update_checks import CheckFunction
 from zealfie.sources.acquisition import ArchiveFetcher
 from zealfie.sources import SourceRefResolver
 
 from .presentation import action_enabled, runtime_summary
 from .product_card import ProductCard
 from .install_worker import create_install_thread
+from .update_bridge import UpdateResultBridge
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +69,14 @@ class ZeAlfieMainWindow(QMainWindow):
         resolver: SourceRefResolver | None = None,
         fetcher: ArchiveFetcher | None = None,
         work_root: Path | None = None,
+        check_fn: CheckFunction | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
         self._resolver = resolver
         self._fetcher = fetcher
         self._work_root = work_root
+        self._check_fn = check_fn
         self._cards: dict[str, ProductCard] = {}
         self._status_label: QLabel | None = None
         self._error_label: QLabel | None = None
@@ -82,8 +91,16 @@ class ZeAlfieMainWindow(QMainWindow):
         self._known_limitation_label: QLabel | None = None
         self._refresh_action: QAction | None = None
 
+        # M1-2E LOT E.4: read-only update-check coordination.
+        self._update_coordinator: UpdateCheckCoordinator | None = None
+        self._update_bridge = UpdateResultBridge(self)
+        self._update_bridge.update_result_ready.connect(self._on_update_result)
+
         self._build_ui()
         self._refresh()
+        # Start update checks after the initial refresh; non-blocking and
+        # a no-op when no check function / resolver is available.
+        self.start_update_checks()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -268,6 +285,63 @@ class ZeAlfieMainWindow(QMainWindow):
 
         # Update status bar
         self._update_status_bar(shell)
+
+    # ------------------------------------------------------------------
+    # M1-2E LOT E.4: Read-only update checks (informational only)
+    # ------------------------------------------------------------------
+
+    def _build_check_fn(self) -> CheckFunction | None:
+        """Resolve the update-check callable, if any is available.
+
+        Prefers the explicitly injected *check_fn*.  Otherwise, when a
+        resolver is wired and the service exposes ``check_product_update``,
+        builds a read-only check function from ``service + resolver``.
+        Returns ``None`` when no update checking is possible (no network,
+        no resolver) — cards then stay ``NOT_CHECKED`` (no label).
+        """
+        if self._check_fn is not None:
+            return self._check_fn
+        if self._resolver is not None and hasattr(
+            self._service, "check_product_update"
+        ):
+            resolver = self._resolver
+            service = self._service
+            return lambda product_id: service.check_product_update(
+                product_id, resolver=resolver
+            )
+        return None
+
+    def start_update_checks(self) -> None:
+        """Start read-only, non-blocking update checks for the visible cards.
+
+        Idempotent: if a coordinator is already running, this is a no-op.
+        Never blocks on network/resolution; results are delivered to cards
+        asynchronously via the GUI-thread bridge.
+        """
+        if self._update_coordinator is not None:
+            return
+        check_fn = self._build_check_fn()
+        if check_fn is None:
+            return
+        coordinator = UpdateCheckCoordinator(check_fn)
+        coordinator.add_observer(self._update_bridge.notify)
+        self._update_coordinator = coordinator
+        product_ids = tuple(self._cards.keys())
+        if product_ids:
+            coordinator.start(product_ids)
+
+    def _on_update_result(self, result: ProductUpdateResult) -> None:
+        """GUI-thread slot: route a coordinator result to the matching card."""
+        card = self._cards.get(result.product_id)
+        if card is not None:
+            card.set_update_status(result)
+
+    def _shutdown_update_checks(self) -> None:
+        """Stop the update-check coordinator without blocking the GUI thread."""
+        coordinator = self._update_coordinator
+        if coordinator is not None:
+            coordinator.shutdown(wait=False)
+            self._update_coordinator = None
 
     def _update_status_bar(self, shell: ProductShellState) -> None:
         if self._status_label:
@@ -460,6 +534,7 @@ class ZeAlfieMainWindow(QMainWindow):
                 )
             event.ignore()
             return
+        self._shutdown_update_checks()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
