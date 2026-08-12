@@ -211,6 +211,52 @@ class ProductDependencyAcquisitionError(RuntimeError):
     """
 
 
+class ProductUpdateNotApplicableError(RuntimeError):
+    """Raised when an update cannot be applied because the product is not
+    in an :attr:`UpdateStatus.UPDATE_AVAILABLE` state.
+
+    This is a **preflight** error: it is raised after the read-only update
+    check determined that no update should be applied, and before any
+    archive fetch, wheel build, deployment planning, apply, or
+    selection/provenance mutation.  No runtime, provenance, or selection
+    state is touched.
+
+    The original preflight result is carried on :attr:`result` (including
+    the check ``error`` for :attr:`UpdateStatus.CHECK_FAILED`), and the
+    check outcome on :attr:`status`, so callers can present a clear reason
+    without re-running the check.
+    """
+
+    def __init__(self, result: ProductUpdateResult) -> None:
+        self.result = result
+        self.status = result.status
+        super().__init__(_update_not_applicable_message(result))
+
+
+def _update_not_applicable_message(result: ProductUpdateResult) -> str:
+    """Return a stable, human-readable reason for a non-applicable update.
+
+    Never returns a bare enum value: every message names the product and
+    the concrete situation so API/CLI consumers can surface it directly.
+    """
+    product_id = result.product_id
+    status = result.status
+    if status is UpdateStatus.UP_TO_DATE:
+        return f"product {product_id!r} is already up to date"
+    if status is UpdateStatus.PROVENANCE_UNKNOWN:
+        return (
+            f"product {product_id!r} has no active installed provenance; "
+            "cannot determine an update target"
+        )
+    if status is UpdateStatus.CHECK_FAILED:
+        reason = result.error or "unknown check failure"
+        return f"update check failed for product {product_id!r}: {reason}"
+    if status is UpdateStatus.CHECKING:
+        return f"update check for product {product_id!r} is still in progress"
+    # UpdateStatus.NOT_CHECKED (and any future status) fall through here.
+    return f"product {product_id!r} has not been checked for updates"
+
+
 # ---------------------------------------------------------------------------
 # M1-2D.4.1B: Prepared product artifact
 # ---------------------------------------------------------------------------
@@ -1850,6 +1896,97 @@ class ZeAlfieService:
         return tuple(
             self.check_product_update(product_id, resolver=resolver)
             for product_id in product_ids
+        )
+
+    # ------------------------------------------------------------------
+    # M1-2E E.5: Transactional product update (service-layer convenience)
+    # ------------------------------------------------------------------
+
+    def update_product(
+        self,
+        product_id: str,
+        *,
+        resolver: SourceRefResolver,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        dependency_wheelhouse: Path | None = None,
+        probe_distribution=None,
+        progress_callback=None,
+    ) -> DeploymentResult:
+        """Update an already-managed installed product, transactionally.
+
+        This is a **narrow service-layer convenience/preflight** around the
+        existing read-only :meth:`check_product_update` and the existing
+        transactional :meth:`install_product` pipeline.  It is not a second
+        deployment engine and performs no source resolution, fetch, build,
+        planning, apply, or selection/provenance persistence of its own.
+
+        Behaviour
+        ---------
+
+        1. **Preflight (read-only):** read the product's active provenance
+           via :meth:`check_product_update` using the injected *resolver*.
+           This never mutates runtime, provenance, ``active.json``, or the
+           selection store.
+        2. If the status is :attr:`UpdateStatus.UPDATE_AVAILABLE`, delegate
+           to :meth:`install_product` with the exact same injected
+           ``resolver``/``fetcher``/``work_root``/``dependency_wheelhouse``/
+           ``probe_distribution``/``progress_callback`` arguments.  The
+           existing transactional install path performs prepare → dependency
+           acquire → plan → apply → selection → provenance exactly as for a
+           fresh install.
+        3. For any other status (``UP_TO_DATE``, ``PROVENANCE_UNKNOWN``,
+           ``CHECK_FAILED``, ``NOT_CHECKED``, or ``CHECKING``), raise
+           :class:`ProductUpdateNotApplicableError` **before** any fetch,
+           build, apply, or selection/provenance mutation.  Nothing is
+           installed or mutated on these paths.
+
+        Parameters
+        ----------
+        product_id:
+            The already-managed product to update.  Unknown ids yield
+            :attr:`UpdateStatus.PROVENANCE_UNKNOWN` (no active provenance)
+            and therefore :class:`ProductUpdateNotApplicableError` — no
+            provenance is ever invented.
+        resolver / fetcher / work_root / dependency_wheelhouse /
+        probe_distribution / progress_callback:
+            Identical semantics and injection points to
+            :meth:`install_product`; forwarded unchanged on the actual
+            update attempt.
+
+        Returns
+        -------
+        DeploymentResult
+            The exact result from the transactional deployment engine,
+            returned verbatim from :meth:`install_product`.
+
+        Raises
+        ------
+        ProductUpdateNotApplicableError
+            If the preflight status is anything other than
+            :attr:`UpdateStatus.UPDATE_AVAILABLE`.  Carries the preflight
+            :class:`ProductUpdateResult` and a human-readable reason.
+            Raised before any mutation.
+
+        Any exception raised by :meth:`install_product` during the actual
+        update attempt propagates unchanged — deployment/build/fetch
+        failures are not wrapped here.
+        """
+        preflight = self.check_product_update(product_id, resolver=resolver)
+        if preflight.status is not UpdateStatus.UPDATE_AVAILABLE:
+            raise ProductUpdateNotApplicableError(preflight)
+
+        # Actual update: reuse the existing transactional install pipeline.
+        # No direct apply_deployment_plan call — install_product owns the
+        # prepare → acquire → plan → apply → selection → provenance sequence.
+        return self.install_product(
+            product_id,
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+            dependency_wheelhouse=dependency_wheelhouse,
+            probe_distribution=probe_distribution,
+            progress_callback=progress_callback,
         )
 
     def bootstrap_desired_selection(self) -> DesiredProductSelection:

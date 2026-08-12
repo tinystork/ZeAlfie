@@ -22,11 +22,11 @@ Observed: HEAD matches `ef93f5c`. The worktree was not strictly clean because a 
 
 ## Lot status
 
-- E.1 Installed Product Provenance: delegated to Coco, pending review.
-- E.2 Read-only Update Detection: pending.
-- E.3 Non-blocking Startup Check: pending.
-- E.4 Product Shell Update UX: pending.
-- E.5 Transactional Update: pending.
+- E.1 Installed Product Provenance: ACCEPTED and locally committed (`1bcf205`).
+- E.2 Read-only Update Detection: ACCEPTED and locally committed (`4ffcdb7`).
+- E.3 Non-blocking Startup Check: ACCEPTED and locally committed (`19f807f`).
+- E.4 Product Shell Update UX: ACCEPTED and locally committed (`599f10d`).
+- E.5 Transactional Update: ACCEPTED and locally committed (this commit).
 - E.6 Real ZeSolver A→B witness: pending.
 - E.7 Documentation: pending.
 - E.8 Global Nono review: pending.
@@ -176,3 +176,41 @@ Logs:
 
 Notes:
 - First Nono E.4 audit stopped mid-control after targeted tests; retry did not return an exploitable visible verdict before orchestration recovery.
+
+
+## E.5 — Transactional Update API
+
+Status: ACCEPTED by Junior after Nono `ACCEPT_WITH_NOTES` review and locally committed.
+Commit: this commit.
+
+Implemented service-layer update API:
+- Added `ProductUpdateNotApplicableError`, exported from `zealfie.app`.
+- Added `ZeAlfieService.update_product(product_id, *, resolver, fetcher, work_root, dependency_wheelhouse=None, probe_distribution=None, progress_callback=None) -> DeploymentResult`.
+- The method performs a read-only preflight via `check_product_update(product_id, resolver=resolver)`.
+- Only `UPDATE_AVAILABLE` delegates to existing transactional `install_product(...)`.
+- All injected install arguments are forwarded unchanged: `resolver`, `fetcher`, `work_root`, `dependency_wheelhouse`, `probe_distribution`, `progress_callback`.
+- Non-applicable statuses (`UP_TO_DATE`, `PROVENANCE_UNKNOWN`, `CHECK_FAILED`, `NOT_CHECKED`, `CHECKING`) raise `ProductUpdateNotApplicableError` before archive fetch/build/deployment/apply/selection/provenance mutation.
+- `install_product` exceptions during the actual update attempt propagate unchanged.
+
+Transactional invariant:
+- No second deployment engine was introduced.
+- No direct `apply_deployment_plan` call was added to `update_product`.
+- Provenance persistence remains owned by the existing install/deployment path.
+- No GUI update button, no automatic update action, no CLI surprise.
+
+Validation:
+- `git diff --check`: pass.
+- `py_compile` changed/new E.5 files: pass.
+- `tests/test_product_update_apply.py -q`: `12 passed`.
+- Related targeted FAST subset: `81 passed`.
+- FAST: `1171 passed, 191 deselected, 5 warnings`.
+- Post-Nono optional hardening: added assertions that the exception carries the exact preflight result object and that monkeypatched `NOT_CHECKED`/`CHECKING` paths do not call the resolver; related subset remained `81 passed`.
+
+Nono review:
+- Verdict: `ACCEPT_WITH_NOTES`.
+- No blockers.
+- Notes accepted as non-blocking: `__all__` order cosmetic; TOCTOU between preflight and install is expected because `install_product` re-resolves like fresh install; required `fetcher`/`work_root` on non-applicable path is acceptable for the narrow API.
+
+Logs:
+- `AGENT/logs/m1_2e_e5_review_targeted_20260812T2123.log`
+- `AGENT/logs/m1_2e_e5_fast_20260812T2124.log`

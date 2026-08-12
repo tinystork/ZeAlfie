@@ -26,6 +26,7 @@ from .service import (
     ProductDependencyAcquisitionError,
     ProductDeploymentPlanningError,
     ProductInstallPreparationError,
+    ProductUpdateNotApplicableError,
     RemoteSourceUnavailableError,
     ZeAlfieService,
 )
@@ -113,6 +114,7 @@ __all__ = [
     "ProductCatalog",
     "ProductDescriptor",
     "ProductInstallPreparationError",
+    "ProductUpdateNotApplicableError",
     "ProductShellState",
     "ProductState",
     "ProductStateReasonCode",
