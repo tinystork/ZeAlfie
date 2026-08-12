@@ -26,6 +26,7 @@ from zealfie.app import (
     ProductShellState,
     ProductUpdateResult,
     UpdateCheckCoordinator,
+    UpdateStatus,
     ZeAlfieService,
 )
 from zealfie.app.update_checks import CheckFunction
@@ -87,6 +88,9 @@ class ZeAlfieMainWindow(QMainWindow):
         self._active_install_pid: str | None = None
         self._install_thread: object | None = None  # QThread
         self._install_worker: object | None = None  # InstallWorker (QObject)
+        # M1-2E E.6a: "install" or "update" — the operation the current
+        # worker thread is running (None when idle).  Both share one lock.
+        self._active_operation: str | None = None
         self._install_progress_bar: QProgressBar | None = None
         self._known_limitation_label: QLabel | None = None
         self._refresh_action: QAction | None = None
@@ -231,6 +235,8 @@ class ZeAlfieMainWindow(QMainWindow):
             self._cards[desc.product_id] = card
             # M1-2D.5: connect install_requested (instead of install_succeeded)
             card.install_requested.connect(self._on_install_requested)
+            # M1-2E E.6a: connect update_requested (same worker path)
+            card.update_requested.connect(self._on_update_requested)
             # Insert before the stretch at the end
             cards_layout.insertWidget(cards_layout.count() - 1, card)
 
@@ -386,6 +392,7 @@ class ZeAlfieMainWindow(QMainWindow):
 
         self._install_active = True
         self._active_install_pid = product_id
+        self._active_operation = "install"
         self._set_global_install_lock(True)
 
         # --- Update the requesting card to "in progress" ---
@@ -421,6 +428,63 @@ class ZeAlfieMainWindow(QMainWindow):
                 f"Installing {card._descriptor.display_name}\u2026"
             )
 
+    def _on_update_requested(self, product_id: str) -> None:
+        """Handle an update request from a product card (M1-2E E.6a).
+
+        Uses the exact same global lock and worker-thread plumbing as
+        install; the only difference is the worker operation mode
+        (``service.update_product``) and the user-facing wording.
+        """
+        if self._install_active:
+            logger.debug(
+                "Update request for %r ignored — transaction active for %r",
+                product_id, self._active_install_pid,
+            )
+            return
+
+        card = self._cards.get(product_id)
+        if card is None:
+            logger.error("Update requested for unknown product %r", product_id)
+            return
+
+        if self._resolver is None or self._fetcher is None or self._work_root is None:
+            card.set_update_error("update dependencies not configured")
+            logger.error("Update deps not wired for product %r", product_id)
+            return
+
+        self._install_active = True
+        self._active_install_pid = product_id
+        self._active_operation = "update"
+        self._set_global_install_lock(True)
+
+        card.set_update_in_progress(True)
+
+        self._install_thread, self._install_worker = create_install_thread(
+            product_id,
+            self._service,
+            resolver=self._resolver,  # type: ignore[arg-type]
+            fetcher=self._fetcher,    # type: ignore[arg-type]
+            work_root=self._work_root,  # type: ignore[arg-type]
+            operation="update",
+            parent=self,
+        )
+
+        worker = self._install_worker
+        worker.install_succeeded.connect(self._on_worker_success)
+        worker.install_failed.connect(self._on_worker_failure)
+        worker.progress.connect(card.set_install_progress)
+
+        thread = self._install_thread
+        thread.finished.connect(lambda: self._cleanup_thread(thread))
+
+        self._install_thread.start()
+        logger.info("Update worker started for %r", product_id)
+
+        if self._status_label:
+            self._status_label.setText(
+                f"Mise à jour de {card._descriptor.display_name}\u2026"
+            )
+
     def _set_global_install_lock(self, locked: bool) -> None:
         """Enable/disable install buttons, progress bar, and refresh action."""
         # Progress bar visibility
@@ -439,6 +503,8 @@ class ZeAlfieMainWindow(QMainWindow):
         for c in self._cards.values():
             if locked:
                 c._action_button.setEnabled(False)
+                if c._update_button is not None:
+                    c._update_button.setEnabled(False)
             else:
                 # Re-enable based on current state (unless awaiting refresh)
                 if c._awaiting_install_refresh:
@@ -449,13 +515,23 @@ class ZeAlfieMainWindow(QMainWindow):
                     )
                 else:
                     c._action_button.setEnabled(False)
+                c._update_update_button_enabled()
 
     def _on_worker_success(self, product_id: str) -> None:
-        """Install succeeded — collect authoritative state via refresh."""
-        logger.info("Install succeeded for %r; refreshing", product_id)
+        """Operation succeeded — collect authoritative state via refresh.
+
+        For updates, additionally re-runs the read-only update check so the
+        card's update display becomes authoritative (``Up to date``) without
+        any direct service script (M1-2E E.6a).
+        """
+        operation = self._active_operation
+        logger.info("%s succeeded for %r; refreshing", operation, product_id)
         card = self._cards.get(product_id)
         if card:
-            card._status_label.setText("Installation complete — refreshing\u2026")
+            if operation == "update":
+                card._status_label.setText("Update complete — refreshing\u2026")
+            else:
+                card._status_label.setText("Installation complete — refreshing\u2026")
 
         # Refresh to get authoritative state
         try:
@@ -480,15 +556,43 @@ class ZeAlfieMainWindow(QMainWindow):
 
         self._update_status_bar(shell)
 
+        if operation == "update":
+            self._recheck_update(product_id)
+
     def _on_worker_failure(self, product_id: str, message: str) -> None:
-        """Install failed — show error, allow retry."""
-        logger.warning("Install failed for %r: %s", product_id, message)
+        """Operation failed — show error, allow retry/launch when possible."""
+        operation = self._active_operation
+        logger.warning("%s failed for %r: %s", operation, product_id, message)
         card = self._cards.get(product_id)
         if card:
-            card.set_install_error(message)
+            if operation == "update":
+                card.set_update_error(message)
+            else:
+                card.set_install_error(message)
 
         if self._status_label:
-            self._status_label.setText("Installation failed")
+            self._status_label.setText(
+                "Update failed" if operation == "update" else "Installation failed"
+            )
+
+    def _recheck_update(self, product_id: str) -> None:
+        """Re-run the read-only update check after a successful update.
+
+        Prefers the existing non-blocking coordinator (results delivered to
+        the card via the GUI-thread bridge).  When no coordinator/check_fn is
+        wired, ``update_product`` has already applied the latest commit, so we
+        mark the card ``UP_TO_DATE`` directly rather than leave a stale
+        ``Update available`` label behind.
+        """
+        coordinator = self._update_coordinator
+        if coordinator is not None:
+            coordinator.start((product_id,))
+            return
+        card = self._cards.get(product_id)
+        if card is not None:
+            card.set_update_status(
+                ProductUpdateResult(product_id=product_id, status=UpdateStatus.UP_TO_DATE)
+            )
 
     def _cleanup_thread(self, thread) -> None:
         """Release install lock and schedule thread deletion.
@@ -511,6 +615,7 @@ class ZeAlfieMainWindow(QMainWindow):
         # Release install lock
         self._install_active = False
         self._active_install_pid = None
+        self._active_operation = None
         self._set_global_install_lock(False)
 
         # Schedule thread for deletion on the main event loop

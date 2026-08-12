@@ -28,6 +28,7 @@ from zealfie.app import (
     ProductDescriptor,
     ProductState,
     ProductUpdateResult,
+    UpdateStatus,
     ZeAlfieService,
 )
 from zealfie.sources.acquisition import ArchiveFetcher
@@ -62,6 +63,11 @@ class ProductCard(QFrame):
     # MainWindow coordinates the actual install in a worker thread.
     install_requested = Signal(str)  # product_id
 
+    # Emitted when the user clicks "Mettre à jour" (M1-2E E.6a).
+    # MainWindow coordinates the actual update in the same worker thread.
+    # The card never calls service.update_product directly.
+    update_requested = Signal(str)  # product_id
+
     def __init__(
         self,
         descriptor: ProductDescriptor,
@@ -85,6 +91,8 @@ class ProductCard(QFrame):
         self._awaiting_install_refresh: bool = False
         self._status_label: QLabel | None = None
         self._update_label: QLabel | None = None
+        self._update_button: QPushButton | None = None
+        self._update_available: bool = False
         self._progress_bar: QProgressBar | None = None
         self._action_button: QPushButton | None = None
         self._last_spawn_error: str | None = None
@@ -121,6 +129,15 @@ class ProductCard(QFrame):
         text = update_status_label(result)
         self._update_label.setText(text)
         self._update_label.setVisible(bool(text))
+
+        # Show an actionable update button only when an update is actually
+        # available.  The button never triggers the service directly — it
+        # emits ``update_requested`` and MainWindow coordinates the worker.
+        status = getattr(result, "status", None)
+        self._update_available = status is UpdateStatus.UPDATE_AVAILABLE
+        if self._update_button is not None:
+            self._update_button.setVisible(self._update_available)
+            self._update_update_button_enabled()
 
     @property
     def update_status_text(self) -> str:
@@ -190,6 +207,13 @@ class ProductCard(QFrame):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.addStretch()
 
+        self._update_button = QPushButton("Mettre à jour")
+        self._update_button.setObjectName("updateButton")
+        self._update_button.setMinimumWidth(130)
+        self._update_button.setVisible(False)
+        self._update_button.clicked.connect(self._on_update_clicked)
+        btn_layout.addWidget(self._update_button)
+
         self._action_button = QPushButton()
         self._action_button.setMinimumWidth(130)
         self._action_button.clicked.connect(self._on_action_clicked)
@@ -229,9 +253,12 @@ class ProductCard(QFrame):
                 )
             else:
                 self._action_button.setEnabled(False)
+        self._update_update_button_enabled()
 
     def _set_installing(self, installing: bool) -> None:
         self._installing = installing
+        if not installing and self._update_button is not None:
+            self._update_button.setText("Mettre à jour")
         if self._action_button:
             if self._state is not None:
                 self._action_button.setEnabled(
@@ -239,6 +266,15 @@ class ProductCard(QFrame):
                 )
             else:
                 self._action_button.setEnabled(False)
+        self._update_update_button_enabled()
+
+    def _update_update_button_enabled(self) -> None:
+        """Enable the update button only when idle and an update is available."""
+        if self._update_button is None:
+            return
+        self._update_button.setEnabled(
+            self._update_available and not self._spawning and not self._installing
+        )
 
     # ------------------------------------------------------------------
     # Action handling
@@ -298,6 +334,24 @@ class ProductCard(QFrame):
         logger.info("Requesting install for product %r", pid)
         self.install_requested.emit(pid)
 
+    def _on_update_clicked(self) -> None:
+        """Emit update_requested — MainWindow coordinates the worker thread.
+
+        Does NOT call service.update_product() directly (M1-2E E.6a).
+        """
+        pid = self._descriptor.product_id
+        if not self._update_available or self._spawning or self._installing:
+            return
+        self._last_spawn_error = None
+
+        if self._resolver is None or self._fetcher is None or self._work_root is None:
+            self._status_label.setText("Error: update dependencies not configured")
+            logger.error("Update deps not wired for product %r", pid)
+            return
+
+        logger.info("Requesting update for product %r", pid)
+        self.update_requested.emit(pid)
+
     # ------------------------------------------------------------------
     # Install state control (called by MainWindow, M1-2D.5)
     # ------------------------------------------------------------------
@@ -309,6 +363,20 @@ class ProductCard(QFrame):
             self._action_button.setText("Installation\u2026")
             self._status_label.setText(
                 f"Installation de {self._descriptor.display_name} en cours\u2026"
+            )
+            if self._progress_bar is not None:
+                self._progress_bar.setValue(0)
+                self._progress_bar.setFormat("")
+                self._progress_bar.setVisible(True)
+
+    def set_update_in_progress(self, in_progress: bool) -> None:
+        """Update card UI to reflect update in-progress / idle state."""
+        self._set_installing(in_progress)
+        if in_progress:
+            if self._update_button is not None:
+                self._update_button.setText("Mise à jour\u2026")
+            self._status_label.setText(
+                f"Mise à jour de {self._descriptor.display_name} en cours\u2026"
             )
             if self._progress_bar is not None:
                 self._progress_bar.setValue(0)
@@ -339,6 +407,16 @@ class ProductCard(QFrame):
         if len(message) > 120:
             message = message[:117] + "\u2026"
         self._status_label.setText(f"Install failed: {message}")
+        self._last_spawn_error = message
+        if self._progress_bar is not None:
+            self._progress_bar.setVisible(False)
+        self._set_installing(False)
+
+    def set_update_error(self, message: str) -> None:
+        """Show a user-friendly update error on the card (no traceback)."""
+        if len(message) > 120:
+            message = message[:117] + "\u2026"
+        self._status_label.setText(f"Update failed: {message}")
         self._last_spawn_error = message
         if self._progress_bar is not None:
             self._progress_bar.setVisible(False)

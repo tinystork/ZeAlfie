@@ -214,3 +214,40 @@ Nono review:
 Logs:
 - `AGENT/logs/m1_2e_e5_review_targeted_20260812T2123.log`
 - `AGENT/logs/m1_2e_e5_fast_20260812T2124.log`
+
+
+## E.6a — GUI Update Action (pre-witness wiring)
+
+Status: accepted by Junior after independent review + Nono audit; committed locally as E.6a pre-witness gate.
+
+Minimal Product Shell wiring so the E.6 real A→B witness can traverse the GUI
+path instead of a direct service script:
+
+- `ProductCard` gains a secondary, hidden-by-default `Mettre à jour` button
+  shown only when `UpdateStatus.UPDATE_AVAILABLE`.  It emits
+  `update_requested(product_id)` and never calls `service.update_product`
+  directly.  `Lancer` remains the separate primary action.
+- `InstallWorker`/`create_install_thread` gain a small `operation` parameter
+  (`"install"` default, `"update"` calls `service.update_product`).  Same
+  thread, same `progress` relay, no second framework.
+- `ZeAlfieMainWindow` coordinates update requests through the same global
+  install/update lock and worker plumbing.  Success refreshes authoritative
+  state and re-runs the read-only update check (or marks the card
+  `UP_TO_DATE` directly when no check function is wired).  Failure shows the
+  error, releases the lock, keeps `Lancer` usable and the update retryable.
+
+Validation (fakes only, no network/build/venv, `.smoke/` untouched):
+- `git diff --check`: pass.
+- `py_compile` changed/new files: pass.
+- `tests/test_gui_update_action.py -q`: `12 passed`.
+- Existing GUI subset (`test_gui_update_status.py`, `test_gui_install_async.py`,
+  `test_gui_install_progress.py`, `test_gui.py`): `96 passed`.
+- Related FAST subset (GUI/update/install-worker, `-m "not zealfie_slow and not integration"`):
+  `144 passed`.
+- Full FAST gate (`pytest -m "not zealfie_slow and not integration" -q`):
+  `1183 passed, 191 deselected, 5 warnings`.
+- Nono audit: `ACCEPT_WITH_NOTES`, no blocker; notes limited to UX polish around refresh-failure wording / async recheck window.
+
+Logs:
+- `AGENT/logs/m1_2e_e6a_gui_update_targeted_20260812T2148.log`
+- `AGENT/logs/m1_2e_e6a_gui_update_fast_20260812T2148.log`
