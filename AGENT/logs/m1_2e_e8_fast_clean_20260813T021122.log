@@ -1,0 +1,46 @@
+START=2026-08-13T02:11:22+02:00
+HEAD=d2ff44d6d22cce628b4531e192055e295d2ab409
+BRANCH=feature/m1-2e-managed-updates
+## FAST clean
+........................................................................ [  6%]
+........................................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+........................................................................ [ 30%]
+........................................................................ [ 36%]
+........................................................................ [ 42%]
+........................................................................ [ 48%]
+........................................................................ [ 54%]
+........................................................................ [ 60%]
+........................................................................ [ 66%]
+........................................................................ [ 73%]
+........................................................................ [ 79%]
+........................................................................ [ 85%]
+........................................................................ [ 91%]
+........................................................................ [ 97%]
+...............................                                          [100%]
+=============================== warnings summary ===============================
+tests/test_dependency_resolver.py::test_duplicate_metadata_blocks_via_resolver_path
+  /usr/lib/python3.13/zipfile/__init__.py:1655: UserWarning: Duplicate name: 'double_meta-1.0.0.dist-info/METADATA'
+    return self._open_to_write(zinfo, force_zip64=force_zip64)
+
+tests/test_releases.py::test_duplicate_metadata_zip_member_rejected
+  /usr/lib/python3.13/zipfile/__init__.py:1655: UserWarning: Duplicate name: 'test-1.0.dist-info/METADATA'
+    return self._open_to_write(zinfo, force_zip64=force_zip64)
+
+tests/test_releases.py::test_duplicate_entry_points_zip_member_rejected
+  /usr/lib/python3.13/zipfile/__init__.py:1655: UserWarning: Duplicate name: 'test-1.0.dist-info/entry_points.txt'
+    return self._open_to_write(zinfo, force_zip64=force_zip64)
+
+tests/test_source_acquisition.py::test_duplicate_file_entry_rejected
+  /usr/lib/python3.13/zipfile/__init__.py:1655: UserWarning: Duplicate name: 'a.txt'
+    return self._open_to_write(zinfo, force_zip64=force_zip64)
+
+tests/test_source_acquisition.py::test_duplicate_entry_three_identical_rejected
+  /usr/lib/python3.13/zipfile/__init__.py:1655: UserWarning: Duplicate name: 'x.py'
+    return self._open_to_write(zinfo, force_zip64=force_zip64)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1183 passed, 191 deselected, 5 warnings in 51.65s
+END=2026-08-13T02:12:14+02:00
+EXIT_CODE=0

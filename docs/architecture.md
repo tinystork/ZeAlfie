@@ -1294,3 +1294,78 @@ single real product install from the **Installer** button without
 blocking the Qt event loop, using the minimal QThread worker described
 above.  The backend service and runtime transaction engine remain
 synchronous and unchanged in shape.
+
+## M1-2E — Managed Product Updates
+
+M1-2E adds managed update semantics for products installed in the ZeAlfie
+shared runtime.  The design deliberately extends the existing install and
+transaction machinery instead of adding a second update engine.
+
+### Installed Provenance
+
+After a successful install or update, ZeAlfie records product provenance for
+the newly active runtime slot.  Provenance includes:
+
+* product id and installed version;
+* source owner/repository and the mutable requested ref (for example
+  ``tinystork/ZeSolver@main``);
+* the exact resolved commit SHA that was built;
+* the verified wheel SHA-256.
+
+The provenance is written only after runtime activation and selection
+persistence.  If provenance is missing or corrupt, update checks fail closed
+as ``PROVENANCE_UNKNOWN`` rather than inventing a source or SHA.
+
+### Read-only Update Detection
+
+``ZeAlfieService.check_product_update(product_id, resolver=...)`` compares the
+active installed provenance commit to the current commit resolved from the
+recorded requested ref.  It is read-only: it does not fetch archives, build
+wheels, mutate runtime slots, change selection, or launch products.
+
+The stable update statuses are:
+
+* ``NOT_CHECKED`` / ``CHECKING`` for UI lifecycle state;
+* ``UP_TO_DATE`` when installed and resolved commits match;
+* ``UPDATE_AVAILABLE`` when they differ;
+* ``CHECK_FAILED`` when resolution fails;
+* ``PROVENANCE_UNKNOWN`` when active provenance is unavailable.
+
+The Product Shell uses an ``UpdateCheckCoordinator`` to run these checks in the
+background and marshal results back to the GUI thread.
+
+### Transactional Update Action
+
+``ZeAlfieService.update_product(...)`` is a service-layer convenience around
+existing install mechanics:
+
+1. run the read-only preflight update check;
+2. only if the result is ``UPDATE_AVAILABLE``, delegate to
+   ``install_product(...)`` with the same resolver, fetcher, work root,
+   dependency wheelhouse, probe, and progress callback;
+3. for all other statuses, raise ``ProductUpdateNotApplicableError`` before
+   any fetch/build/apply/provenance mutation.
+
+The update path therefore reuses the same prepare → dependency acquisition →
+plan → offline runtime install → validation → activation → selection →
+provenance ordering as a fresh install.  There is no direct
+``apply_deployment_plan`` call and no separate update transaction engine.
+
+### Product Shell Update UX
+
+When the background check reports ``UPDATE_AVAILABLE``, a product card shows a
+secondary **Mettre à jour** button.  Clicking it:
+
+1. emits ``ProductCard.update_requested(product_id)``;
+2. ``ZeAlfieMainWindow`` acquires the same global install/update lock used by
+   installs;
+3. the existing one-shot Qt worker is created with ``operation="update"``;
+4. the worker calls synchronous ``service.update_product(...)`` off the GUI
+   thread and relays backend progress verbatim;
+5. success refreshes authoritative product state and re-runs the read-only
+   update check so the card returns to ``Up to date``;
+6. launch remains the primary **Lancer** action and still goes through
+   ``service.spawn_component``.
+
+``ProductCard`` never calls ``service.update_product`` directly.  The backend
+service remains Qt-free and synchronous.

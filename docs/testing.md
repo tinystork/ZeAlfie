@@ -177,3 +177,31 @@ réelle de sa frontière. Ne jamais remplacer une sentinelle ci-dessus par un fa
 - `norecursedirs = .git build dist AGENT .venv` : `AGENT/` contient des bundles
   de review dépaquetés (ex. `AGENT/review/.../tests/`) qui causaient des
   collisions de modules ; ils sont exclus de la collecte.
+
+## M1-2E real update witness
+
+The managed-update milestone has an explicit real witness beyond unit/FAST
+pytest gates.  It exercises the complete GUI update path for ZeSolver:
+
+1. bootstrap a ZeSolver runtime from a real older installable commit A;
+2. open the real Product Shell with a GitHub resolver/fetcher;
+3. wait for the background update check to show ``Update available``;
+4. click the Qt **Mettre à jour** button;
+5. verify the Qt worker calls ``service.update_product(...)`` off the GUI
+   thread;
+6. observe real GitHub source B, source build, PyPI dependency acquisition,
+   runtime lock/transaction, offline apply, validation, activation, provenance
+   update, and GUI refresh to ``Up to date``;
+7. click **Lancer** and verify ZeSolver spawns from the updated runtime slot.
+
+The accepted witness log for M1-2E is:
+
+```text
+AGENT/logs/m1_2e_e6_real_gui_update_witness_retry4_20260813T020441.log
+```
+
+It is a PASS only because the log contains both ``résumé final PASS`` and
+``EXIT_CODE=0``.  Earlier E.6 attempts are intentionally retained as diagnostic
+logs: one used the wrong interpreter, one selected a non-installable parent
+commit for A, and two exposed witness-script instrumentation mismatches rather
+than product failures.

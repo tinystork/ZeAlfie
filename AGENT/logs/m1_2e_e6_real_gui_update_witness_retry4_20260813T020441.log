@@ -1,0 +1,136 @@
+START=2026-08-13T02:04:41+02:00
+HEAD=d2ff44d6d22cce628b4531e192055e295d2ab409
+BRANCH=feature/m1-2e-managed-updates
+LOG=AGENT/logs/m1_2e_e6_real_gui_update_witness_retry4_20260813T020441.log
+COMMAND=.venv/bin/python AGENT/tmp/run_m1_2e_e6_update_gui_witness.py
+[2026-08-13 02:04:42] EVENT qapp_ready {"main_thread_id": 140113213700864}
+[2026-08-13 02:04:42] EVENT resolved_commits {"commit_a": "2a8806b2ffc265ca582ba105de88f5457578d078", "commit_b": "ea23f39be41c20ee627e4633a99654cbf892bcd7"}
+[2026-08-13 02:04:42] EVENT bootstrap_progress {"phase": "preparing", "percent": 0, "message": "Preparing ZeSolver…", "thread_id": 140113213894016}
+[2026-08-13 02:04:42] EVENT bootstrap_progress {"phase": "resolving_source", "percent": 5, "message": "Resolving ZeSolver…", "thread_id": 140113213894016}
+[2026-08-13 02:04:42] EVENT bootstrap_progress {"phase": "downloading_source", "percent": 12, "message": "Downloading ZeSolver…", "thread_id": 140113213890304}
+[2026-08-13 02:04:45] EVENT bootstrap_progress {"phase": "building_product", "percent": 20, "message": "Building ZeSolver…", "thread_id": 140113214105664}
+[2026-08-13 02:04:46] EVENT bootstrap_progress {"phase": "acquiring_dependencies", "percent": 30, "message": "Acquiring dependencies…", "thread_id": 140113213700288}
+[2026-08-13 02:04:56] EVENT bootstrap_progress {"phase": "planning_runtime", "percent": 45, "message": "Planning runtime…", "thread_id": 140113213700224}
+[2026-08-13 02:04:57] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 60, "message": "Installing runtime…", "thread_id": 140113212750144}
+[2026-08-13 02:05:00] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 63, "message": "Installing numpy…", "thread_id": 140113213967232}
+[2026-08-13 02:05:04] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 64, "message": "Installing astropy…", "thread_id": 140113213833984}
+[2026-08-13 02:05:08] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 65, "message": "Installing scipy…", "thread_id": 140113214103360}
+[2026-08-13 02:05:15] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 66, "message": "Installing scikit-image…", "thread_id": 140113214214656}
+[2026-08-13 02:05:16] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 67, "message": "Installing astroalign…", "thread_id": 140113213833984}
+[2026-08-13 02:05:17] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 68, "message": "Installing rich…", "thread_id": 140113214214656}
+[2026-08-13 02:05:18] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 69, "message": "Installing pyside6…", "thread_id": 140113213890304}
+[2026-08-13 02:05:19] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 70, "message": "Installing astropy-iers-data…", "thread_id": 140113212735552}
+[2026-08-13 02:05:20] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 71, "message": "Installing packaging…", "thread_id": 140113212740672}
+[2026-08-13 02:05:20] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 72, "message": "Installing pyerfa…", "thread_id": 140113212749056}
+[2026-08-13 02:05:21] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 73, "message": "Installing pyyaml…", "thread_id": 140113212735808}
+[2026-08-13 02:05:22] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 74, "message": "Installing networkx…", "thread_id": 140113213846208}
+[2026-08-13 02:05:24] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 76, "message": "Installing pillow…", "thread_id": 140113213890304}
+[2026-08-13 02:05:25] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 77, "message": "Installing imageio…", "thread_id": 140113213846208}
+[2026-08-13 02:05:26] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 78, "message": "Installing tifffile…", "thread_id": 140113212751168}
+[2026-08-13 02:05:27] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 79, "message": "Installing lazy-loader…", "thread_id": 140113214214656}
+[2026-08-13 02:05:28] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 80, "message": "Installing sep…", "thread_id": 140113214103360}
+[2026-08-13 02:05:29] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 81, "message": "Installing markdown-it-py…", "thread_id": 140113213571392}
+[2026-08-13 02:05:30] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 82, "message": "Installing pygments…", "thread_id": 140113213846208}
+[2026-08-13 02:05:31] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 83, "message": "Installing shiboken6…", "thread_id": 140113213890304}
+[2026-08-13 02:05:32] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 84, "message": "Installing pyside6-essentials…", "thread_id": 140113212635136}
+[2026-08-13 02:05:35] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 85, "message": "Installing pyside6-addons…", "thread_id": 140113213967744}
+[2026-08-13 02:05:41] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 86, "message": "Installing mdurl…", "thread_id": 140113213890304}
+[2026-08-13 02:05:43] EVENT bootstrap_progress {"phase": "installing_runtime", "percent": 87, "message": "Installing zesolver…", "thread_id": 140113212750144}
+[2026-08-13 02:05:45] EVENT bootstrap_progress {"phase": "validating", "percent": 90, "message": "Validating…", "thread_id": 140113212743744}
+[2026-08-13 02:05:45] EVENT bootstrap_progress {"phase": "activating", "percent": 95, "message": "Activating…", "thread_id": 140113213967744}
+[2026-08-13 02:05:48] EVENT bootstrap_progress {"phase": "completed", "percent": 100, "message": "ZeSolver is ready", "thread_id": 140113212745152}
+[2026-08-13 02:05:48] EVENT bootstrap_a_complete {"commit_a": "2a8806b2ffc265ca582ba105de88f5457578d078", "active_slot_id": "rt-da838f5fce76", "version": "1.0.0"}
+This plugin does not support propagateSizeHints()
+[2026-08-13 02:05:49] EVENT pre_gui_update_state {"button": "🚀 Lancer", "button_enabled": true, "update_button": "Mettre à jour", "update_button_enabled": true, "update_status_label": "Update available (ea23f39)", "update_status": "UPDATE_AVAILABLE", "installed_commit_sha": "2a8806b2ffc265ca582ba105de88f5457578d078", "latest_commit_sha": "ea23f39be41c20ee627e4633a99654cbf892bcd7"}
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+[2026-08-13 02:05:49] EVENT card_update_requested {"product_id": "zesolver", "thread_id": 140113214489344}
+[2026-08-13 02:05:49] EVENT service_update_product_start {"product_id": "zesolver", "thread_id": 140113212974784, "had_original_progress_callback": true}
+[2026-08-13 02:05:49] EVENT update_clicked {"update_button": "Mise à jour…", "install_active": true}
+[2026-08-13 02:05:49] EVENT busy_snapshot {"update_button": "Mise à jour…", "update_button_enabled": false, "launch_button": "🚀 Lancer", "launch_button_enabled": false, "progress_visible": true, "status_global": "Mise à jour de ZeSolver…", "card_status": "Mise à jour de ZeSolver en cours…", "refresh_enabled": false, "install_active": true}
+[2026-08-13 02:05:49] EVENT update_backend_progress {"t": 31242.850871312, "phase": "preparing", "percent": 0, "message": "Preparing ZeSolver…", "thread_id": 140113212974784}
+[2026-08-13 02:05:49] EVENT worker_progress_signal {"phase": "preparing", "percent": 0, "message": "Preparing ZeSolver…", "thread_id": 140113212974784, "card_status": "Mise à jour de ZeSolver en cours…"}
+[2026-08-13 02:05:49] EVENT update_backend_progress {"t": 31242.85105037, "phase": "resolving_source", "percent": 5, "message": "Resolving ZeSolver…", "thread_id": 140113212974784}
+[2026-08-13 02:05:49] EVENT worker_progress_signal {"phase": "resolving_source", "percent": 5, "message": "Resolving ZeSolver…", "thread_id": 140113212974784, "card_status": "Mise à jour de ZeSolver en cours…"}
+[2026-08-13 02:05:50] EVENT update_backend_progress {"t": 31243.092425824, "phase": "downloading_source", "percent": 12, "message": "Downloading ZeSolver…", "thread_id": 140113212974784}
+[2026-08-13 02:05:50] EVENT worker_progress_signal {"phase": "downloading_source", "percent": 12, "message": "Downloading ZeSolver…", "thread_id": 140113212974784, "card_status": "Resolving ZeSolver…"}
+[2026-08-13 02:05:51] EVENT update_backend_progress {"t": 31244.60040056, "phase": "building_product", "percent": 20, "message": "Building ZeSolver…", "thread_id": 140113212974784}
+[2026-08-13 02:05:51] EVENT worker_progress_signal {"phase": "building_product", "percent": 20, "message": "Building ZeSolver…", "thread_id": 140113212974784, "card_status": "Downloading ZeSolver…"}
+[2026-08-13 02:05:52] EVENT update_backend_progress {"t": 31245.729390359, "phase": "acquiring_dependencies", "percent": 30, "message": "Acquiring dependencies…", "thread_id": 140113212974784}
+[2026-08-13 02:05:52] EVENT worker_progress_signal {"phase": "acquiring_dependencies", "percent": 30, "message": "Acquiring dependencies…", "thread_id": 140113212974784, "card_status": "Building ZeSolver…"}
+[2026-08-13 02:05:59] EVENT update_backend_progress {"t": 31252.697823815, "phase": "planning_runtime", "percent": 45, "message": "Planning runtime…", "thread_id": 140113212974784}
+[2026-08-13 02:05:59] EVENT worker_progress_signal {"phase": "planning_runtime", "percent": 45, "message": "Planning runtime…", "thread_id": 140113212974784, "card_status": "Acquiring dependencies…"}
+[2026-08-13 02:06:01] EVENT update_backend_progress {"t": 31254.358308423, "phase": "installing_runtime", "percent": 60, "message": "Installing runtime…", "thread_id": 140113212974784}
+[2026-08-13 02:06:01] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 60, "message": "Installing runtime…", "thread_id": 140113212974784, "card_status": "Planning runtime…"}
+[2026-08-13 02:06:04] EVENT update_backend_progress {"t": 31257.477358162, "phase": "installing_runtime", "percent": 63, "message": "Installing numpy…", "thread_id": 140113212974784}
+[2026-08-13 02:06:04] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 63, "message": "Installing numpy…", "thread_id": 140113212974784, "card_status": "Installing runtime…"}
+[2026-08-13 02:06:08] EVENT update_backend_progress {"t": 31261.147349932, "phase": "installing_runtime", "percent": 64, "message": "Installing astropy…", "thread_id": 140113212974784}
+[2026-08-13 02:06:08] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 64, "message": "Installing astropy…", "thread_id": 140113212974784, "card_status": "Installing numpy…"}
+[2026-08-13 02:06:12] EVENT update_backend_progress {"t": 31265.895271687, "phase": "installing_runtime", "percent": 65, "message": "Installing scipy…", "thread_id": 140113212974784}
+[2026-08-13 02:06:12] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 65, "message": "Installing scipy…", "thread_id": 140113212974784, "card_status": "Installing astropy…"}
+[2026-08-13 02:06:19] EVENT update_backend_progress {"t": 31272.905208213, "phase": "installing_runtime", "percent": 66, "message": "Installing scikit-image…", "thread_id": 140113212974784}
+[2026-08-13 02:06:19] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 66, "message": "Installing scikit-image…", "thread_id": 140113212974784, "card_status": "Installing scipy…"}
+[2026-08-13 02:06:21] EVENT update_backend_progress {"t": 31274.277959396, "phase": "installing_runtime", "percent": 67, "message": "Installing astroalign…", "thread_id": 140113212974784}
+[2026-08-13 02:06:21] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 67, "message": "Installing astroalign…", "thread_id": 140113212974784, "card_status": "Installing scikit-image…"}
+[2026-08-13 02:06:21] EVENT update_backend_progress {"t": 31274.97935287, "phase": "installing_runtime", "percent": 68, "message": "Installing rich…", "thread_id": 140113212974784}
+[2026-08-13 02:06:21] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 68, "message": "Installing rich…", "thread_id": 140113212974784, "card_status": "Installing astroalign…"}
+[2026-08-13 02:06:23] EVENT update_backend_progress {"t": 31275.994484979, "phase": "installing_runtime", "percent": 69, "message": "Installing pyside6…", "thread_id": 140113212974784}
+[2026-08-13 02:06:23] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 69, "message": "Installing pyside6…", "thread_id": 140113212974784, "card_status": "Installing rich…"}
+[2026-08-13 02:06:23] EVENT update_backend_progress {"t": 31276.834772385, "phase": "installing_runtime", "percent": 70, "message": "Installing astropy-iers-data…", "thread_id": 140113212974784}
+[2026-08-13 02:06:23] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 70, "message": "Installing astropy-iers-data…", "thread_id": 140113212974784, "card_status": "Installing pyside6…"}
+[2026-08-13 02:06:24] EVENT update_backend_progress {"t": 31277.639973764, "phase": "installing_runtime", "percent": 71, "message": "Installing packaging…", "thread_id": 140113212974784}
+[2026-08-13 02:06:24] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 71, "message": "Installing packaging…", "thread_id": 140113212974784, "card_status": "Installing astropy-iers-data…"}
+[2026-08-13 02:06:25] EVENT update_backend_progress {"t": 31278.473207032, "phase": "installing_runtime", "percent": 72, "message": "Installing pyerfa…", "thread_id": 140113212974784}
+[2026-08-13 02:06:25] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 72, "message": "Installing pyerfa…", "thread_id": 140113212974784, "card_status": "Installing packaging…"}
+[2026-08-13 02:06:26] EVENT update_backend_progress {"t": 31279.290905392, "phase": "installing_runtime", "percent": 73, "message": "Installing pyyaml…", "thread_id": 140113212974784}
+[2026-08-13 02:06:26] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 73, "message": "Installing pyyaml…", "thread_id": 140113212974784, "card_status": "Installing pyerfa…"}
+[2026-08-13 02:06:27] EVENT update_backend_progress {"t": 31280.064181433, "phase": "installing_runtime", "percent": 74, "message": "Installing networkx…", "thread_id": 140113212974784}
+[2026-08-13 02:06:27] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 74, "message": "Installing networkx…", "thread_id": 140113212974784, "card_status": "Installing pyyaml…"}
+[2026-08-13 02:06:29] EVENT update_backend_progress {"t": 31282.29101534, "phase": "installing_runtime", "percent": 76, "message": "Installing pillow…", "thread_id": 140113212974784}
+[2026-08-13 02:06:29] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 76, "message": "Installing pillow…", "thread_id": 140113212974784, "card_status": "Installing networkx…"}
+[2026-08-13 02:06:30] EVENT update_backend_progress {"t": 31283.597967335, "phase": "installing_runtime", "percent": 77, "message": "Installing imageio…", "thread_id": 140113212974784}
+[2026-08-13 02:06:30] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 77, "message": "Installing imageio…", "thread_id": 140113212974784, "card_status": "Installing pillow…"}
+[2026-08-13 02:06:31] EVENT update_backend_progress {"t": 31284.698749746, "phase": "installing_runtime", "percent": 78, "message": "Installing tifffile…", "thread_id": 140113212974784}
+[2026-08-13 02:06:31] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 78, "message": "Installing tifffile…", "thread_id": 140113212974784, "card_status": "Installing imageio…"}
+[2026-08-13 02:06:32] EVENT update_backend_progress {"t": 31285.842815788, "phase": "installing_runtime", "percent": 79, "message": "Installing lazy-loader…", "thread_id": 140113212974784}
+[2026-08-13 02:06:32] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 79, "message": "Installing lazy-loader…", "thread_id": 140113212974784, "card_status": "Installing tifffile…"}
+[2026-08-13 02:06:33] EVENT update_backend_progress {"t": 31286.557185794, "phase": "installing_runtime", "percent": 80, "message": "Installing sep…", "thread_id": 140113212974784}
+[2026-08-13 02:06:33] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 80, "message": "Installing sep…", "thread_id": 140113212974784, "card_status": "Installing lazy-loader…"}
+[2026-08-13 02:06:34] EVENT update_backend_progress {"t": 31287.31052396, "phase": "installing_runtime", "percent": 81, "message": "Installing markdown-it-py…", "thread_id": 140113212974784}
+[2026-08-13 02:06:34] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 81, "message": "Installing markdown-it-py…", "thread_id": 140113212974784, "card_status": "Installing sep…"}
+[2026-08-13 02:06:35] EVENT update_backend_progress {"t": 31288.082418745, "phase": "installing_runtime", "percent": 82, "message": "Installing pygments…", "thread_id": 140113212974784}
+[2026-08-13 02:06:35] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 82, "message": "Installing pygments…", "thread_id": 140113212974784, "card_status": "Installing markdown-it-py…"}
+[2026-08-13 02:06:36] EVENT update_backend_progress {"t": 31289.657451893, "phase": "installing_runtime", "percent": 83, "message": "Installing shiboken6…", "thread_id": 140113212974784}
+[2026-08-13 02:06:36] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 83, "message": "Installing shiboken6…", "thread_id": 140113212974784, "card_status": "Installing pygments…"}
+[2026-08-13 02:06:37] EVENT update_backend_progress {"t": 31290.381134853, "phase": "installing_runtime", "percent": 84, "message": "Installing pyside6-essentials…", "thread_id": 140113212974784}
+[2026-08-13 02:06:37] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 84, "message": "Installing pyside6-essentials…", "thread_id": 140113212974784, "card_status": "Installing shiboken6…"}
+[2026-08-13 02:06:40] EVENT update_backend_progress {"t": 31293.886019502, "phase": "installing_runtime", "percent": 85, "message": "Installing pyside6-addons…", "thread_id": 140113212974784}
+[2026-08-13 02:06:40] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 85, "message": "Installing pyside6-addons…", "thread_id": 140113212974784, "card_status": "Installing pyside6-essentials…"}
+[2026-08-13 02:06:46] EVENT update_backend_progress {"t": 31299.463261883, "phase": "installing_runtime", "percent": 86, "message": "Installing mdurl…", "thread_id": 140113212974784}
+[2026-08-13 02:06:46] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 86, "message": "Installing mdurl…", "thread_id": 140113212974784, "card_status": "Installing pyside6-addons…"}
+[2026-08-13 02:06:49] EVENT update_backend_progress {"t": 31302.594212793, "phase": "installing_runtime", "percent": 87, "message": "Installing zesolver…", "thread_id": 140113212974784}
+[2026-08-13 02:06:49] EVENT worker_progress_signal {"phase": "installing_runtime", "percent": 87, "message": "Installing zesolver…", "thread_id": 140113212974784, "card_status": "Installing mdurl…"}
+[2026-08-13 02:06:51] EVENT update_backend_progress {"t": 31304.415400695, "phase": "validating", "percent": 90, "message": "Validating…", "thread_id": 140113212974784}
+[2026-08-13 02:06:51] EVENT worker_progress_signal {"phase": "validating", "percent": 90, "message": "Validating…", "thread_id": 140113212974784, "card_status": "Installing zesolver…"}
+[2026-08-13 02:06:51] EVENT update_backend_progress {"t": 31304.538378377, "phase": "activating", "percent": 95, "message": "Activating…", "thread_id": 140113212974784}
+[2026-08-13 02:06:51] EVENT worker_progress_signal {"phase": "activating", "percent": 95, "message": "Activating…", "thread_id": 140113212974784, "card_status": "Validating…"}
+[2026-08-13 02:06:53] EVENT update_backend_progress {"t": 31306.789365486, "phase": "completed", "percent": 100, "message": "ZeSolver is ready", "thread_id": 140113212974784}
+[2026-08-13 02:06:53] EVENT worker_progress_signal {"phase": "completed", "percent": 100, "message": "ZeSolver is ready", "thread_id": 140113212974784, "card_status": "Activating…"}
+[2026-08-13 02:06:53] EVENT service_update_product_end {"product_id": "zesolver", "thread_id": 140113212974784, "duration_s": 64.21591003600042}
+[2026-08-13 02:06:53] EVENT worker_update_succeeded_signal {"product_id": "zesolver", "thread_id": 140113212974784}
+[2026-08-13 02:06:53] EVENT worker_finished_signal {"thread_id": 140113212974784}
+[2026-08-13 02:06:54] EVENT responsiveness_summary {"timer_interval_ms": 100, "total_ticks": 643, "ticks_during_update": 643, "max_interval_s": 0.3697642059996724, "timer_fired_before_update_end": true, "update_product_calls": 1}
+This plugin does not support propagateSizeHints()
+[2026-08-13 02:06:55] EVENT post_update_final_state {"state_installed": true, "state_launchable": true, "button": "🚀 Lancer", "button_enabled": true, "update_button": "Mettre à jour", "update_status_label": "Up to date", "update_status": "UP_TO_DATE", "up_to_date_seen": true, "provenance_b": {"product_id": "zesolver", "version": "1.0.0", "source_owner": "tinystork", "source_repo": "ZeSolver", "requested_ref": "main", "commit_sha": "ea23f39be41c20ee627e4633a99654cbf892bcd7", "wheel_sha256": "fc4467b8fa2fd920039242f3ab69949809e70a5fef6b736c1fe289b512befe49"}, "active_slot_id": "rt-001e9a6db407", "progress_summary": {"count": 34, "phases": ["preparing", "resolving_source", "downloading_source", "building_product", "acquiring_dependencies", "planning_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "installing_runtime", "validating", "activating", "completed"], "percents": [0, 5, 12, 20, 30, 45, 60, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 90, 95, 100], "monotone": true, "bounded": true, "completed_count": 1, "last_phase": "completed", "last_percent": 100, "worker_signal_count": 34}}
+[2026-08-13 02:06:55] EVENT spawn_component_start {"product_id": "zesolver", "thread_id": 140113212973376}
+[2026-08-13 02:06:55] EVENT spawn_component_done {"product_id": "zesolver", "pid": 101793, "executable": "/home/tristan/.openclaw/workspace/projects/ZeAlfie/AGENT/tmp/m1_2e_e6_update_gui_witness/runtime_root/slots/rt-001e9a6db407/bin/zesolver"}
+2026-08-13 02:06:57,142 [INFO] Logging initialized — writing to zesolver.log
+2026-08-13 02:06:57,192 [INFO] UI_THEME_APPLIED mode=system effective=light source=startup
+2026-08-13 02:06:57,212 [INFO] GUI icon loaded: /home/tristan/.openclaw/workspace/projects/ZeAlfie/AGENT/tmp/m1_2e_e6_update_gui_witness/runtime_root/slots/rt-001e9a6db407/lib/python3.13/site-packages/zesolver/icon/ZSicon.png
+This plugin does not support propagateSizeHints()
+This plugin does not support raise()
+[2026-08-13 02:06:58] EVENT launch_checked {"component_id": "zesolver", "pid": 101793, "executable": "/home/tristan/.openclaw/workspace/projects/ZeAlfie/AGENT/tmp/m1_2e_e6_update_gui_witness/runtime_root/slots/rt-001e9a6db407/bin/zesolver", "command": ["/home/tristan/.openclaw/workspace/projects/ZeAlfie/AGENT/tmp/m1_2e_e6_update_gui_witness/runtime_root/slots/rt-001e9a6db407/bin/zesolver"], "alive_after_3s": true, "cmdline": "/home/tristan/.openclaw/workspace/projects/ZeAlfie/AGENT/tmp/m1_2e_e6_update_gui_witness/runtime_root/slots/rt-001e9a6db407/bin/python /home/tristan/.openclaw/workspace/projects/ZeAlfie/AGENT/tmp/m1_2e_e6_update_gui_witness/runtime_root/slots/rt-001e9a6db407/bin/zesolver", "env_subset": {"ZESOLVER_EMBEDDED_HOST": "1", "DISPLAY": ":1", "QT_QPA_PLATFORM": "offscreen"}, "embedded_host": "1"}
+[2026-08-13 02:06:58] EVENT teardown {"launch_stopped_or_zombie": true, "termination": {"pid": 101793, "state_before": "S (sleeping)", "state_after_term": "Z (zombie)", "state_after_kill": null, "running_after": false}, "install_active": false, "install_thread_none": true, "install_worker_none": true, "runtime_root_exists": true, "work_root_size": 5641910, "tmp_wheelhouses_new_under_slash_tmp": [], "tmp_wheelhouses_under_slash_tmp_total": 0}
+[2026-08-13 02:06:58] résumé final PASS
+[2026-08-13 02:06:58] result written: /home/tristan/.openclaw/workspace/projects/ZeAlfie/AGENT/tmp/m1_2e_e6_update_gui_witness/real_gui_update_witness_result.json
+EXIT_CODE=0

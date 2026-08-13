@@ -1,4 +1,4 @@
-M1-2E MANAGED PRODUCT UPDATES: IN PROGRESS
+M1-2E MANAGED PRODUCT UPDATES: COMPLETE
 
 ## Baseline
 
@@ -26,10 +26,12 @@ Observed: HEAD matches `ef93f5c`. The worktree was not strictly clean because a 
 - E.2 Read-only Update Detection: ACCEPTED and locally committed (`4ffcdb7`).
 - E.3 Non-blocking Startup Check: ACCEPTED and locally committed (`19f807f`).
 - E.4 Product Shell Update UX: ACCEPTED and locally committed (`599f10d`).
-- E.5 Transactional Update: ACCEPTED and locally committed (this commit).
-- E.6 Real ZeSolver A→B witness: pending.
-- E.7 Documentation: pending.
-- E.8 Global Nono review: pending.
+- E.5 Transactional Update: ACCEPTED and locally committed (`98ddac1`).
+- E.6a GUI Update Action: ACCEPTED and locally committed (`d2ff44d`).
+- E.6 Real ZeSolver A→B witness: PASS.
+- E.7 Documentation: completed.
+- E.8 Global Nono review: ACCEPT_WITH_NOTES, no blockers.
+- Final gates: targeted, FAST, and FULL passed.
 
 ## E.1 Installed Product Provenance
 
@@ -251,3 +253,94 @@ Validation (fakes only, no network/build/venv, `.smoke/` untouched):
 Logs:
 - `AGENT/logs/m1_2e_e6a_gui_update_targeted_20260812T2148.log`
 - `AGENT/logs/m1_2e_e6a_gui_update_fast_20260812T2148.log`
+
+
+## E.6 — Real GUI A→B Update Witness
+
+Status: PASS after E.6a GUI wiring and witness-script hardening.
+
+Accepted PASS log:
+
+- `AGENT/logs/m1_2e_e6_real_gui_update_witness_retry4_20260813T020441.log`
+
+PASS criteria satisfied:
+
+- Log contains `résumé final PASS`.
+- Log contains `EXIT_CODE=0`.
+- Real A→B commits resolved:
+  - A: `2a8806b2ffc265ca582ba105de88f5457578d078`.
+  - B: `ea23f39be41c20ee627e4633a99654cbf892bcd7`.
+- GUI pre-update state showed `Update available (ea23f39)` and enabled `Mettre à jour`.
+- Qt click emitted `card_update_requested` and started the existing worker with `operation="update"`.
+- Worker called `service.update_product(...)` exactly once, off the GUI thread.
+- Backend progress covered the real deployment phases: preparing, resolving_source, downloading_source, building_product, acquiring_dependencies, planning_runtime, installing_runtime, validating, activating, completed.
+- Runtime transaction activated new slot `rt-001e9a6db407`.
+- Post-update provenance recorded B with requested ref `main` and wheel SHA `fc4467b8fa2fd920039242f3ab69949809e70a5fef6b736c1fe289b512befe49`.
+- GUI refreshed to `Up to date` while the primary action was `Lancer`.
+- Clicking `Lancer` spawned ZeSolver from the updated runtime slot with `ZESOLVER_EMBEDDED_HOST=1`.
+- Teardown stopped the launched process, released worker/thread state, and left no new `/tmp/zealfie-acq-*` wheelhouses.
+
+Diagnostic attempts retained:
+
+- `AGENT/logs/m1_2e_e6_real_gui_update_witness_20260813T014142.log`: wrong interpreter (`PySide6` absent from system Python).
+- `AGENT/logs/m1_2e_e6_real_gui_update_witness_retry_20260813T014206.log`: automatically selected parent commit lacked expected `gui_scripts:zesolver` contract.
+- `AGENT/logs/m1_2e_e6_real_gui_update_witness_retry2_20260813T015941.log`: witness instrumentation used stale ProductCard private attribute.
+- `AGENT/logs/m1_2e_e6_real_gui_update_witness_retry3_20260813T020207.log`: witness assertion expected a retained private update result, while the card exposes user-facing update text/button state.
+
+## E.7 — Documentation
+
+Status: completed.
+
+Updated tracked docs:
+
+- `docs/architecture.md`: added M1-2E managed product update architecture: provenance, read-only update detection, transactional update action, and Product Shell update UX.
+- `docs/testing.md`: added the real E.6 GUI A→B witness contract and accepted PASS log.
+- This report: recorded E.6 PASS evidence and diagnostic attempts.
+
+
+## E.8 — Global Audit and Final Pre-FULL Gates
+
+Status: ACCEPT_WITH_NOTES; no blockers.
+
+Global audit summary:
+
+- Branch/head verified: `feature/m1-2e-managed-updates` at `d2ff44d6d22cce628b4531e192055e295d2ab409` before the E.7/E.8 documentation commit.
+- `.smoke/` remained untracked and untouched.
+- E.6 PASS log verified: `AGENT/logs/m1_2e_e6_real_gui_update_witness_retry4_20260813T020441.log` contains both `résumé final PASS` and `EXIT_CODE=0`.
+- ProductCard update decoupling verified: it emits `update_requested` and does not call `service.update_product` directly.
+- GUI path verified: `Update available` → `Mettre à jour` click → `ZeAlfieMainWindow` → existing QThread worker with `operation="update"` → `service.update_product(...)` → existing transaction path → refresh → `Up to date` → `Lancer`.
+- Backend invariant verified: `update_product` remains synchronous and Qt-free, performs read-only preflight, delegates only `UPDATE_AVAILABLE` to `install_product`, and does not introduce a second deployment engine or direct `apply_deployment_plan` call.
+- Documentation/report checked as matching the evidence; no overclaiming blocker found.
+
+Non-blocking notes:
+
+- A task brief mentioned `tests/test_product_provenance.py`; the real test file is `tests/test_provenance.py`.
+- Earlier E.4 review history remains documented as a Junior-final review because the Nono retry did not return an exploitable verdict at that time.
+
+Junior gates after E.7 docs:
+
+- `git diff --check`: pass.
+- `py_compile` changed code + witness script: pass.
+- Corrected targeted suite (`test_provenance.py`, `test_updates.py`, `test_update_checks.py`, `test_gui_update_status.py`, `test_product_update_apply.py`, `test_gui_update_action.py`): `90 passed`.
+- Related GUI/update/install subset: `131 passed`.
+- FAST clean (`-m "not zealfie_slow and not integration"`): `1183 passed, 191 deselected, 5 warnings`.
+
+Logs:
+
+- `AGENT/logs/m1_2e_e8_targeted_corrected_20260813T021102.log`
+- `AGENT/logs/m1_2e_e8_fast_clean_20260813T021122.log`
+
+Final FULL gate:
+
+- `AGENT/logs/m1_2e_e8_full_20260813T021254.log`: `1374 passed, 5 warnings in 569.85s (0:09:29)` and `END=2026-08-13T02:22:25+02:00`.
+- Note: the runtime-side tool call was interrupted after pytest completed, so this log does not contain the shell wrapper `EXIT_CODE=0` line. The pytest summary and `END` line are the retained source of truth for the completed FULL run.
+
+Additional clean GUI/update subset log:
+
+- `AGENT/logs/m1_2e_e8_gui_related_clean_20260813T022634.log`: `131 passed`, `EXIT_CODE=0`.
+
+## Final Bundle Status
+
+Status: ready for local commit and review bundle generation.
+
+No push performed. `.smoke/` remains untracked and preserved.
