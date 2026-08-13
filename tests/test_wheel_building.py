@@ -16,6 +16,12 @@ from zealfie.building import (
 )
 
 
+def _outdir_from_cmd(cmd: list[str]) -> str:
+    """Return the ``--outdir`` argument from a ``python -m build`` command."""
+    idx = cmd.index("--outdir")
+    return cmd[idx + 1]
+
+
 # ---------------------------------------------------------------------------
 # Wheel building
 # ---------------------------------------------------------------------------
@@ -185,8 +191,9 @@ def test_build_passes_no_isolation_flag(monkeypatch, tmp_path: Path) -> None:
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        # Pretend a single wheel was produced.
-        (tmp_path / "fake-0.0.1-py3-none-any.whl").write_text("")
+        # Pretend a single wheel was produced in the private outdir.
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "fake-0.0.1-py3-none-any.whl").write_text("")
         return sp_mod.CompletedProcess(
             args=cmd, returncode=0, stdout="", stderr=""
         )
@@ -209,7 +216,8 @@ def test_build_sets_pip_no_index_env(monkeypatch, tmp_path: Path) -> None:
     def fake_run(cmd, **kwargs):
         nonlocal captured_env
         captured_env = kwargs.get("env", {})
-        (tmp_path / "fake-0.0.1-py3-none-any.whl").write_text("")
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "fake-0.0.1-py3-none-any.whl").write_text("")
         return sp_mod.CompletedProcess(
             args=cmd, returncode=0, stdout="", stderr=""
         )
@@ -268,9 +276,11 @@ def test_build_multiple_wheels_raises(monkeypatch, tmp_path: Path) -> None:
     import subprocess as sp_mod
 
     def fake_run(cmd, **kwargs):
-        # Simulate build success but multiple wheels appear.
-        (tmp_path / "a-1.0.0-py3-none-any.whl").write_text("")
-        (tmp_path / "b-2.0.0-py3-none-any.whl").write_text("")
+        # Simulate build success but multiple wheels appear in the
+        # private outdir (discovered from the command, not tmp_path).
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "a-1.0.0-py3-none-any.whl").write_text("")
+        (Path(outdir) / "b-2.0.0-py3-none-any.whl").write_text("")
         return sp_mod.CompletedProcess(
             args=cmd, returncode=0, stdout="", stderr=""
         )
@@ -288,7 +298,15 @@ def test_build_multiple_wheels_raises(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_build_wheel_uses_neutral_cwd(monkeypatch, tmp_path: Path) -> None:
-    """build_wheel sets cwd to the output directory, not the repo root."""
+    """build_wheel sets cwd to a private child of the output directory.
+
+    The cwd must not be the repo root (a local ``build/`` directory
+    there would mask the PyPA ``build`` package).  It must also not be
+    the output directory itself, because stale wheels in a persistent
+    output dir would be discovered as current-build outputs.  The cwd
+    is a unique private child under the output dir, and ``--outdir``
+    points at that same child.
+    """
     import subprocess as sp_mod
 
     capture: dict = {}
@@ -296,7 +314,8 @@ def test_build_wheel_uses_neutral_cwd(monkeypatch, tmp_path: Path) -> None:
     def fake_run(cmd, **kwargs):
         capture["cwd"] = kwargs.get("cwd")
         capture["cmd"] = cmd
-        (tmp_path / "fake-0.0.1-py3-none-any.whl").write_text("")
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "fake-0.0.1-py3-none-any.whl").write_text("")
         return sp_mod.CompletedProcess(
             args=cmd, returncode=0, stdout="", stderr=""
         )
@@ -306,10 +325,18 @@ def test_build_wheel_uses_neutral_cwd(monkeypatch, tmp_path: Path) -> None:
     witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
     build_wheel(witness_dir, output_dir=tmp_path)
 
-    # The cwd must be the output directory, not left as the repo CWD.
-    assert capture["cwd"] == str(tmp_path), (
-        f"expected cwd={tmp_path}, got cwd={capture.get('cwd')}; "
-        f"a repo-local build/ directory would mask PyPA build"
+    # The cwd must be a private child of the output directory.
+    cwd = Path(capture["cwd"])
+    assert cwd.parent.resolve() == tmp_path.resolve(), (
+        f"expected cwd to be a child of {tmp_path}, got {cwd}"
+    )
+    assert cwd.name.startswith("zealfie-build-"), (
+        f"expected a private zealfie-build-* child, got {cwd.name}"
+    )
+    # --outdir must point at that same private child.
+    assert _outdir_from_cmd(capture["cmd"]) == str(cwd), (
+        f"expected --outdir to match cwd {cwd}, got "
+        f"{_outdir_from_cmd(capture['cmd'])!r}"
     )
 
 
@@ -400,9 +427,13 @@ def test_build_wheel_with_relative_source_from_repo_root(tmp_path, monkeypatch):
         f"got relative: {captured_source!r}"
     )
 
-    # The cwd must still be the neutral output directory.
-    assert captured_cwd == str(tmp_path), (
-        f"expected cwd={tmp_path}, got cwd={captured_cwd}"
+    # The cwd must still be a neutral private child of the output dir.
+    cwd = Path(captured_cwd)
+    assert cwd.parent.resolve() == tmp_path.resolve(), (
+        f"expected cwd to be a child of {tmp_path}, got {cwd}"
+    )
+    assert cwd.name.startswith("zealfie-build-"), (
+        f"expected a private zealfie-build-* child, got {cwd.name}"
     )
 
     assert result.is_file()
@@ -428,3 +459,135 @@ def test_build_wheel_with_relative_output_dir_from_repo_root(tmp_path, monkeypat
     assert wheel.parent == expected_output
     assert not (expected_output / "relative-output").exists()
     assert len(list(expected_output.glob("*.whl"))) == 1
+
+
+# ---------------------------------------------------------------------------
+# M1-2E Hardening — per-invocation output isolation (stale wheel immunity)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_previous_version_not_ambiguous(monkeypatch, tmp_path: Path) -> None:
+    """A stale previous version in a persistent output_dir is not counted."""
+    import subprocess as sp_mod
+
+    stale = tmp_path / "product-1.0.0.whl"
+    stale.write_bytes(b"old-1.0.0")
+
+    def fake_run(cmd, **kwargs):
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "product-1.0.1.whl").write_bytes(b"new-1.0.1")
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+
+    witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    wheel = build_wheel(witness_dir, output_dir=tmp_path)
+
+    assert wheel == tmp_path / "product-1.0.1.whl"
+    assert wheel.read_bytes() == b"new-1.0.1"
+    assert stale.read_bytes() == b"old-1.0.0"
+    # The private build child must have been cleaned up.
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith("zealfie-build-")]
+
+
+def test_unrelated_product_wheel_preserved(monkeypatch, tmp_path: Path) -> None:
+    """An unrelated product's wheel in output_dir is left untouched."""
+    import subprocess as sp_mod
+
+    unrelated = tmp_path / "zemosaic-0.9.0.whl"
+    unrelated.write_bytes(b"zemosaic")
+
+    def fake_run(cmd, **kwargs):
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "zesolver-1.0.0-py3-none-any.whl").write_bytes(b"zesolver")
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+
+    witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    wheel = build_wheel(witness_dir, output_dir=tmp_path)
+
+    assert wheel.name == "zesolver-1.0.0-py3-none-any.whl"
+    assert unrelated.read_bytes() == b"zemosaic"
+
+
+def test_same_filename_replaced_with_current_content(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A same-name artifact is replaced only after the current build validates."""
+    import subprocess as sp_mod
+
+    existing = tmp_path / "zesolver-1.0.1.whl"
+    existing.write_bytes(b"OLD-CONTENT")
+
+    def fake_run(cmd, **kwargs):
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "zesolver-1.0.1.whl").write_bytes(b"NEW-CONTENT")
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+
+    witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    wheel = build_wheel(witness_dir, output_dir=tmp_path)
+
+    # Returned artifact carries current content (not inferred from mtime).
+    assert wheel == tmp_path / "zesolver-1.0.1.whl"
+    assert wheel.read_bytes() == b"NEW-CONTENT"
+
+
+def test_multiple_current_wheels_error_ignores_stale(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """True multiple current-build wheels error; stale wheels outside the
+    private build dir must not be counted."""
+    import subprocess as sp_mod
+
+    stale = tmp_path / "stale-0.0.1.whl"
+    stale.write_bytes(b"stale")
+
+    def fake_run(cmd, **kwargs):
+        outdir = _outdir_from_cmd(cmd)
+        (Path(outdir) / "a-1.0.0-py3-none-any.whl").write_text("")
+        (Path(outdir) / "b-2.0.0-py3-none-any.whl").write_text("")
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+
+    witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    with pytest.raises(RuntimeError, match="ambiguous build result"):
+        build_wheel(witness_dir, output_dir=tmp_path)
+
+    assert stale.read_bytes() == b"stale"
+
+
+def test_build_failure_preserves_existing_artifacts(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A failing build leaves existing artifacts untouched and cleans the
+    private child directory."""
+    import subprocess as sp_mod
+
+    old = tmp_path / "product-1.0.0.whl"
+    old.write_bytes(b"old")
+
+    def fake_run(cmd, **kwargs):
+        return sp_mod.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="boom"
+        )
+
+    monkeypatch.setattr(sp_mod, "run", fake_run)
+
+    witness_dir = Path(__file__).resolve().parent / "fixtures" / "witness_component"
+    with pytest.raises(RuntimeError, match="wheel build failed"):
+        build_wheel(witness_dir, output_dir=tmp_path)
+
+    assert old.read_bytes() == b"old"
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith("zealfie-build-")]

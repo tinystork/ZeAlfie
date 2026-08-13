@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -40,17 +41,27 @@ def build_wheel(
 ) -> Path:
     """Build a wheel from a source directory, safe from CWD shadowing.
 
-    The subprocess runs from the output directory (or a temporary
-    directory) so that a local ``build/`` folder in the repo checkout
-    cannot mask the PyPA ``build`` package.  Python prepends the CWD
-    to ``sys.path``, and ``python -m build`` would otherwise find the
-    local directory instead of the installed ``build`` module.
+    The subprocess runs from a neutral directory so that a local
+    ``build/`` folder in the repo checkout cannot mask the PyPA
+    ``build`` package.  Python prepends the CWD to ``sys.path``, and
+    ``python -m build`` would otherwise find the local directory
+    instead of the installed ``build`` module.
 
     *source_dir* is resolved to an absolute path before changing the
     CWD, so relative source directories work correctly.
 
-    Uses ``python -m build --wheel`` in a temporary directory when
-    *output_dir* is not supplied, so the repository working tree is
+    When *output_dir* is supplied, the build runs inside a unique
+    private child directory of *output_dir* (not *output_dir* itself),
+    so stale wheels left over from previous builds can never be
+    mistaken for the current build's outputs.  Only after the current
+    build produces exactly one wheel is that wheel published to
+    *output_dir* (replacing a same-name artifact atomically via
+    ``os.replace``).  Existing artifacts in *output_dir* are left
+    untouched on every failure path.
+
+    When *output_dir* is not supplied, a private temporary directory
+    is used and the produced wheel path is returned in place (no
+    persistent-public publication), so the repository working tree is
     never polluted.
 
     Returns the path to the built wheel.
@@ -64,11 +75,17 @@ def build_wheel(
     source = source.resolve(strict=True)
 
     tmp_own = output_dir is None
-    if output_dir is None:
+    if tmp_own:
         out = Path(tempfile.mkdtemp(prefix="zealfie-build-")).resolve(strict=True)
+        publish_root = None
     else:
-        out = Path(output_dir).resolve(strict=False)
-        out.mkdir(parents=True, exist_ok=True)
+        publish_root = Path(output_dir).resolve(strict=False)
+        publish_root.mkdir(parents=True, exist_ok=True)
+        # Unique private child so discovery can never see stale wheels
+        # already living in the persistent output directory.
+        out = Path(
+            tempfile.mkdtemp(prefix="zealfie-build-", dir=str(publish_root))
+        )
     try:
         build_env = {
             "PIP_NO_INDEX": "1",
@@ -89,33 +106,43 @@ def build_wheel(
             capture_output=True,
             text=True,
             timeout=120,
-            env={**__import__("os").environ, **build_env},
+            env={**os.environ, **build_env},
         )
         if result.returncode != 0:
             raise RuntimeError(
                 f"wheel build failed for {source}:\n{result.stderr.strip()}"
             )
+
+        wheels = sorted(out.glob("*.whl"))
+        if len(wheels) == 0:
+            raise RuntimeError(
+                f"no wheel produced in {out}; "
+                f"build succeeded but did not generate a wheel file"
+            )
+        if len(wheels) > 1:
+            raise RuntimeError(
+                f"ambiguous build result: expected exactly one wheel from "
+                f"current build, found {len(wheels)} in {out}"
+            )
+
+        wheel = wheels[0]
+        if tmp_own:
+            # Private temp output: return the wheel in place; the caller
+            # owns its lifecycle (same behavior as before).
+            return wheel
+
+        # Publish the validated wheel into the persistent output dir,
+        # replacing only a same-name artifact after validation.
+        dest = publish_root / wheel.name
+        os.replace(str(wheel), str(dest))
+        return dest
     except Exception:
         if tmp_own:
             _remove_tree_safe(out)
         raise
-
-    wheels = sorted(out.glob("*.whl"))
-    if len(wheels) == 0:
-        if tmp_own:
+    finally:
+        if not tmp_own:
             _remove_tree_safe(out)
-        raise RuntimeError(
-            f"no wheel produced in {out}; "
-            f"build succeeded but did not generate a wheel file"
-        )
-    if len(wheels) > 1:
-        if tmp_own:
-            _remove_tree_safe(out)
-        raise RuntimeError(
-            f"ambiguous build: {len(wheels)} wheels produced in {out}; "
-            f"expected exactly one wheel"
-        )
-    return wheels[0]
 
 
 class WheelInspectionError(ValueError):
