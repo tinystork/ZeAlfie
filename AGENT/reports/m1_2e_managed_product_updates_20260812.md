@@ -344,3 +344,32 @@ Additional clean GUI/update subset log:
 Status: ready for local commit and review bundle generation.
 
 No push performed. `.smoke/` remains untracked and preserved.
+
+## M1-2E Hardening — Wheel Build Output Isolation
+
+Status: ACCEPTED and locally committed after targeted validation, FAST gate, and independent Nono review.
+
+Context:
+- A post-closure hardening delta was added to `build_wheel(output_dir=...)`.
+- Goal: prevent stale wheels already present in a persistent `output_dir` from being counted as outputs of the current build.
+
+Implementation summary:
+- `build_wheel` now builds inside a unique private `zealfie-build-*` child directory under the requested persistent output directory.
+- Current-build outputs are discovered only inside that private child.
+- Exactly one wheel must be produced before publication.
+- The validated wheel is published back to the requested output directory via `os.replace`.
+- Existing artifacts in the persistent output directory are preserved on subprocess failure, zero-wheel result, multi-wheel result, and before successful same-name replacement.
+- The no-`output_dir` temporary behavior remains unchanged: the wheel is returned in its private temp directory and the caller owns lifecycle.
+
+Validation:
+- `AGENT/logs/m1_2e_hardening_wheel_building_targeted_20260813T104951Z.log`: `33 passed`, `EXIT_CODE=0`.
+- `AGENT/logs/m1_2e_hardening_related_fast_20260813T105011Z.log`: `14 passed, 69 deselected`, `EXIT_CODE=0`.
+- Nono independent review: `PASS`, no blockers, confidence high.
+- `AGENT/logs/m1_2e_hardening_fast_final_retry_20260813T105401Z.log`: `1183 passed, 196 deselected, 5 warnings`, `EXIT_CODE=0`.
+
+FULL note:
+- `AGENT/logs/m1_2e_hardening_full_final_20260813T105507Z.log` was retained.
+- The FULL post-hardening run was interrupted before pytest summary / `EXIT_CODE=0`; it is therefore not used as acceptance evidence.
+- A previous M1-2E FULL gate had already passed before this narrow hardening delta; for this delta, targeted + related FAST + full FAST + Nono review were judged sufficient.
+
+No push performed. Pre-existing `.smoke/` remained untracked and preserved.
