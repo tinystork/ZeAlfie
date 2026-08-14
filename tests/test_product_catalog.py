@@ -1107,10 +1107,23 @@ def test_zesolver_has_remote_source():
     assert desc.remote_source.ref == "main"
 
 
+def test_zemosaic_has_remote_source():
+    """ZeMosaic's catalog entry carries the declared remote source
+    (M1-2F-P1: owner=tinystork, repo=zemosaic, ref=main for now)."""
+    catalog = default_catalog()
+    from zealfie.sources import RemoteSource
+    desc = catalog.get("zemosaic")
+    assert desc.remote_source is not None
+    assert isinstance(desc.remote_source, RemoteSource)
+    assert desc.remote_source.owner == "tinystork"
+    assert desc.remote_source.repo == "zemosaic"
+    assert desc.remote_source.ref == "main"
+
+
 def test_other_products_have_no_remote_source():
     """Products without explicit remote_source in TOML have None."""
     catalog = default_catalog()
-    for pid in ("zemosaic", "zeseestarstacker", "zeanalyser"):
+    for pid in ("zeseestarstacker", "zeanalyser"):
         desc = catalog.get(pid)
         assert desc.remote_source is None, f"{pid} should have no remote_source"
 

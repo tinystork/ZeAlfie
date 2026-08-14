@@ -22,6 +22,11 @@ display_name = "ZeMosaic"
 distribution_name = "ZeMosaic"
 description = "Mosaic planner and composer — stitch, align, and blend multi-panel deep sky images."
 
+[products.remote_source]
+owner = "tinystork"
+repo = "zemosaic"
+ref = "main"
+
 [[products.launch.entry_points]]
 group = "gui_scripts"
 name = "zemosaic"

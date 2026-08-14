@@ -117,6 +117,7 @@ from zealfie.runtime.planning import (
 )
 from zealfie.runtime.probe import probe_runtime_distribution
 from zealfie.sources import (
+    RemoteSource,
     ResolvedSource,
     SourceRefResolver,
     resolve_source,
@@ -474,6 +475,33 @@ class ZeAlfieService:
         )
         resolved = resolve_source(desc.remote_source, resolver=resolver)
 
+        # 4-12. Acquire, build, verify — shared with the KEEP path.
+        return self._prepare_product_artifact_from_resolved(
+            desc,
+            resolved,
+            fetcher=fetcher,
+            work_root=work_root,
+            progress_callback=progress_callback,
+        )
+
+    def _prepare_product_artifact_from_resolved(
+        self,
+        desc: ProductDescriptor,
+        resolved: ResolvedSource,
+        *,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        progress_callback=None,
+    ) -> PreparedProductArtifact:
+        """Acquire, build, and verify a wheel from an already-resolved source.
+
+        Shared by :meth:`prepare_product_artifact` (ref→SHA resolution) and
+        :meth:`prepare_product_artifact_at_commit` (exact SHA from active
+        provenance).  No ref resolution occurs here — the exact commit SHA
+        in *resolved* is authoritative and is passed verbatim to the
+        fetcher.  This is a read-only preparation step: the shared runtime
+        and selection store are never mutated.
+        """
         # 4. Ensure work_root exists.
         work_root.mkdir(parents=True, exist_ok=True)
 
@@ -557,6 +585,97 @@ class ZeAlfieService:
             wheel_path=wheel_path,
             verified_artifact=verified,
         )
+
+    def prepare_product_artifact_at_commit(
+        self,
+        product_id: str,
+        *,
+        commit_sha: str,
+        source_owner: str,
+        source_repo: str,
+        requested_ref: str,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        progress_callback=None,
+    ) -> PreparedProductArtifact:
+        """Prepare a verified wheel from an exact, immutable commit SHA.
+
+        This is the **KEEP materialization** path used when reconstructing
+        the full desired product set (M1-2F-P1).  Active provenance is
+        authoritative: the product is reacquired/rebuild from the exact
+        *commit_sha* — the mutable *requested_ref* is only recorded for
+        provenance, never re-resolved.  No resolver is invoked.
+
+        The ``resolved_source`` in the returned artifact carries the exact
+        *commit_sha* and preserves *requested_ref* so downstream provenance
+        persistence records the historical ref without treating it as a
+        mutable authority.
+
+        Raises
+        ------
+        UnknownProductError
+            If *product_id* is not in the product catalog.
+        AcquisitionError
+            If the fetcher fails or the archive is invalid.
+        ArtifactRejectionError
+            If the built wheel fails verification.
+        """
+        desc = self._catalog.get(product_id)
+        resolved = ResolvedSource(
+            source=RemoteSource(
+                owner=source_owner,
+                repo=source_repo,
+                ref=requested_ref,
+            ),
+            commit_sha=commit_sha,
+        )
+        return self._prepare_product_artifact_from_resolved(
+            desc,
+            resolved,
+            fetcher=fetcher,
+            work_root=work_root,
+            progress_callback=progress_callback,
+        )
+
+    def _prepare_keep_product_artifact(
+        self,
+        product_id: str,
+        provenance: ProductProvenance,
+        *,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        progress_callback=None,
+    ) -> PreparedProductArtifact:
+        """Materialize a KEEP product from active provenance (exact SHA).
+
+        Rebuilds the wheel from the exact ``provenance.commit_sha`` without
+        re-resolving ``provenance.requested_ref``.  The rebuilt wheel's
+        version must match ``provenance.version`` (active provenance is
+        authoritative for version); a mismatch fails honestly rather than
+        silently changing the recorded version.
+
+        A fresh ``wheel_sha256`` from the rebuild is recorded downstream by
+        the existing provenance persistence, so an artifact rebuilt from
+        the same source SHA is always described honestly.
+        """
+        prepared = self.prepare_product_artifact_at_commit(
+            product_id,
+            commit_sha=provenance.commit_sha,
+            source_owner=provenance.source_owner,
+            source_repo=provenance.source_repo,
+            requested_ref=provenance.requested_ref,
+            fetcher=fetcher,
+            work_root=work_root,
+            progress_callback=progress_callback,
+        )
+        if prepared.verified_artifact.version != provenance.version:
+            raise ProductInstallPreparationError(
+                f"KEEP product {product_id!r} rebuilt from commit "
+                f"{provenance.commit_sha!r} has version "
+                f"{prepared.verified_artifact.version!r}, expected "
+                f"{provenance.version!r} from active provenance"
+            )
+        return prepared
 
 
     # ------------------------------------------------------------------
@@ -1007,11 +1126,13 @@ class ZeAlfieService:
     # ------------------------------------------------------------------
 
 
-    # KNOWN DESIGN LIMITATION (M1-2D.4.2C): The acquired wheelhouse is
-    # scoped to a single product install.  Before installing a second
-    # remotely installable product into the same shared runtime, the
-    # full desired product set must be preserved/reconstructed so the
-    # resolver can rebuild a complete dependency lock.
+    # M1-2F-P1: full-state multi-product orchestration.  install_product
+    # reconstructs the complete desired product set (all KEEP active
+    # products plus the target product), prepares artifacts for every
+    # product, acquires ONE shared dependency wheelhouse, and applies ONE
+    # transaction so the candidate runtime contains the whole set.  It
+    # reuses the existing D.4.1B/D.4.1C/D.4.1D primitives; no second
+    # deployment engine is introduced.
     def install_product(
         self,
         product_id: str,
@@ -1023,19 +1144,35 @@ class ZeAlfieService:
         probe_distribution=None,
         progress_callback=None,
     ) -> DeploymentResult:
-        """Install a single product from its remote source.
+        """Install (or update) a product within the full desired product set.
 
-        Full orchestration: prepare → plan → apply → persist selection
-        only on success.  Delegates to:
+        Full-state orchestration:
+
+        1. Reconstruct the complete desired set as ``KEEP ∪ {product_id}``
+           where KEEP products come from active provenance (exact commit
+           SHA, never re-resolved) and the target is resolved from its
+           source ref.
+        2. Prepare a verified wheel artifact for every product in the set.
+        3. Acquire ONE combined dependency wheelhouse covering all products
+           (auto-acquired only when the caller does not supply
+           ``dependency_wheelhouse``).
+        4. Plan and apply a single transaction via
+           :meth:`install_prepared_product_deployment`, which resolves ONE
+           combined dependency lock, builds ONE candidate runtime, validates
+           every expected product, and atomically activates it.
+
+        Delegates to:
 
         * :meth:`prepare_product_artifact` (D.4.1B): remote source
-          resolution, fetch, build, and verification.
+          resolution, fetch, build, and verification — used for the target.
+        * :meth:`prepare_product_artifact_at_commit`: exact-SHA
+          reacquisition for KEEP products (no ref resolution).
         * :meth:`install_prepared_product_deployment` (D.4.1D):
           planning, transactional apply, and post-success selection
           persistence.
         * :class:`PipWheelhouseAcquirer` (D.4.2B → D.4.2C):
-          auto-acquires transitive dependencies when the caller does
-          not supply ``dependency_wheelhouse``.
+          auto-acquires a combined transitive dependency wheelhouse when
+          the caller does not supply ``dependency_wheelhouse``.
 
         This is service-layer orchestration only.  It must not duplicate
         source resolution, fetch, build, verify, planning, apply, or
@@ -1091,7 +1228,12 @@ class ZeAlfieService:
         CorruptSelectionError
             If the selection store file is present but unreadable.
         """
-        # --- 1. Determine whether to auto-acquire dependencies ---
+        # --- 0. Reconstruct the complete desired product set -------------
+        active_provenance, desired_ids = (
+            self._reconstruct_full_desired_product_ids(product_id)
+        )
+
+        # --- 1. Determine whether to auto-acquire dependencies ----------
         auto_acquire = dependency_wheelhouse is None
         auto_staging: Path | None = None
 
@@ -1103,24 +1245,36 @@ class ZeAlfieService:
         )
 
         try:
-            # --- 2. Prepare product artifact (D.4.1B) ---
-            if progress_callback is not None:
-                prepared = self.prepare_product_artifact(
-                    product_id,
-                    resolver=resolver,
-                    fetcher=fetcher,
-                    work_root=work_root,
-                    progress_callback=progress_callback,
-                )
-            else:
-                prepared = self.prepare_product_artifact(
-                    product_id,
-                    resolver=resolver,
-                    fetcher=fetcher,
-                    work_root=work_root,
-                )
+            # --- 2. Prepare artifacts for ALL desired products -----------
+            prepared: list[PreparedProductArtifact] = []
+            for pid in desired_ids:
+                if pid == product_id:
+                    if progress_callback is not None:
+                        pa = self.prepare_product_artifact(
+                            pid,
+                            resolver=resolver,
+                            fetcher=fetcher,
+                            work_root=work_root,
+                            progress_callback=progress_callback,
+                        )
+                    else:
+                        pa = self.prepare_product_artifact(
+                            pid,
+                            resolver=resolver,
+                            fetcher=fetcher,
+                            work_root=work_root,
+                        )
+                else:
+                    pa = self._prepare_keep_product_artifact(
+                        pid,
+                        active_provenance[pid],
+                        fetcher=fetcher,
+                        work_root=work_root,
+                        progress_callback=progress_callback,
+                    )
+                prepared.append(pa)
 
-            # --- 3. Auto-acquire dependency wheelhouse (D.4.2C) ---
+            # --- 3. Auto-acquire ONE combined dependency wheelhouse ------
             if auto_acquire:
                 try:
                     _emit_progress(
@@ -1129,15 +1283,16 @@ class ZeAlfieService:
                         PHASE_PERCENT[InstallPhase.ACQUIRING_DEPENDENCIES],
                         "Acquiring dependencies\u2026",
                     )
-                    desc = self._catalog.get(product_id)
-                    req = build_acquisition_request(
-                        prepared.wheel_path,
-                        active_extras=frozenset(desc.required_extras),
-                    )
                     auto_staging = _private_acquisition_staging(work_root)
-                    self._acquirer.acquire(
-                        req, staging_dir=auto_staging,
-                    )
+                    for pa in prepared:
+                        desc = self._catalog.get(pa.product_id)
+                        req = build_acquisition_request(
+                            pa.wheel_path,
+                            active_extras=frozenset(desc.required_extras),
+                        )
+                        self._acquirer.acquire(
+                            req, staging_dir=auto_staging,
+                        )
                     dependency_wheelhouse = auto_staging
                 except (FileNotFoundError, MetadataError, ExtraNotFound,
                         AcquisitionTransportError, OSError) as exc:
@@ -1148,13 +1303,13 @@ class ZeAlfieService:
             # --- 4. Plan + apply + persist selection (D.4.1D) ---
             if progress_callback is not None:
                 return self.install_prepared_product_deployment(
-                    [prepared],
+                    prepared,
                     dependency_wheelhouse=dependency_wheelhouse,
                     probe_distribution=probe_distribution,
                     progress_callback=progress_callback,
                 )
             return self.install_prepared_product_deployment(
-                [prepared],
+                prepared,
                 dependency_wheelhouse=dependency_wheelhouse,
                 probe_distribution=probe_distribution,
             )
@@ -1163,6 +1318,72 @@ class ZeAlfieService:
             # --- 5. Clean auto-acquired staging ---
             if auto_staging is not None:
                 _rmtree_best_effort(auto_staging)
+
+    def _reconstruct_full_desired_product_ids(
+        self,
+        target_product_id: str,
+    ) -> tuple[dict[str, ProductProvenance], list[str]]:
+        """Reconstruct the complete desired product set for a transaction.
+
+        The set is ``KEEP ∪ {target}`` where KEEP is every product with
+        active provenance except the target itself (the target is being
+        installed or updated, so it is re-materialized from its resolved
+        source rather than kept from provenance).
+
+        Active provenance is the sole authority for KEEP identity, version,
+        and exact commit SHA; the selection store is not consulted for
+        already-active products.  Deterministic ordering: KEEP ids sorted
+        by product id, target last.
+
+        **Fail-closed guard (M1-2F-P1-C1):** if the selection store
+        references any catalog-known product other than the target that has
+        no active provenance, full-state reconstruction would silently drop
+        it.  This is raised as :class:`ProductInstallPreparationError`
+        *before* any fetch, build, apply, selection, or provenance mutation.
+        Unknown selected ids are not raised here — they are a separate
+        pre-existing validation concern handled by
+        :meth:`install_prepared_product_deployment` (``UnknownProductError``).
+
+        Returns
+        -------
+        (active_provenance, desired_ids)
+            The active provenance mapping and the ordered desired product
+            id list (KEEP sorted, then target).
+
+        Raises
+        ------
+        ProductInstallPreparationError
+            If a selected, catalog-known non-target product lacks active
+            provenance (including a READY runtime whose active provenance
+            is empty after rollback).
+        """
+        active = self.active_provenance()
+        active_ids = frozenset(active)
+
+        # Guard against silently dropping a selected product that we cannot
+        # KEEP: only catalog-known selected ids can be part of a full-state
+        # runtime, so only those are checked for active-provenance coverage.
+        selected = self._selection_store.current_selection()
+        missing = frozenset(
+            pid for pid in selected.selected_product_ids
+            if pid != target_product_id
+            and pid in self._catalog
+            and pid not in active_ids
+        )
+        if missing:
+            raise ProductInstallPreparationError(
+                "cannot reconstruct full desired product set: selected "
+                f"product(s) {sorted(missing)!r} have no active provenance. "
+                "Exact active provenance (identity, version, commit SHA) is "
+                "required to preserve a full-state runtime; refusing to "
+                f"install target {target_product_id!r} rather than silently "
+                "drop selected product(s)."
+            )
+
+        keep_ids = sorted(
+            pid for pid in active if pid != target_product_id
+        )
+        return active, keep_ids + [target_product_id]
 
     # D.4.1A: Internal helpers with explicit registry
     # ------------------------------------------------------------------
