@@ -43,6 +43,7 @@ from zealfie.app.updates import (
     UpdateStatus,
     check_product_update as _check_product_update,
 )
+from zealfie.compatibility import CompatibilityReport, evaluate_wheels
 from zealfie.components.model import ComponentDefinition
 from zealfie.components.registry import ComponentRegistry, UnknownComponentError, default_registry
 from zealfie.dependencies import (
@@ -202,6 +203,71 @@ class ProductDeploymentPlanningError(RuntimeError):
     before any deployment planner call when the input is structurally
     invalid (empty, duplicates, mismatches).
     """
+
+
+class ProductCompatibilityBlockedError(RuntimeError):
+    """Raised when the prepared product candidate set fails the
+    interoperability compatibility gate before activation.
+
+    The gate evaluates the full prepared candidate set (all primary
+    prepared product wheels) *before* :func:`apply_deployment_plan`, so
+    the shared runtime and the selection store are never touched on this
+    path.  A blocking report is ``INCOMPATIBLE`` or
+    ``METADATA_UNAVAILABLE``.
+
+    Carries the full :class:`~zealfie.compatibility.CompatibilityReport`
+    (including stable machine-readable reason codes such as
+    ``API_VERSION_MISMATCH``, ``MISSING_REQUIRED_CAPABILITY``, or
+    ``PROVIDER_METADATA_UNAVAILABLE``) so callers can surface precise
+    diagnostics without re-running the evaluation.
+    """
+
+    def __init__(self, report: CompatibilityReport) -> None:
+        self.report = report
+        super().__init__(_compatibility_blocked_message(report))
+
+
+def _compatibility_blocked_message(report: CompatibilityReport) -> str:
+    """Return a stable, human-readable reason for a blocked candidate set.
+
+    Names the stable reason code for every blocking finding; it never
+    depends on long prose so API/CLI consumers can rely on the codes.
+    """
+    blocking = [f for f in report.findings if f.blocking]
+    if not blocking:
+        # Defensive: verdict is blocked but no blocking finding recorded.
+        return (
+            "compatibility gate blocked activation of the prepared product "
+            f"set (verdict {report.verdict.value!r})"
+        )
+    details = "; ".join(
+        f"{f.code}" + (f": {f.message}" if f.message else "")
+        for f in blocking
+    )
+    return (
+        "compatibility gate blocked activation of the prepared product set: "
+        f"{details}"
+    )
+
+
+def _surface_compatibility_diagnostics(report: CompatibilityReport) -> None:
+    """Log structured, non-blocking compatibility diagnostics.
+
+    Degraded / non-blocking findings (optional provider absent, optional
+    capability missing, unreferenced metadata-unavailable provider) are
+    informational only and never change control flow.  They are surfaced
+    via the logger with stable reason codes so they are never silently
+    swallowed.
+    """
+    non_blocking = [f for f in report.findings if not f.blocking]
+    if not non_blocking:
+        return
+    codes = sorted({f.code for f in non_blocking})
+    logger.info(
+        "compatibility gate: prepared candidate set is compatible with "
+        "non-blocking diagnostics (codes: %s)",
+        ", ".join(codes),
+    )
 
 
 class ProductDependencyAcquisitionError(RuntimeError):
@@ -795,6 +861,26 @@ class ZeAlfieService:
         )
 
 
+    def evaluate_prepared_compatibility(
+        self,
+        prepared_artifacts: Sequence[PreparedProductArtifact],
+    ) -> CompatibilityReport:
+        """Evaluate interoperability compatibility for the full prepared
+        candidate set before activation.
+
+        Scans only the **primary prepared product wheels** (never
+        transitive dependency wheels) using the product-agnostic
+        evaluator.  This is a pure read-only operation: no install, no
+        apply, no runtime mutation, no selection persistence.
+
+        The evaluator sees the *complete* prepared candidate set — not
+        just a single target product — so cross-product consumer/provider
+        requirements are evaluated against the whole candidate runtime.
+        """
+        wheel_paths = [pa.wheel_path for pa in prepared_artifacts]
+        return evaluate_wheels(wheel_paths)
+
+
 
 
     # ------------------------------------------------------------------
@@ -1000,6 +1086,20 @@ class ZeAlfieService:
         # ---- 6. Build catalog-derived ComponentRegistry --------------
 
         registry = self._registry_for_prepared_products(prepared_artifacts)
+
+
+        # ---- 6b. Compatibility gate (pre-activation, read-only) ------
+        # Evaluate the FULL prepared candidate set against the
+        # product-agnostic interoperability evaluator before any runtime
+        # mutation.  Blocking reports (INCOMPATIBLE or
+        # METADATA_UNAVAILABLE) fail closed here, before
+        # apply_deployment_plan and before selection persistence.
+        compatibility_report = self.evaluate_prepared_compatibility(
+            prepared_artifacts
+        )
+        if compatibility_report.blocked:
+            raise ProductCompatibilityBlockedError(compatibility_report)
+        _surface_compatibility_diagnostics(compatibility_report)
 
 
 
