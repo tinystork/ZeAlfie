@@ -75,6 +75,11 @@ from zealfie.products.catalog import (
     ProductDescriptor,
     default_catalog,
 )
+from zealfie.products.policy import (
+    ProductPolicy,
+    ProductPolicyStore,
+    effective_ref,
+)
 from zealfie.products.selection import (
     CorruptSelectionError,
     DesiredProductSelection,
@@ -407,6 +412,7 @@ class ZeAlfieService:
         selection_store: SelectionStore | None = None,
         acquirer: object | None = None,
         provenance_store: ProductProvenanceStore | None = None,
+        policy_store: ProductPolicyStore | None = None,
     ) -> None:
         self._registry = registry or default_registry()
         self._runtime = runtime or SharedRuntime()
@@ -429,6 +435,12 @@ class ZeAlfieService:
             self._provenance_store = (
                 ProductProvenanceStore(layout) if layout is not None else None
             )
+        # M1-2F Phase 3 (F.2): per-product channel/follow/pin configuration.
+        # Explicit injection wins; otherwise a default store reads the
+        # platform-appropriate user config path lazily.
+        self._policy_store = (
+            policy_store if policy_store is not None else ProductPolicyStore()
+        )
 
     # ------------------------------------------------------------------
     # Release directory convention
@@ -472,6 +484,7 @@ class ZeAlfieService:
         fetcher: ArchiveFetcher,
         work_root: Path,
         progress_callback=None,
+        source_ref: str | None = None,
     ) -> PreparedProductArtifact:
         """Prepare a verified wheel artifact from a product's remote source.
 
@@ -501,6 +514,12 @@ class ZeAlfieService:
             Optional ``Callable[[InstallProgress], None]`` observing the
             resolve / download / build boundaries.  Observational only;
             it never affects behaviour or results.
+        source_ref:
+            Optional ref override (M1-2F Phase 3).  When provided, it
+            replaces the catalog descriptor's ``remote_source.ref`` for the
+            resolve step (e.g. the channel's mapped ref for a ``follow``
+            policy).  Defaults to ``None`` → resolve the catalog's
+            ``remote_source.ref`` exactly as before.
 
         Returns
         -------
@@ -539,7 +558,14 @@ class ZeAlfieService:
             PHASE_PERCENT[InstallPhase.RESOLVING_SOURCE],
             f"Resolving {desc.display_name}\u2026",
         )
-        resolved = resolve_source(desc.remote_source, resolver=resolver)
+        source = desc.remote_source
+        if source_ref is not None:
+            source = RemoteSource(
+                owner=source.owner,
+                repo=source.repo,
+                ref=source_ref,
+            )
+        resolved = resolve_source(source, resolver=resolver)
 
         # 4-12. Acquire, build, verify — shared with the KEEP path.
         return self._prepare_product_artifact_from_resolved(
@@ -742,6 +768,66 @@ class ZeAlfieService:
                 f"{provenance.version!r} from active provenance"
             )
         return prepared
+
+    def _prepare_target_product_artifact(
+        self,
+        product_id: str,
+        policy: ProductPolicy,
+        *,
+        resolver: SourceRefResolver,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        progress_callback=None,
+    ) -> PreparedProductArtifact:
+        """Prepare the target product's artifact according to its policy.
+
+        * ``follow`` → resolve the channel's mapped ref (via
+          :func:`~zealfie.products.policy.effective_ref`) exactly like the
+          existing ``prepare_product_artifact`` ref→SHA path.
+        * ``pin`` → prepare from the exact ``pin_sha`` without invoking the
+          resolver at all (no mutable-ref resolution, no network).  This
+          reuses :meth:`prepare_product_artifact_at_commit`, so provenance
+          records ``requested_ref = pin_sha`` and ``commit_sha = pin_sha``.
+
+        Raises
+        ------
+        RemoteSourceUnavailableError
+            If the product descriptor has no ``remote_source`` (the owner/
+            repo needed to fetch/build are unavailable).
+        """
+        desc = self._catalog.get(product_id)
+        if desc.remote_source is None:
+            raise RemoteSourceUnavailableError(
+                f"product {product_id!r} has no remote source — "
+                f"cannot prepare from remote"
+            )
+
+        if policy.policy == "pin":
+            kwargs: dict = dict(
+                commit_sha=policy.pin_sha,
+                source_owner=desc.remote_source.owner,
+                source_repo=desc.remote_source.repo,
+                requested_ref=policy.pin_sha,
+                fetcher=fetcher,
+                work_root=work_root,
+            )
+            if progress_callback is not None:
+                kwargs["progress_callback"] = progress_callback
+            return self.prepare_product_artifact_at_commit(
+                product_id,
+                **kwargs,
+            )
+
+        ref = effective_ref(policy)
+        kwargs = dict(resolver=resolver, fetcher=fetcher, work_root=work_root)
+        if progress_callback is not None:
+            kwargs["progress_callback"] = progress_callback
+        if ref != desc.remote_source.ref:
+            kwargs["source_ref"] = ref
+        return self.prepare_product_artifact(
+            product_id,
+            **kwargs,
+        )
 
 
     # ------------------------------------------------------------------
@@ -1349,21 +1435,14 @@ class ZeAlfieService:
             prepared: list[PreparedProductArtifact] = []
             for pid in desired_ids:
                 if pid == product_id:
-                    if progress_callback is not None:
-                        pa = self.prepare_product_artifact(
-                            pid,
-                            resolver=resolver,
-                            fetcher=fetcher,
-                            work_root=work_root,
-                            progress_callback=progress_callback,
-                        )
-                    else:
-                        pa = self.prepare_product_artifact(
-                            pid,
-                            resolver=resolver,
-                            fetcher=fetcher,
-                            work_root=work_root,
-                        )
+                    pa = self._prepare_target_product_artifact(
+                        pid,
+                        self._policy_store.policy_for(pid),
+                        resolver=resolver,
+                        fetcher=fetcher,
+                        work_root=work_root,
+                        progress_callback=progress_callback,
+                    )
                 else:
                     pa = self._prepare_keep_product_artifact(
                         pid,
@@ -2193,6 +2272,7 @@ class ZeAlfieService:
             product_id,
             self.product_provenance(product_id),
             resolver=resolver,
+            policy=self._policy_store.policy_for(product_id),
         )
 
     def check_updates(

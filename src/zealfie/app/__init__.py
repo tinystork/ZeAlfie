@@ -86,6 +86,16 @@ from zealfie.products.selection import (
     materialize_desired_components,
     validate_selection_against_catalog,
 )
+from zealfie.products.policy import (
+    CorruptProductPolicyError,
+    DEFAULT_CHANNEL_REFS,
+    ProductPolicy,
+    ProductPolicyError,
+    ProductPolicyStore,
+    default_product_policy,
+    default_product_policy_path,
+    effective_ref,
+)
 
 # M1-2B: SpawnedLaunch re-exported so that GUI consumers import from the
 # application layer.
@@ -95,6 +105,8 @@ __all__ = [
     "bootstrap_selection_from_legacy_registry",
     "ComponentNotInstalledError",
     "CorruptSelectionError",
+    "CorruptProductPolicyError",
+    "DEFAULT_CHANNEL_REFS",
     "DesiredProductSelection",
     "FULL_NAME",
     "InstallPhase",
@@ -116,6 +128,9 @@ __all__ = [
     "ProductCatalog",
     "ProductDescriptor",
     "ProductInstallPreparationError",
+    "ProductPolicy",
+    "ProductPolicyError",
+    "ProductPolicyStore",
     "ProductUpdateNotApplicableError",
     "ProductShellState",
     "ProductState",
@@ -137,7 +152,10 @@ __all__ = [
     "check_product_update",
     "collect_status",
     "default_selection_path",
+    "default_product_policy",
+    "default_product_policy_path",
     "desired_component_registry",
+    "effective_ref",
     "format_component_status",
     "format_status",
     "interpolate_percent",

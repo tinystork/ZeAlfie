@@ -42,6 +42,16 @@ from .state import (
     ProductState,
     ProductStateReasonCode,
 )
+from .policy import (
+    CorruptProductPolicyError,
+    DEFAULT_CHANNEL_REFS,
+    ProductPolicy,
+    ProductPolicyError,
+    ProductPolicyStore,
+    default_product_policy,
+    default_product_policy_path,
+    effective_ref,
+)
 
 # M1-2D.1: Re-export remote source types so consumers import from the
 # products package, keeping the sources module an implementation detail.
@@ -58,11 +68,16 @@ from zealfie.sources import (
 __all__ = [
     "bootstrap_selection_from_legacy_registry",
     "CorruptSelectionError",
+    "CorruptProductPolicyError",
+    "DEFAULT_CHANNEL_REFS",
     "DesiredProductSelection",
     "InvalidRemoteSourceError",
     "ManagedStatus",
     "ProductCatalog",
     "ProductDescriptor",
+    "ProductPolicy",
+    "ProductPolicyError",
+    "ProductPolicyStore",
     "ProductShellState",
     "ProductState",
     "ProductStateReasonCode",
@@ -75,8 +90,11 @@ __all__ = [
     "SourceResolutionError",
     "UnknownProductError",
     "default_catalog",
+    "default_product_policy",
+    "default_product_policy_path",
     "default_selection_path",
     "desired_component_registry",
+    "effective_ref",
     "materialize_desired_components",
     "resolve_source",
     "validate_selection_against_catalog",

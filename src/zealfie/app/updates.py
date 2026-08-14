@@ -32,6 +32,11 @@ from enum import StrEnum
 
 from zealfie.runtime.provenance import ProductProvenance
 from zealfie.sources import RemoteSource, SourceRefResolver, resolve_source
+from zealfie.products.policy import (
+    ProductPolicy,
+    default_product_policy,
+    effective_ref,
+)
 
 
 class UpdateStatus(StrEnum):
@@ -94,6 +99,7 @@ def check_product_update(
     provenance: ProductProvenance | None,
     *,
     resolver: SourceRefResolver,
+    policy: ProductPolicy | None = None,
 ) -> ProductUpdateResult:
     """Check *product_id* for an update, given its active provenance.
 
@@ -106,9 +112,23 @@ def check_product_update(
 
     1. ``provenance is None`` → :attr:`UpdateStatus.PROVENANCE_UNKNOWN`
        (no resolver call, no invented SHA).
-    2. The requested source is reconstructed from the provenance and
-       resolved via :func:`zealfie.sources.resolve_source`.
-    3. If resolution raises → :attr:`UpdateStatus.CHECK_FAILED` with the
+    2. The effective requested ref is chosen:
+
+       * ``policy is None`` (backward-compatible default) → the installed
+         provenance's ``requested_ref`` is re-resolved, exactly as before
+         the channel/pin model existed.
+       * ``policy.policy == "pin"`` → the pinned ``pin_sha`` is compared
+         with the installed commit SHA **without any resolver call** (no
+         mutable-ref resolution, no network).  Equal → ``UP_TO_DATE``;
+         different → ``UPDATE_AVAILABLE``.  A missing/unusable ``pin_sha``
+         → ``CHECK_FAILED`` (defensive; ``ProductPolicy`` rejects an
+         unusable ``pin_sha`` at construction, and the policy store fails
+         closed at load, so this cannot occur in practice).
+       * ``policy.policy == "follow"`` → the channel's mapped ref
+         (:func:`zealfie.products.policy.effective_ref`) is resolved.
+    3. For the follow path, the requested source is reconstructed and
+       resolved via :func:`zealfie.sources.resolve_source`; if resolution
+       raises → :attr:`UpdateStatus.CHECK_FAILED` with the
        reason in ``error`` and **no** ``latest_commit_sha``.
     4. Resolved SHA == installed SHA → :attr:`UpdateStatus.UP_TO_DATE`.
     5. Resolved SHA != installed SHA → :attr:`UpdateStatus.UPDATE_AVAILABLE`
@@ -123,11 +143,58 @@ def check_product_update(
             status=UpdateStatus.PROVENANCE_UNKNOWN,
         )
 
+    effective_policy = (
+        policy if policy is not None else default_product_policy(product_id)
+    )
+
+    # Pin: the pinned SHA is the requested ref.  Never resolve a mutable
+    # ref — the resolver is not invoked (no network).
+    if effective_policy.policy == "pin":
+        pin_sha = effective_policy.pin_sha
+        if pin_sha is None:
+            return ProductUpdateResult(
+                product_id=product_id,
+                status=UpdateStatus.CHECK_FAILED,
+                installed_commit_sha=provenance.commit_sha,
+                source_owner=provenance.source_owner,
+                source_repo=provenance.source_repo,
+                requested_ref=None,
+                version=provenance.version,
+                error=(
+                    "pin policy requires a valid pin_sha (40-hex); "
+                    "refusing to resolve a mutable ref"
+                ),
+            )
+        status = (
+            UpdateStatus.UP_TO_DATE
+            if pin_sha == provenance.commit_sha
+            else UpdateStatus.UPDATE_AVAILABLE
+        )
+        return ProductUpdateResult(
+            product_id=product_id,
+            status=status,
+            installed_commit_sha=provenance.commit_sha,
+            latest_commit_sha=pin_sha,
+            source_owner=provenance.source_owner,
+            source_repo=provenance.source_repo,
+            requested_ref=pin_sha,
+            version=provenance.version,
+        )
+
+    # Follow: resolve the channel's mapped ref.  When no policy is given
+    # (``policy is None``), default to the installed provenance's
+    # ``requested_ref`` so unconfigured callers behave exactly as today.
+    ref: str | None = None
     try:
+        ref = (
+            effective_ref(effective_policy)
+            if policy is not None
+            else provenance.requested_ref
+        )
         source = RemoteSource(
             owner=provenance.source_owner,
             repo=provenance.source_repo,
-            ref=provenance.requested_ref,
+            ref=ref,
         )
         resolved = resolve_source(source, resolver=resolver)
     except Exception as exc:  # noqa: BLE001 - check boundary: never crash
@@ -137,7 +204,7 @@ def check_product_update(
             installed_commit_sha=provenance.commit_sha,
             source_owner=provenance.source_owner,
             source_repo=provenance.source_repo,
-            requested_ref=provenance.requested_ref,
+            requested_ref=ref,
             version=provenance.version,
             error=_error_message(exc),
         )
@@ -154,7 +221,7 @@ def check_product_update(
         latest_commit_sha=resolved.commit_sha,
         source_owner=provenance.source_owner,
         source_repo=provenance.source_repo,
-        requested_ref=provenance.requested_ref,
+        requested_ref=ref,
         version=provenance.version,
     )
 
