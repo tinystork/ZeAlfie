@@ -394,6 +394,8 @@ class _FakeInstallService:
                 "capabilities": capabilities,
                 "cancel_check": cancel_check,
                 "progress_callback": progress_callback,
+                "fetcher": kwargs.get("fetcher"),
+                "work_root": kwargs.get("work_root"),
             }
         )
         self.called_from_thread_ident = threading.get_ident()
@@ -461,6 +463,45 @@ class TestAcceleratedInstallWorker:
         assert len(finished) == 1
         assert finished[0] is service._result
         assert finished[0].success is True
+
+    def test_worker_transmits_fetcher_and_work_root(self, qapp, tmp_path):
+        """ZA-M1-2J.1: the worker forwards the composition root's fetcher
+        and work root to ``install_accelerated_runtime`` so the KEEP base
+        runtime is re-acquired at the exact provenance SHA."""
+        from zealfie.gui.accelerated_install_worker import AcceleratedInstallWorker
+
+        class _FakeFetcher:
+            pass
+
+        fetcher = _FakeFetcher()
+        work_root = tmp_path / "worker-work"
+        service = _FakeInstallService(result=_success_result())
+        worker = AcceleratedInstallWorker(
+            service,
+            plan=_ready_plan(),
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        worker.finished.connect(lambda r: None)
+        worker.run()
+
+        call = service.calls[0]
+        assert call["fetcher"] is fetcher
+        assert call["work_root"] == work_root
+
+    def test_worker_defaults_keep_fail_closed_no_fetcher(self, qapp):
+        """Without explicit transports the worker still passes fetcher/
+        work_root as None — the service's fail-closed contract decides."""
+        from zealfie.gui.accelerated_install_worker import AcceleratedInstallWorker
+
+        service = _FakeInstallService(result=_success_result())
+        worker = AcceleratedInstallWorker(service, plan=_ready_plan())
+        worker.finished.connect(lambda r: None)
+        worker.run()
+
+        call = service.calls[0]
+        assert call["fetcher"] is None
+        assert call["work_root"] is None
 
     def test_worker_passes_plan_and_recommendation_to_service(self, qapp):
         from zealfie.gui.accelerated_install_worker import AcceleratedInstallWorker
@@ -547,6 +588,30 @@ class TestAcceleratedInstallWorker:
         assert "boom" in finished[0].reason
 
     # -- Threaded: off-GUI-thread execution + cooperative cancellation ----
+
+    def test_thread_factory_propagates_fetcher_and_work_root(
+        self, qapp, tmp_path
+    ):
+        """create_accelerated_install_thread threads the composition-root
+        transports into the worker without starting a real thread."""
+        from zealfie.gui.accelerated_install_worker import (
+            create_accelerated_install_thread,
+        )
+
+        class _FakeFetcher:
+            pass
+
+        fetcher = _FakeFetcher()
+        work_root = tmp_path / "factory-work"
+        service = _FakeInstallService(result=_success_result())
+        thread, worker = create_accelerated_install_thread(
+            service, fetcher=fetcher, work_root=work_root
+        )
+        assert worker._fetcher is fetcher
+        assert worker._work_root == work_root
+        # The thread was never started; release it without terminate().
+        thread.deleteLater()
+        qapp.processEvents()
 
     def test_worker_runs_off_gui_thread_and_cancel_is_cooperative(self, qapp):
         """While the fake service blocks inside the worker QThread, the GUI
@@ -695,6 +760,8 @@ class _FakePanelService:
         capabilities=None,
         cancel_check=None,
         progress_callback=None,
+        fetcher=None,
+        work_root=None,
     ):
         self.install_calls.append(
             {
@@ -702,6 +769,8 @@ class _FakePanelService:
                 "recommendation": recommendation,
                 "capabilities": capabilities,
                 "cancel_check": cancel_check,
+                "fetcher": fetcher,
+                "work_root": work_root,
             }
         )
         self.called_from_thread_ident = threading.get_ident()
@@ -835,6 +904,83 @@ class TestAccelerationPanelInstall:
             assert panel._button.isEnabled() is True
             assert panel._install_button.isHidden() is True
             assert "Completed" in panel._progress_label.text()
+        finally:
+            panel.close()
+            panel.deleteLater()
+            qapp.processEvents()
+
+    def test_panel_transmits_fetcher_and_work_root_to_worker(self, qapp, tmp_path):
+        """ZA-M1-2J.1: AccelerationPanel threads the composition root's
+        fetcher/work root through create_accelerated_install_thread into
+        the worker, and the real service call receives them."""
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        class _FakeFetcher:
+            pass
+
+        fetcher = _FakeFetcher()
+        work_root = tmp_path / "panel-work"
+        service = _FakePanelService(
+            plan=_ready_plan(),
+            install_result=_success_result(),
+            block_seconds=0.05,
+        )
+        panel = AccelerationPanel(
+            service=service, fetcher=fetcher, work_root=work_root
+        )
+        try:
+            panel.set_recommendation(_rec())
+            panel._button.click()
+            panel._install_button.click()
+
+            # The worker received the exact transports from the panel.
+            worker = panel._install_worker
+            assert worker is not None
+            assert worker._fetcher is fetcher
+            assert worker._work_root == work_root
+
+            # ... and the service call received them from the worker.
+            ok = _wait_for(
+                qapp,
+                lambda: "Accelerated runtime ready" in panel._summary_label.text(),
+            )
+            assert ok, "panel never reached the ready state"
+            assert len(service.install_calls) == 1
+            call = service.install_calls[0]
+            assert call["fetcher"] is fetcher
+            assert call["work_root"] == work_root
+        finally:
+            panel.close()
+            panel.deleteLater()
+            qapp.processEvents()
+
+    def test_panel_without_transports_delegates_with_none(self, qapp):
+        """Without transports the panel still builds a worker (None
+        fetcher/work root — the fail-closed service contract decides)."""
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        service = _FakePanelService(
+            plan=_ready_plan(),
+            install_result=_success_result(),
+            block_seconds=0.05,
+        )
+        panel = AccelerationPanel(service=service)
+        try:
+            panel.set_recommendation(_rec())
+            panel._button.click()
+            panel._install_button.click()
+            worker = panel._install_worker
+            assert worker is not None
+            assert worker._fetcher is None
+            assert worker._work_root is None
+            ok = _wait_for(
+                qapp,
+                lambda: "Accelerated runtime ready" in panel._summary_label.text(),
+            )
+            assert ok, "panel never reached the ready state"
+            call = service.install_calls[0]
+            assert call["fetcher"] is None
+            assert call["work_root"] is None
         finally:
             panel.close()
             panel.deleteLater()

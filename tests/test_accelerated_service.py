@@ -32,8 +32,10 @@ marked ``zealfie_slow``; the rest are hermetic FAST tests.
 from __future__ import annotations
 
 import hashlib
+import io
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -87,12 +89,14 @@ from zealfie.runtime import (
     RuntimeLayout,
     SharedRuntime,
 )
+from zealfie.runtime.state import save_active_state
 from zealfie.runtime.probe import probe_runtime_distribution
 from zealfie.runtime.provenance import (
     ProductProvenance,
     ProductProvenanceStore,
 )
 from zealfie.sources import RemoteSource, ResolvedSource
+from zealfie.sources.acquisition import AcquisitionError
 
 WITNESS_SHA = "d4a0f1e2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8"
 _EP = (EntryPointContract("console_scripts", "zewitness"),)
@@ -565,6 +569,193 @@ def test_service_default_acquirer_fail_closed(tmp_path, witness_v1):
     )
     assert not layout.slots.exists()
     assert runtime.status().state.value == "ABSENT"
+
+
+def _keep_for_witness(witness_v1: Path) -> PlannedKeepProduct:
+    return PlannedKeepProduct(
+        product_id="zewitness",
+        version="0.0.1",
+        commit_sha=WITNESS_SHA,
+        wheel_sha256=_sha256(witness_v1),
+    )
+
+
+def _service_with_active_provenance(tmp_path, *, witness_v1):
+    """Service with active provenance for zewitness and no runtime work
+    performed (PREPARE-phase failures never touch the runtime)."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    save_active_state(layout.active_pointer, "rt-abc123", None)
+    provenance_store = ProductProvenanceStore(layout)
+    provenance_store.record(
+        "rt-abc123",
+        [
+            ProductProvenance(
+                product_id="zewitness",
+                version="0.0.1",
+                source_owner="tinystork",
+                source_repo="ZeWitness",
+                requested_ref="main",
+                commit_sha=WITNESS_SHA,
+                wheel_sha256=_sha256(witness_v1),
+            )
+        ],
+    )
+    service = ZeAlfieService(
+        catalog=_catalog(),
+        selection_store=SelectionStore(path=tmp_path / "desired-products.toml"),
+        provenance_store=provenance_store,
+        host=_host(),
+    )
+    return service, layout
+
+
+def test_keep_preparation_fetches_exact_40hex_sha_never_mutable_ref(
+    tmp_path,
+):
+    """ZA-M1-2J.1: ``_prepare_keep_product_artifact`` re-acquires the
+    product at the provenance's exact 40-hex commit SHA — the recording
+    fetcher receives the SHA, NEVER the mutable ``requested_ref``
+    (main/beta/any branch name).  No fallback to mutable refs exists."""
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+
+    def _zip_fixture_source(fixture_name: str) -> bytes:
+        source_dir = fixtures / fixture_name
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file_path in sorted(source_dir.rglob("*")):
+                if file_path.is_file():
+                    rel = file_path.relative_to(source_dir)
+                    if str(rel).startswith("build/"):
+                        continue
+                    zf.write(str(file_path), str(rel))
+        return buf.getvalue()
+
+    class _RecordingFetcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+
+        def __call__(self, owner: str, repo: str, commit_sha: str) -> bytes:
+            self.calls.append((owner, repo, commit_sha))
+            return _zip_fixture_source("witness_component")
+
+    service = ZeAlfieService(catalog=_catalog())
+    fetcher = _RecordingFetcher()
+    provenance = ProductProvenance(
+        product_id="zewitness",
+        version="0.0.1",
+        source_owner="tinystork",
+        source_repo="ZeWitness",
+        requested_ref="main",
+        commit_sha=WITNESS_SHA,
+        wheel_sha256="f" * 64,
+    )
+
+    prepared = service._prepare_keep_product_artifact(
+        "zewitness",
+        provenance,
+        fetcher=fetcher,
+        work_root=tmp_path / "keep-work",
+    )
+
+    assert len(fetcher.calls) == 1
+    owner, repo, sha = fetcher.calls[0]
+    assert (owner, repo) == ("tinystork", "ZeWitness")
+    assert sha == WITNESS_SHA
+    assert sha == provenance.commit_sha
+    assert len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)
+    # NEVER the mutable ref: the requested_ref is provenance metadata only.
+    assert sha != provenance.requested_ref
+    assert provenance.requested_ref == "main"
+    assert prepared.resolved_source.commit_sha == WITNESS_SHA
+    assert prepared.resolved_source.source.ref == "main"
+    assert prepared.verified_artifact.version == "0.0.1"
+
+
+def test_service_no_fetcher_fails_closed_with_exact_error(
+    tmp_path, witness_v1,
+):
+    """The exact production failure of the first real gpu-install
+    (d29e758): with active provenance and no full_state_provider, a
+    missing fetcher fails closed at PREPARE with "no artifact fetcher
+    configured" and the active runtime stays byte-identical.  The
+    CLI/GUI wiring now always supplies the fetcher; this guards the
+    fail-closed contract itself."""
+    service, layout = _service_with_active_provenance(
+        tmp_path, witness_v1=witness_v1
+    )
+    pointer_before = layout.active_pointer.read_bytes()
+    plan = _accel_plan("rt-abc123", keep=(_keep_for_witness(witness_v1),))
+
+    result = service.install_accelerated_runtime(
+        plan=plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
+        acquirer=_SpyAcquirer(),
+        fetcher=None,  # the d29e758 wiring bug — no fetcher transmitted
+        full_state_provider=None,
+        dependency_wheelhouse=_empty_wheelhouse(tmp_path),
+        work_root=tmp_path / "work",
+    )
+
+    assert result.success is False
+    assert result.cancelled is False
+    assert result.phase is AcceleratedDeploymentPhase.PREPARE
+    assert "base runtime preparation failed" in (result.reason or "")
+    assert "no artifact fetcher configured" in (result.reason or "")
+    assert result.old_runtime_preserved is True
+    # Zero mutation: pointer unchanged, no slots, no acquisition.
+    assert layout.active_pointer.read_bytes() == pointer_before
+    assert not (layout.slots.exists() and any(layout.slots.iterdir()))
+
+
+def test_service_fetcher_failure_preserves_active_runtime(
+    tmp_path, witness_v1,
+):
+    """A raising fetcher (KEEP re-acquisition transport failure) fails
+    closed at PREPARE: honest result, active runtime untouched, and the
+    fetcher was asked for the exact provenance SHA (never a branch)."""
+    service, layout = _service_with_active_provenance(
+        tmp_path, witness_v1=witness_v1
+    )
+    pointer_before = layout.active_pointer.read_bytes()
+
+    class _RaisingFetcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+
+        def __call__(self, owner: str, repo: str, commit_sha: str) -> bytes:
+            self.calls.append((owner, repo, commit_sha))
+            raise AcquisitionError("synthetic fetcher failure")
+
+    fetcher = _RaisingFetcher()
+    plan = _accel_plan("rt-abc123", keep=(_keep_for_witness(witness_v1),))
+
+    result = service.install_accelerated_runtime(
+        plan=plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
+        acquirer=_SpyAcquirer(),
+        fetcher=fetcher,
+        full_state_provider=None,
+        dependency_wheelhouse=_empty_wheelhouse(tmp_path),
+        work_root=tmp_path / "work",
+    )
+
+    assert result.success is False
+    assert result.cancelled is False
+    assert result.phase is AcceleratedDeploymentPhase.PREPARE
+    assert "base runtime preparation failed" in (result.reason or "")
+    assert "synthetic fetcher failure" in (result.reason or "")
+    assert result.old_runtime_preserved is True
+    # The KEEP path asked for the exact 40-hex provenance SHA.
+    assert len(fetcher.calls) == 1
+    owner, repo, sha = fetcher.calls[0]
+    assert (owner, repo) == ("tinystork", "ZeWitness")
+    assert sha == WITNESS_SHA
+    assert len(sha) == 40
+    # Zero mutation: pointer unchanged, no slots, acquisition never ran.
+    assert layout.active_pointer.read_bytes() == pointer_before
+    assert not (layout.slots.exists() and any(layout.slots.iterdir()))
 
 
 def test_service_late_conflict_specifier_violation(

@@ -547,9 +547,15 @@ def _handle_gpu_install(*, stdout: TextIO) -> int:
     acquisition and NO runtime work.  A ``PLAN_READY`` plan is handed
     to :meth:`~zealfie.app.service.ZeAlfieService.install_accelerated_runtime`
     with the service default acquirer (the packaged artifact manifest)
-    and a simple progress line per phase on stdout.  The final result
-    is always reported honestly (success or the phase where the
-    deployment stopped).
+    and a simple progress line per phase on stdout.  The composition
+    root's archive fetcher and install work root (the existing
+    ``_make_install_deps`` factories — same transports as the normal
+    install path, no new transport) are transmitted so the service can
+    re-acquire the KEEP base runtime at the exact provenance commit
+    SHA; without them the transactional install fails closed at
+    PREPARE with "no artifact fetcher configured".  The final result is
+    always reported honestly (success or the phase where the deployment
+    stopped).
     """
     service = _make_service()
     try:
@@ -567,6 +573,15 @@ def _handle_gpu_install(*, stdout: TextIO) -> int:
         )
         return 4
 
+    # Production wiring (ZA-M1-2J.1): the transactional install needs
+    # the same composition-root transports as ``install`` — the archive
+    # fetcher for KEEP re-acquisition at the exact provenance SHA and
+    # the platform install work root.  Reuse the existing factories;
+    # never construct a new transport here and never let the engine
+    # reach for GitHub itself.
+    _resolver, fetcher, work_root = _make_install_deps()
+    work_root.mkdir(parents=True, exist_ok=True)
+
     def _progress(progress) -> None:
         percent = getattr(progress, "percent", None)
         message = getattr(progress, "message", "")
@@ -576,6 +591,8 @@ def _handle_gpu_install(*, stdout: TextIO) -> int:
     try:
         result = service.install_accelerated_runtime(
             plan=plan,
+            fetcher=fetcher,
+            work_root=work_root,
             progress_callback=_progress,
         )
     except Exception as exc:

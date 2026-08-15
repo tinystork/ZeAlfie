@@ -147,11 +147,27 @@ class AccelerationPanel(QFrame):
     configure button only routes through the service's preparatory intent
     and the read-only GPU plan preview, reusing the stored observation;
     it never performs or claims an install.
+
+    ZA-M1-2J.1: the composition root's archive fetcher and install work
+    root are accepted (optional, ``None`` by default) and forwarded to
+    the accelerated install worker so the KEEP base runtime is
+    re-acquired at the exact provenance SHA.  With ``None`` the service
+    keeps its fail-closed behaviour (no fetcher -> honest PREPARE
+    failure, runtime untouched).
     """
 
-    def __init__(self, service, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        service,
+        parent: QWidget | None = None,
+        *,
+        fetcher=None,
+        work_root=None,
+    ) -> None:
         super().__init__(parent)
         self._service = service
+        self._fetcher = fetcher
+        self._work_root = work_root
         self._recommendation: AccelerationRecommendation | None = None
         self._capabilities: HostCapabilities | None = None
         self._summary_label: QLabel | None = None
@@ -425,6 +441,8 @@ class AccelerationPanel(QFrame):
             plan=plan,
             recommendation=self._recommendation,
             capabilities=self._capabilities,
+            fetcher=self._fetcher,
+            work_root=self._work_root,
             parent=self,
         )
         self._install_thread = thread

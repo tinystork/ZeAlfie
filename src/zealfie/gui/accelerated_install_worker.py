@@ -82,6 +82,8 @@ class AcceleratedInstallWorker(QObject):
         plan=None,
         recommendation=None,
         capabilities=None,
+        fetcher=None,
+        work_root=None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -89,6 +91,8 @@ class AcceleratedInstallWorker(QObject):
         self._plan = plan
         self._recommendation = recommendation
         self._capabilities = capabilities
+        self._fetcher = fetcher
+        self._work_root = work_root
         self._cancel_event = threading.Event()
         self._events: list[object] = []
         self._last_pair: tuple[str, int | None] | None = None
@@ -145,6 +149,8 @@ class AcceleratedInstallWorker(QObject):
                 capabilities=self._capabilities,
                 cancel_check=self._cancel_check,
                 progress_callback=self._on_progress,
+                fetcher=self._fetcher,
+                work_root=self._work_root,
             )
         except Exception as exc:
             # Defensive: the service contract returns results, never raises.
@@ -201,6 +207,8 @@ def create_accelerated_install_thread(
     plan=None,
     recommendation=None,
     capabilities=None,
+    fetcher=None,
+    work_root=None,
     parent: QObject | None = None,
 ) -> tuple[QThread, AcceleratedInstallWorker]:
     """Create a worker, a thread, and wire them for one accelerated install.
@@ -222,6 +230,8 @@ def create_accelerated_install_thread(
         plan=plan,
         recommendation=recommendation,
         capabilities=capabilities,
+        fetcher=fetcher,
+        work_root=work_root,
         parent=None,
     )
     worker.moveToThread(thread)

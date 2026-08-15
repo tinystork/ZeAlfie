@@ -304,6 +304,40 @@ def test_system_gpu_install_plan_ready_delegates_with_service_defaults(
     assert "Active slot: rt-new" in output
 
 
+def test_system_gpu_install_plan_ready_transmits_fetcher_and_work_root(
+    monkeypatch,
+):
+    """ZA-M1-2J.1 wiring: the CLI handler reuses the existing install-deps
+    factories and hands the REAL archive fetcher plus the platform work
+    root to ``install_accelerated_runtime``.
+
+    Regression guard for the first real gpu-install failure: on d29e758
+    the handler delegated WITHOUT a fetcher, so the real service failed
+    at [0%] with "no artifact fetcher configured".  On that commit this
+    test fails (``kwargs.get("fetcher")`` would be None)."""
+    from pathlib import Path
+
+    from zealfie.sources.github import GitHubArchiveFetcher
+
+    service = _FakeGpuInstallService(plan=_ready_plan(), result=_success_result())
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = cli.run(["system", "gpu-install"], stdout=stdout)
+    assert code == 0
+    assert service.plan_calls == 1
+    assert len(service.install_kwargs) == 1
+    kwargs = service.install_kwargs[0]
+    assert kwargs.get("plan") is service._plan
+    assert kwargs.get("progress_callback") is not None
+    # The production transports are transmitted (never None, never
+    # rebuilt from a second source inside the engine).
+    assert isinstance(kwargs.get("fetcher"), GitHubArchiveFetcher)
+    assert isinstance(kwargs.get("work_root"), Path)
+    assert kwargs.get("work_root") is not None
+    output = stdout.getvalue()
+    assert "Success: yes" in output
+
+
 def test_system_gpu_install_failed_result_honest_nonzero(monkeypatch):
     """A failed deployment result is reported honestly with a non-zero
     exit (success is never fabricated)."""

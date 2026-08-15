@@ -141,7 +141,17 @@ class ZeAlfieMainWindow(QMainWindow):
         central_layout.addLayout(header_layout)
 
         # --- Hardware acceleration panel (M1-2G) ---
-        self._acceleration_panel = AccelerationPanel(self._service, self)
+        # Composition-root transports are threaded down so the
+        # accelerated install worker re-acquires the KEEP base runtime
+        # at the exact provenance SHA (ZA-M1-2J.1).  ``None`` defaults
+        # preserve the fail-closed service behaviour for callers
+        # without transports (tests, headless).
+        self._acceleration_panel = AccelerationPanel(
+            self._service,
+            self,
+            fetcher=self._fetcher,
+            work_root=self._work_root,
+        )
         self._acceleration_panel.setObjectName("accelerationPanel")
         central_layout.addWidget(self._acceleration_panel)
 

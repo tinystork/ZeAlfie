@@ -364,6 +364,29 @@ class TestGuiSmoke:
         assert window is not None
         assert window.windowTitle().startswith("ZeAlfie")
 
+    def test_window_wires_fetcher_and_work_root_into_acceleration_panel(
+        self, tmp_path,
+    ):
+        """ZA-M1-2J.1: the composition root's fetcher/work root reach the
+        acceleration panel (and therefore the accelerated install worker)."""
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        class _FakeFetcher:
+            pass
+
+        fetcher = _FakeFetcher()
+        work_root = tmp_path / "work"
+        service = _create_standard_fake_service()
+        window = ZeAlfieMainWindow(
+            service=service,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
+        panel = window._acceleration_panel
+        assert panel is not None
+        assert panel._fetcher is fetcher
+        assert panel._work_root == work_root
+
     def test_four_products_visible(self):
         """All 4 catalog products visible in the window."""
         from zealfie.gui.main_window import ZeAlfieMainWindow
