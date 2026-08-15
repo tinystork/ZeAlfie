@@ -21,6 +21,7 @@ from zealfie.host.models import (
     GpuInfo,
     GpuKind,
     CapabilityStatus,
+    HostCapabilities,
     HostReasonCode,
     RecommendationStatus,
 )
@@ -285,6 +286,74 @@ def test_main_window_does_not_offer_config_when_blocked(qapp):
     window = ZeAlfieMainWindow(service=service)  # type: ignore[arg-type]
     try:
         assert window._acceleration_panel._button.isHidden() is True
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+class _FakeWindowCapabilitiesService:
+    """Minimal service exposing capabilities + recommendation APIs.
+
+    Mirrors the ZeAlfieService shape: the recommendation getter accepts
+    the collected capabilities so the window can derive it from the
+    exact same observation (one observation cycle).
+    """
+
+    def __init__(self, capabilities, recommendation) -> None:
+        self._caps = capabilities
+        self._rec = recommendation
+        self.collect_calls = 0
+        self.recommendation_calls = []
+
+    def list_products(self):
+        return ()
+
+    def collect_product_state(self):
+        from zealfie.app import ProductShellState
+        from zealfie.runtime.model import RuntimeState
+
+        return ProductShellState(
+            runtime_state=RuntimeState.READY,
+            runtime_root=Path("/fake/runtime"),
+            products=(),
+        )
+
+    def collect_host_capabilities(self):
+        self.collect_calls += 1
+        return self._caps
+
+    def get_acceleration_recommendation(self, capabilities=None):
+        self.recommendation_calls.append(capabilities)
+        return self._rec
+
+
+def _fake_capabilities() -> HostCapabilities:
+    return HostCapabilities(
+        os_name="linux",
+        cpu_arch="x86_64",
+        platform_status=CapabilityStatus.AVAILABLE,
+        platform_reason_code=HostReasonCode.OS_DETECTED,
+        platform_reason="os detected",
+        gpus=(),
+        partial=False,
+    )
+
+
+def test_main_window_one_observation_cycle_forwards_capabilities(qapp):
+    """The main window collects capabilities once, derives the
+    recommendation from that exact observation, and stores both in the
+    panel — the configure click then never re-probes."""
+    from zealfie.gui.main_window import ZeAlfieMainWindow
+
+    caps = _fake_capabilities()
+    rec = _rec(RecommendationStatus.OFFER_SETUP, gpus=(_nvidia_gpu(),))
+    service = _FakeWindowCapabilitiesService(capabilities=caps, recommendation=rec)
+    window = ZeAlfieMainWindow(service=service)  # type: ignore[arg-type]
+    try:
+        assert service.collect_calls == 1
+        assert service.recommendation_calls == [caps]
+        assert window._acceleration_panel._recommendation is rec
+        assert window._acceleration_panel._capabilities is caps
     finally:
         window.close()
         window.deleteLater()

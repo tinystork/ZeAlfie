@@ -52,8 +52,9 @@ def evaluate_acceleration_compatibility(
     7. recommendation ``ALREADY_READY`` / ``OFFER_SETUP`` → host side
        is fine; proceed to cross-product conflict checks;
     8. cross-product conflicts (exact-pin disagreements, pin vs
-       excluding range, requirement vs declared incompatibility) →
-       ``BLOCKED`` with conflict details; otherwise ``SUPPORTED``.
+       excluding range, obviously disjoint simple ranges, requirement
+       vs declared incompatibility) → ``BLOCKED`` with conflict
+       details; otherwise ``SUPPORTED``.
 
     Cross-product checks run over ALL declared requirements in a
     deterministic order: sorted product ids, then declaration order
@@ -162,6 +163,114 @@ def _exact_pin(specifier: str | None) -> Version | None:
     return None
 
 
+def _merge_lower_bound(
+    current: tuple[Version, bool] | None,
+    candidate: tuple[Version, bool],
+) -> tuple[Version, bool]:
+    """Merge lower constraints, keeping the maximum version.
+
+    When two lower constraints name the same version, the bound is
+    inclusive only if both are inclusive (``>v`` and ``>=v`` merge to
+    an exclusive bound at ``v``).
+    """
+    if current is None:
+        return candidate
+    version, inclusive = current
+    candidate_version, candidate_inclusive = candidate
+    if candidate_version > version:
+        return candidate
+    if candidate_version == version:
+        return (version, inclusive and candidate_inclusive)
+    return current
+
+
+def _merge_upper_bound(
+    current: tuple[Version, bool] | None,
+    candidate: tuple[Version, bool],
+) -> tuple[Version, bool]:
+    """Merge upper constraints, keeping the minimum version.
+
+    When two upper constraints name the same version, the bound is
+    inclusive only if both are inclusive (``<v`` and ``<=v`` merge to
+    an exclusive bound at ``v``).
+    """
+    if current is None:
+        return candidate
+    version, inclusive = current
+    candidate_version, candidate_inclusive = candidate
+    if candidate_version < version:
+        return candidate
+    if candidate_version == version:
+        return (version, inclusive and candidate_inclusive)
+    return current
+
+
+def _simple_bounds(
+    specifier: str | None,
+) -> tuple[tuple[Version, bool] | None, tuple[Version, bool] | None]:
+    """Reduce a specifier to ``(lower, upper)`` simple bound constraints.
+
+    Only the single-bound comparisons ``>=``, ``>``, ``<=``, ``<`` and
+    ``==`` (as the exact interval ``[v, v]``) participate.  ``!=``,
+    ``~=``, ``===`` and wildcard ``==x.*`` forms are ignored: they fall
+    through to the variant-level fail-closed check during planning.
+    Each bound is ``(version, inclusive)``; ``None`` means "no
+    constraint on that side".
+    """
+    if specifier is None:
+        return None, None
+    lower: tuple[Version, bool] | None = None
+    upper: tuple[Version, bool] | None = None
+    for spec in SpecifierSet(specifier):
+        operator = spec.operator
+        if operator in ("!=", "~=", "==="):
+            continue
+        if operator == "==" and "*" in str(spec.version):
+            continue  # wildcard form — not a simple bound
+        if operator == ">=":
+            lower = _merge_lower_bound(lower, (spec.version, True))
+        elif operator == ">":
+            lower = _merge_lower_bound(lower, (spec.version, False))
+        elif operator == "<=":
+            upper = _merge_upper_bound(upper, (spec.version, True))
+        elif operator == "<":
+            upper = _merge_upper_bound(upper, (spec.version, False))
+        elif operator == "==":
+            lower = _merge_lower_bound(lower, (spec.version, True))
+            upper = _merge_upper_bound(upper, (spec.version, True))
+    return lower, upper
+
+
+def _disjoint_simple_ranges(
+    specifier_a: str | None,
+    specifier_b: str | None,
+) -> bool:
+    """Return True when two specifiers are obviously disjoint ranges.
+
+    Conservative by design: only obvious disjointness of simple
+    single-bound constraints counts.  Anything subtler (ignored
+    operators, wildcards, prerelease corners) falls through to the
+    variant-level fail-closed check during planning.
+    """
+    lower: tuple[Version, bool] | None = None
+    upper: tuple[Version, bool] | None = None
+    for specifier in (specifier_a, specifier_b):
+        spec_lower, spec_upper = _simple_bounds(specifier)
+        if spec_lower is not None:
+            lower = _merge_lower_bound(lower, spec_lower)
+        if spec_upper is not None:
+            upper = _merge_upper_bound(upper, spec_upper)
+    if lower is None or upper is None:
+        return False
+    lower_version, lower_inclusive = lower
+    upper_version, upper_inclusive = upper
+    if lower_version > upper_version:
+        return True
+    if lower_version == upper_version:
+        return not (lower_inclusive and upper_inclusive)
+    return False
+
+
 def _find_conflicts(
     requirements_map: Mapping[str, ProductAccelerationRequirements],
     product_ids: list[str],
@@ -177,7 +286,12 @@ def _find_conflicts(
     * one pins ``==x`` and the other declares a specifier set that does
       not contain ``x``;
     * a requirement distribution of one product appears in the other
-      product's incompatibilities.
+      product's incompatibilities;
+    * neither requirement is an exact pin and their specifiers are
+      obviously disjoint simple ranges (``>=``/``>``/``<=``/``<``/``==``
+      bounds; ``!=``, ``~=``, ``===`` and wildcard forms are ignored
+      here — they fall through to the variant-level fail-closed check
+      during planning).
     """
     conflicts: list[str] = []
     involved: set[str] = set()
@@ -219,6 +333,22 @@ def _find_conflicts(
                                 f"{req_a.specifier!r}"
                             )
                             involved.update((product_a, product_b))
+                    elif (
+                        pin_a is None
+                        and pin_b is None
+                        and req_a.specifier is not None
+                        and req_b.specifier is not None
+                        and _disjoint_simple_ranges(
+                            req_a.specifier, req_b.specifier
+                        )
+                    ):
+                        conflicts.append(
+                            f"distribution {req_a.distribution!r} required by "
+                            f"{product_a!r} ({req_a.specifier!r}) and "
+                            f"{product_b!r} ({req_b.specifier!r}) has "
+                            "disjoint version ranges"
+                        )
+                        involved.update((product_a, product_b))
 
             incompat_b = {inc.distribution for inc in reqs_b.incompatibilities}
             for req_a in reqs_a.requirements:

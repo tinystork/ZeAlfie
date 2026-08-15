@@ -360,6 +360,161 @@ def test_optional_requirement_still_checked():
 
 
 # ===========================================================================
+# Range-vs-range structural conflict detection (M1-2H corrective)
+# ===========================================================================
+
+
+def test_blocked_disjoint_simple_ranges():
+    """Two obviously disjoint simple ranges -> BLOCKED; the conflict
+    names the distribution, both products and both specifiers."""
+    result = evaluate(
+        [
+            make_product(
+                "prod-a",
+                requirements=(requirement("accelerated-lib", ">=1.0,<2.0"),),
+            ),
+            make_product(
+                "prod-b",
+                requirements=(requirement("accelerated-lib", ">=2.0,<3.0"),),
+            ),
+        ]
+    )
+    assert result.status is HardwareCompatibilityStatus.BLOCKED
+    assert (
+        result.reason_code
+        == HardwareCompatibilityReasonCode.REQUIREMENT_CONFLICT.value
+    )
+    assert len(result.conflicts) == 1
+    conflict = result.conflicts[0]
+    assert "accelerated-lib" in conflict
+    assert "prod-a" in conflict
+    assert "prod-b" in conflict
+    assert ">=1.0,<2.0" in conflict
+    assert ">=2.0,<3.0" in conflict
+    assert result.products_concerned == ("prod-a", "prod-b")
+
+
+def test_supported_equal_bound_inclusive_ranges():
+    """``>=2.0`` vs ``<=2.0`` share version 2.0 with inclusive bounds on
+    both sides -> SUPPORTED."""
+    result = evaluate(
+        [
+            make_product(
+                "prod-a", requirements=(requirement("accelerated-lib", ">=2.0"),)
+            ),
+            make_product(
+                "prod-b", requirements=(requirement("accelerated-lib", "<=2.0"),)
+            ),
+        ]
+    )
+    assert result.status is HardwareCompatibilityStatus.SUPPORTED
+    assert result.conflicts == ()
+
+
+def test_blocked_equal_bound_exclusive_ranges():
+    """``>2.0`` vs ``<=2.0`` meet at 2.0 with an exclusive side ->
+    BLOCKED."""
+    result = evaluate(
+        [
+            make_product(
+                "prod-a", requirements=(requirement("accelerated-lib", ">2.0"),)
+            ),
+            make_product(
+                "prod-b", requirements=(requirement("accelerated-lib", "<=2.0"),)
+            ),
+        ]
+    )
+    assert result.status is HardwareCompatibilityStatus.BLOCKED
+    assert len(result.conflicts) == 1
+
+
+def test_supported_overlapping_ranges():
+    """Overlapping ranges -> SUPPORTED."""
+    result = evaluate(
+        [
+            make_product(
+                "prod-a",
+                requirements=(requirement("accelerated-lib", ">=1.0,<3.0"),),
+            ),
+            make_product(
+                "prod-b",
+                requirements=(requirement("accelerated-lib", ">=2.0,<4.0"),),
+            ),
+        ]
+    )
+    assert result.status is HardwareCompatibilityStatus.SUPPORTED
+    assert result.conflicts == ()
+
+
+def test_blocked_upper_bound_vs_lower_bound():
+    """``<2.0`` vs ``>=2.0`` -> BLOCKED."""
+    result = evaluate(
+        [
+            make_product(
+                "prod-a", requirements=(requirement("accelerated-lib", "<2.0"),)
+            ),
+            make_product(
+                "prod-b", requirements=(requirement("accelerated-lib", ">=2.0"),)
+            ),
+        ]
+    )
+    assert result.status is HardwareCompatibilityStatus.BLOCKED
+    assert len(result.conflicts) == 1
+    assert "disjoint" in result.conflicts[0]
+
+
+def test_no_structural_conflict_for_ignored_operators():
+    """A pair involving ``!=`` produces no structural range conflict
+    (documented conservative): unsatisfiability of the merged specifier
+    is still blocked at variant selection during planning."""
+    result = evaluate(
+        [
+            make_product(
+                "prod-a", requirements=(requirement("accelerated-lib", "!=1.0"),)
+            ),
+            make_product(
+                "prod-b", requirements=(requirement("accelerated-lib", ">=2.0"),)
+            ),
+        ]
+    )
+    assert result.status is HardwareCompatibilityStatus.SUPPORTED
+    assert result.conflicts == ()
+
+
+def test_disjoint_simple_ranges_ignores_wildcard_forms():
+    """Wildcard ``==1.0.*`` forms contribute no simple bounds to the
+    structural check (conservative); genuine unsatisfiability falls
+    through to the variant-level fail-closed check at planning."""
+    from zealfie.acceleration.compatibility import _disjoint_simple_ranges
+
+    assert _disjoint_simple_ranges("==1.0.*", ">=1.1") is False
+
+
+def test_range_conflict_detection_is_order_independent():
+    """Range conflicts are found regardless of mapping insertion order."""
+    products = [
+        make_product(
+            "prod-a", requirements=(requirement("accelerated-lib", ">=1.0,<2.0"),)
+        ),
+        make_product(
+            "prod-b", requirements=(requirement("accelerated-lib", ">=2.0,<3.0"),)
+        ),
+    ]
+    forward = evaluate_acceleration_compatibility(
+        requirements_map={p.product_id: p for p in products},
+        capabilities=make_capabilities(),
+        recommendation=make_recommendation(),
+    )
+    backward = evaluate_acceleration_compatibility(
+        requirements_map={p.product_id: p for p in reversed(products)},
+        capabilities=make_capabilities(),
+        recommendation=make_recommendation(),
+    )
+    assert forward == backward
+    assert forward.status is HardwareCompatibilityStatus.BLOCKED
+
+
+# ===========================================================================
 # Determinism and purity
 # ===========================================================================
 

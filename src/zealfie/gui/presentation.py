@@ -224,5 +224,5 @@ def gpu_plan_preview_lines(plan) -> tuple[str, ...]:
         lines.extend(f" - {line}" for line in plan.closure_impact)
     else:
         lines.append("Planned actions: none recorded")
-    lines.append("Aucune modification n'a encore été effectuée.")
+    lines.append("No changes have been made yet.")
     return tuple(lines)

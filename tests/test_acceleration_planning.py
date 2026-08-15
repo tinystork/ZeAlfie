@@ -477,6 +477,169 @@ def test_no_acceleration_requirements_status():
 
 
 # ===========================================================================
+# Variant must satisfy the merged specifier (M1-2H corrective)
+# ===========================================================================
+
+
+def test_exact_pin_satisfied_by_variant_plan_ready():
+    """A variant exactly matching the merged pin -> PLAN_READY."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", "==1.2.0"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib", version="1.2.0"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    assert plan.blocked is False
+    entry = plan.added_requirements[0]
+    assert entry.variant_status is VariantStatus.SELECTED
+    assert entry.variant is not None
+    assert entry.variant.version == "1.2.0"
+
+
+def test_exact_pin_violated_by_variant_blocked():
+    """A variant that does not match the merged pin -> BLOCKED with a
+    deterministic detail; the entry stays NOT_AVAILABLE."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", "==2.0.0"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib", version="1.2.0"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked is True
+    assert plan.blocked_reason == (
+        "no accelerated variant available for: accelerated-lib "
+        "(declared ==2.0.0 not satisfied by available variant 1.2.0)"
+    )
+    entry = plan.added_requirements[0]
+    assert entry.variant is None
+    assert entry.variant_status is VariantStatus.NOT_AVAILABLE
+    assert plan.closure_impact == ()
+
+
+def test_range_violated_by_variant_blocked():
+    """A variant outside the merged range -> BLOCKED with a deterministic
+    detail naming the specifier and the variant version."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=2.0,<3.0"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib", version="1.2.0"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked_reason == (
+        "no accelerated variant available for: accelerated-lib "
+        "(declared >=2.0,<3.0 not satisfied by available variant 1.2.0)"
+    )
+    entry = plan.added_requirements[0]
+    assert entry.variant is None
+    assert entry.variant_status is VariantStatus.NOT_AVAILABLE
+
+
+def test_merged_specifier_violated_by_variant_blocked():
+    """The *merged* specifier across products is the contract: a variant
+    satisfying one product's range but not the other -> BLOCKED (the
+    ranges overlap structurally, so only the variant-level check
+    catches it)."""
+    plan = build(
+        ("prod-a", _acc_block(_requirement("accelerated-lib", ">=1.0,<2.0"))),
+        ("prod-b", _acc_block(_requirement("accelerated-lib", ">=1.8"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib", version="2.5.0"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked_reason == (
+        "no accelerated variant available for: accelerated-lib "
+        "(declared >=1.0,<2.0, >=1.8 not satisfied by available "
+        "variant 2.5.0)"
+    )
+    entry = plan.added_requirements[0]
+    assert entry.specifier == ">=1.0,<2.0, >=1.8"
+    assert entry.variant_status is VariantStatus.NOT_AVAILABLE
+
+
+def test_prerelease_variant_satisfying_prerelease_bound_plan_ready():
+    """A prerelease variant numerically satisfying the specifier is
+    accepted because the check allows prereleases (the same check
+    without prereleases would reject every prerelease variant)."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=2.0rc1"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib", version="2.0.0rc1"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    entry = plan.added_requirements[0]
+    assert entry.variant_status is VariantStatus.SELECTED
+    assert entry.variant is not None
+    assert entry.variant.version == "2.0.0rc1"
+
+
+def test_prerelease_variant_above_release_bound_plan_ready():
+    """A prerelease variant above a plain release bound (``>=2.0``) is
+    accepted: ``prereleases=True`` removes the blanket prerelease
+    exclusion PEP 440 would otherwise apply."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=2.0"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib", version="2.1.0rc1"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    entry = plan.added_requirements[0]
+    assert entry.variant_status is VariantStatus.SELECTED
+    assert entry.variant.version == "2.1.0rc1"
+
+
+def test_prerelease_variant_below_release_bound_blocked():
+    """PEP 440 orders ``2.0.0rc1`` *below* ``2.0``, so ``>=2.0`` does
+    not contain it even with prereleases allowed — fail-closed BLOCKED
+    with a deterministic detail."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=2.0"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib", version="2.0.0rc1"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked_reason == (
+        "no accelerated variant available for: accelerated-lib "
+        "(declared >=2.0 not satisfied by available variant 2.0.0rc1)"
+    )
+
+
+def test_specifier_unsatisfied_entry_marked_not_available():
+    """A found-but-unsatisfying variant is treated as unavailable while
+    other SELECTED entries survive — the blocked reason carries the
+    detail alongside plain missing distributions."""
+    plan = build(
+        ("prod-a", _acc_block(_requirement("accelerated-lib", ">=2.0,<3.0"))),
+        ("prod-b", _acc_block(_requirement("kernel-common"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(
+                variant("accelerated-lib", version="1.2.0"),
+                variant("kernel-common"),
+            )
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    statuses = {
+        entry.distribution: entry.variant_status
+        for entry in plan.added_requirements
+    }
+    assert statuses == {
+        "accelerated-lib": VariantStatus.NOT_AVAILABLE,
+        "kernel-common": VariantStatus.SELECTED,
+    }
+    assert plan.blocked_reason == (
+        "no accelerated variant available for: accelerated-lib "
+        "(declared >=2.0,<3.0 not satisfied by available variant 1.2.0)"
+    )
+
+
+# ===========================================================================
 # Source runtime snapshot, determinism and purity
 # ===========================================================================
 
@@ -501,7 +664,10 @@ def test_deterministic_equal_inputs_equal_plans():
     """Two builds from equal inputs produce equal plans (including
     keep-product insertion order independence)."""
     variant_catalog = AcceleratedVariantCatalog(
-        variants=(variant("accelerated-lib"), variant("kernel-common"))
+        variants=(
+            variant("accelerated-lib"),
+            variant("kernel-common", version="9.0"),
+        )
     )
     kp_zebra = keep_product("zebra", version="2.0.0", commit_sha=SHA_B, wheel_sha256=WHEEL_B)
     kp_aardvark = keep_product("aardvark", version="1.0.0", commit_sha=SHA_A, wheel_sha256=WHEEL_A)
@@ -556,6 +722,21 @@ def test_planned_keep_product_validation():
         PlannedKeepProduct(product_id="  ", version="1.0.0")
     with pytest.raises(ValueError, match="version"):
         PlannedKeepProduct(product_id="prod-a", version=" ")
+
+
+def test_planned_keep_product_source_validation():
+    """source defaults to provenance and must be one of the two known
+    tags."""
+    assert (
+        PlannedKeepProduct(product_id="prod-a", version="1.0.0").source
+        == "provenance"
+    )
+    keep = PlannedKeepProduct(
+        product_id="prod-a", version="1.0.0", source="installed_lock"
+    )
+    assert keep.source == "installed_lock"
+    with pytest.raises(ValueError, match="source"):
+        PlannedKeepProduct(product_id="prod-a", version="1.0.0", source="lock")
 
 
 def test_planned_dependency_variant_status_invariant():

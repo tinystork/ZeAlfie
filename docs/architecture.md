@@ -1486,8 +1486,8 @@ recommendation)`` is pure and deterministic.  Verdicts:
 * ``SUPPORTED`` — host satisfies all declared requirements, no conflicts;
 * ``BLOCKED`` — no requirements, unsupported backend, no accelerator
   hardware, driver blocked, or cross-product conflicts (exact-pin
-  disagreements, pin vs excluding range, requirement vs declared
-  incompatibility);
+  disagreements, pin vs excluding range, obviously disjoint simple
+  ranges, requirement vs declared incompatibility);
 * ``UNKNOWN`` — partial host evidence or unknown recommendation.
 
 Fail-closed: silence never means "supported"; an unknown state never
@@ -1501,7 +1501,10 @@ platform + optional sha256).  Lookups are fail-closed: zero matches →
 ``None``, more than one match → ``AmbiguousVariantError``.  The default
 catalog is **empty**: real plans stay blocked until M1-2I supplies artifact
 acquisition.  A missing variant blocks the whole plan — no partial fallback,
-no approximate stack.
+no approximate stack.  A found variant must also satisfy the merged
+specifier (evaluated with prereleases allowed): a variant that does not
+satisfy it is treated as unavailable and blocks the plan with a
+deterministic detail.
 
 ### Accelerated DeploymentPlan
 
@@ -1517,7 +1520,9 @@ filesystem.  The plan documents:
 * ``keep_products`` copied **verbatim** from provenance (product id, exact
   version, commit SHA, wheel SHA-256) — never re-resolved; products known
   only from the installed-runtime lock degrade commit/wheel SHAs to
-  ``None`` (never fabricated);
+  ``None`` (never fabricated); every entry carries a ``source`` tag —
+  ``"provenance"`` or ``"installed_lock"`` — documenting which read-only
+  store supplied it;
 * merged ``added_requirements`` — one entry per distribution (combined
   specifier, union of extras, sorted declaring products, selected variant);
 * source runtime state/slot snapshot and a descriptive ``target_runtime``;
@@ -1535,9 +1540,12 @@ The plan is deterministic: equal inputs produce equal plans.
   preview (exit 0), unexpected exceptions exit non-zero.
 * ``AccelerationPanel`` — the "Configurer le GPU" click now appends the
   honest plan preview (pure ``gpu_plan_preview_lines`` presentation) to the
-  existing detail area.  No install action exists; a planning failure
-  degrades to an honest notice, never a crash.  The preview never claims an
-  installation happened.
+  existing detail area.  The main window stores the capabilities
+  observation and the recommendation derived from it (one observation
+  cycle) and the panel passes both to the plan preview, so the click never
+  triggers a second hardware observation.  No install action exists; a
+  planning failure degrades to an honest notice, never a crash.  The
+  preview never claims an installation happened.
 
 ### Deferred to M1-2I
 

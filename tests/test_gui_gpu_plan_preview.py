@@ -35,6 +35,7 @@ from zealfie.host.models import (
     CapabilityStatus,
     GpuInfo,
     GpuKind,
+    HostCapabilities,
     HostReasonCode,
     RecommendationStatus,
 )
@@ -191,7 +192,7 @@ def test_preview_plan_ready_honest_detail():
     assert f"Keep zebench 2.0.0 (commit {SHA_A})" in text
     assert "Planned actions:" in text
     assert "Add accelerated-lib (>=1.0) [variant 1.2.0]" in text
-    assert "Aucune modification n'a encore été effectuée." in text
+    assert "No changes have been made yet." in text
     # Honest detail only: never claims an install happened.
     assert "installed" not in text.lower()
 
@@ -210,7 +211,7 @@ def test_preview_plan_ready_without_keep_products():
     text = "\n".join(lines)
     assert "Products concerned: zebench" in text
     assert "Planned actions: none recorded" in text
-    assert "Aucune modification n'a encore été effectuée." in text
+    assert "No changes have been made yet." in text
 
 
 # ===========================================================================
@@ -306,7 +307,7 @@ def test_panel_click_shows_plan_preview_lines(qapp):
         text = panel._detail_label.text()
         assert "no CUDA toolkit was installed" in text
         assert "Backend: NVIDIA_CUDA" in text
-        assert "Aucune modification n'a encore été effectuée." in text
+        assert "No changes have been made yet." in text
     finally:
         panel.close()
         panel.deleteLater()
@@ -325,7 +326,7 @@ def test_panel_without_plan_method_is_graceful(qapp):
         text = panel._detail_label.text()
         # Existing intent behaviour preserved, no plan preview, no crash.
         assert "no CUDA toolkit was installed" in text
-        assert "Aucune modification" not in text
+        assert "No changes have been made" not in text
     finally:
         panel.close()
         panel.deleteLater()
@@ -345,6 +346,123 @@ def test_panel_survives_plan_build_error(qapp):
         assert "no CUDA toolkit was installed" in text
         assert "GPU plan preview unavailable" in text
         assert "Traceback" not in text
+    finally:
+        panel.close()
+        panel.deleteLater()
+        qapp.processEvents()
+
+# ===========================================================================
+# 3) Single-observation preview: stored capabilities + recommendation
+# ===========================================================================
+
+
+def _caps() -> HostCapabilities:
+    """A synthetic complete host observation (never real hardware)."""
+    return HostCapabilities(
+        os_name="linux",
+        cpu_arch="x86_64",
+        platform_status=CapabilityStatus.AVAILABLE,
+        platform_reason_code=HostReasonCode.OS_DETECTED,
+        platform_reason="os detected",
+        gpus=(),
+        partial=False,
+    )
+
+
+class _FakeCapabilityAwareGpuPlanService:
+    """Panel service that records plan-builder kwargs and counts probes."""
+
+    def __init__(self, plan=None) -> None:
+        self._plan = plan
+        self.plan_kwargs = []
+        self.collect_calls = 0
+
+    def prepare_gpu_setup_intent(self, recommendation=None):
+        from zealfie.host.models import GpuSetupIntent
+
+        return GpuSetupIntent(
+            recommendation=recommendation,
+            actionable=True,
+            message="GPU setup prepared, but no CUDA toolkit was installed.",
+        )
+
+    def collect_host_capabilities(self):
+        self.collect_calls += 1
+        return _caps()
+
+    def build_accelerated_deployment_plan(self, **kwargs):
+        self.plan_kwargs.append(kwargs)
+        return self._plan
+
+
+@needs_qt
+def test_panel_passes_stored_capabilities_to_plan_builder(qapp):
+    """When both capabilities and recommendation are stored, the click
+    passes both kwargs to the plan builder — no second probe."""
+    from zealfie.gui.acceleration_panel import AccelerationPanel
+
+    rec = _rec()
+    caps = _caps()
+    service = _FakeCapabilityAwareGpuPlanService(plan=_ready_plan())
+    panel = AccelerationPanel(service=service)
+    try:
+        panel.set_recommendation(rec, capabilities=caps)
+        panel._button.click()
+        assert service.plan_kwargs == [
+            {"capabilities": caps, "recommendation": rec}
+        ]
+        assert service.plan_kwargs[0]["capabilities"] is caps
+        assert service.plan_kwargs[0]["recommendation"] is rec
+        # The panel never invoked the service capability collector.
+        assert service.collect_calls == 0
+        assert "Backend: NVIDIA_CUDA" in panel._detail_label.text()
+    finally:
+        panel.close()
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+@needs_qt
+def test_plan_builder_with_both_kwargs_does_not_reprobe_capabilities(qapp):
+    """A builder called with both stored kwargs never triggers a second
+    hardware observation (counting fake collector stays at zero)."""
+    from zealfie.gui.acceleration_panel import AccelerationPanel
+
+    rec = _rec()
+    caps = _caps()
+    service = _FakeCapabilityAwareGpuPlanService(plan=_ready_plan())
+    panel = AccelerationPanel(service=service)
+    try:
+        panel.set_recommendation(rec, capabilities=caps)
+        panel._button.click()
+        assert service.collect_calls == 0
+        assert len(service.plan_kwargs) == 1
+        assert service.plan_kwargs[0] == {
+            "capabilities": caps,
+            "recommendation": rec,
+        }
+    finally:
+        panel.close()
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+@needs_qt
+def test_panel_without_stored_capabilities_falls_back_to_recommendation_only(
+    qapp,
+):
+    """Without a stored observation the builder is called
+    recommendation-only (documented fallback)."""
+    from zealfie.gui.acceleration_panel import AccelerationPanel
+
+    rec = _rec()
+    service = _FakeCapabilityAwareGpuPlanService(plan=_ready_plan())
+    panel = AccelerationPanel(service=service)
+    try:
+        panel.set_recommendation(rec)
+        panel._button.click()
+        assert service.plan_kwargs == [{"recommendation": rec}]
+        assert service.collect_calls == 0
     finally:
         panel.close()
         panel.deleteLater()

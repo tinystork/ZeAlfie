@@ -459,6 +459,7 @@ def test_installed_lock_only_keep_degrades_shas_to_none(tmp_path):
             version="3.1.0",
             commit_sha=None,
             wheel_sha256=None,
+            source="installed_lock",
         ),
     )
 
@@ -522,6 +523,80 @@ def test_provenance_wins_over_installed_lock(tmp_path):
             commit_sha=SHA_A,
             wheel_sha256=WHEEL_A,
         ),
+    )
+
+
+def test_keep_products_carry_source_tags(tmp_path):
+    """Provenance KEEP entries carry source='provenance'; installed-lock
+    fallback entries carry source='installed_lock'."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    prov_store = ProductProvenanceStore(layout)
+    prov_store.record(
+        "rt-abc123",
+        [
+            ProductProvenance(
+                product_id="zebench",
+                version="2.0.0",
+                source_owner="tinystork",
+                source_repo="ZeBench",
+                requested_ref="main",
+                commit_sha=SHA_A,
+                wheel_sha256=WHEEL_A,
+            )
+        ],
+    )
+    lock_store = InstalledLockStore(layout)
+    lock_store.record(
+        "rt-abc123",
+        InstalledRuntimeLock(
+            primary_names=frozenset({"zeother"}),
+            dependencies={
+                "zeother": InstalledDependency(
+                    name="zeother", version="1.5.0", primary=True
+                )
+            },
+        ),
+    )
+    save_active_state(layout.active_pointer, "rt-abc123", None)
+
+    other = ProductDescriptor(
+        product_id="zeother",
+        display_name="ZeOther",
+        distribution_name="zeother",
+        launch_entry_points=_EP,
+    )
+    service = ZeAlfieService(
+        catalog=ProductCatalog((_descriptor_plain(), other)),
+        runtime=_FakeRt(
+            RuntimeStatus(
+                state=RuntimeState.READY,
+                runtime_root=layout.root,
+                active_slot_id="rt-abc123",
+            )
+        ),
+        host=_host(),
+        capability_collector=_caps,
+        recommender=lambda caps: _recommendation(
+            RecommendationStatus.NOT_APPLICABLE
+        ),
+        provenance_store=prov_store,
+        installed_lock_store=lock_store,
+    )
+    plan = service.build_accelerated_deployment_plan()
+
+    by_id = {keep.product_id: keep for keep in plan.keep_products}
+    assert set(by_id) == {"zebench", "zeother"}
+    assert by_id["zebench"].source == "provenance"
+    assert by_id["zebench"].commit_sha == SHA_A
+    assert by_id["zebench"].wheel_sha256 == WHEEL_A
+    assert by_id["zeother"].source == "installed_lock"
+    assert by_id["zeother"].commit_sha is None
+    assert by_id["zeother"].wheel_sha256 is None
+    assert by_id["zeother"].version == "1.5.0"
+    # Deterministic order by product id.
+    assert tuple(keep.product_id for keep in plan.keep_products) == (
+        "zebench",
+        "zeother",
     )
 
 

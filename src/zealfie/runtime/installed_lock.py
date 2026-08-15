@@ -33,6 +33,10 @@ never a fabricated lock.  This store drives no install/update/rollback/KEEP
 decision; it is written only after successful activation and successful
 selection persistence, alongside provenance, and a write failure leaves the
 runtime active (identical non-destructive semantics to provenance).
+Documenting installed reality inside a read-only preview plan — as the
+M1-2H accelerated GPU plan does, degrading ``commit_sha`` / ``wheel_sha256``
+to ``None`` and never fabricating them — is observational documentation,
+not a deployment KEEP decision, and does not violate that invariant.
 
 Storage layout (``RuntimeLayout.state_dir / installed-lock.json``)::
 

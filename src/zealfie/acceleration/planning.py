@@ -10,7 +10,8 @@ Architectural invariant — ZeAlfie NEVER selects a concrete accelerated
 framework.  Requirements are merged per distribution across products,
 and concrete variants are looked up in an explicit
 :class:`~zealfie.acceleration.variants.AcceleratedVariantCatalog`;
-a missing variant blocks the plan (fail-closed, no partial fallback,
+a missing variant — or a found variant that does not satisfy the
+merged specifier — blocks the plan (fail-closed, no partial fallback,
 no silent approximation).  KEEP products are documented verbatim from
 provenance and are never re-resolved.
 """
@@ -55,13 +56,17 @@ class PlannedKeepProduct:
     installed version, and ``commit_sha`` / ``wheel_sha256`` are the
     provenance records of the source commit and artifact digest.  The
     planner documents these values verbatim; it never resolves,
-    rebuilds, or alters them.
+    rebuilds, or alters them.  ``source`` documents which read-only
+    store supplied the record: ``"provenance"`` (authoritative, SHAs
+    present) or ``"installed_lock"`` (fallback, SHAs degraded to
+    ``None``).
     """
 
     product_id: str
     version: str
     commit_sha: str | None = None
     wheel_sha256: str | None = None
+    source: str = "provenance"
 
     def __post_init__(self) -> None:
         if not isinstance(self.product_id, str) or not self.product_id.strip():
@@ -80,6 +85,12 @@ class PlannedKeepProduct:
                         f"{field_name} must be None or a non-empty string"
                     )
                 object.__setattr__(self, field_name, value.strip())
+
+        if self.source not in ("provenance", "installed_lock"):
+            raise ValueError(
+                "source must be 'provenance' or 'installed_lock', "
+                f"got {self.source!r}"
+            )
 
 
 class VariantStatus(str, Enum):
@@ -376,6 +387,7 @@ def _sorted_keep_products(
                 keep.version,
                 keep.commit_sha or "",
                 keep.wheel_sha256 or "",
+                keep.source,
             ),
         )
     )
@@ -408,10 +420,14 @@ def build_accelerated_deployment_plan(
        sorted set of declared backends (multiple backends → blocked,
        "conflicting acceleration backends"); merge requirements into
        one entry per distribution and look each distribution up in
-       *variant_catalog* with *backend* and *platform_tag*;
-    6. any missing variant → ``BLOCKED`` listing the missing
-       distributions (no partial fallback); otherwise ``PLAN_READY``
-       with the deterministic closure impact lines.
+       *variant_catalog* with *backend* and *platform_tag*; a found
+       variant must also satisfy the merged specifier (checked with
+       prereleases allowed) — a variant that does not satisfy it is
+       treated as unavailable;
+    6. any missing or unsatisfying variant → ``BLOCKED`` listing the
+       missing distributions with deterministic details (no partial
+       fallback); otherwise ``PLAN_READY`` with the deterministic
+       closure impact lines.
 
     The planner never mutates its inputs and never performs I/O.
     ``keep_products`` values are documented verbatim — provenance is
@@ -515,6 +531,21 @@ def build_accelerated_deployment_plan(
         variant = variant_catalog.find_variant(
             distribution, backend, platform_tag
         )
+        missing_detail: str | None = None
+        if variant is not None and combined_specifier is not None:
+            # The merged specifier is the contract: a found variant must
+            # satisfy it.  Prereleases are allowed — variants are declared
+            # artifacts and may legitimately be prereleases.  A variant
+            # that does not satisfy the contract is treated as unavailable
+            # (fail-closed, deterministic detail).
+            if not SpecifierSet(combined_specifier).contains(
+                variant.version, prereleases=True
+            ):
+                missing_detail = (
+                    f"{distribution} (declared {combined_specifier} not "
+                    f"satisfied by available variant {variant.version})"
+                )
+                variant = None
         planned.append(
             PlannedAcceleratedDependency(
                 distribution=distribution,
@@ -530,7 +561,7 @@ def build_accelerated_deployment_plan(
             )
         )
         if variant is None:
-            missing.append(distribution)
+            missing.append(missing_detail or distribution)
 
     if missing:
         return AcceleratedDeploymentPlan(

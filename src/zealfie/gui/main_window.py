@@ -306,7 +306,14 @@ class ZeAlfieMainWindow(QMainWindow):
         self._refresh_acceleration()
 
     def _refresh_acceleration(self) -> None:
-        """Update the acceleration panel from the service recommendation.
+        """Update the acceleration panel from the service observation.
+
+        Exactly one observation cycle: when the service exposes
+        ``collect_host_capabilities``, the capabilities are collected
+        once, the recommendation is derived from that exact
+        observation, and both are stored in the panel — so the
+        configure click's plan preview never triggers a second
+        hardware observation.
 
         Tolerates services without the acceleration API and any probe
         failure — the panel falls back to an honest unknown/error state and
@@ -318,13 +325,21 @@ class ZeAlfieMainWindow(QMainWindow):
         if not callable(getter):
             self._acceleration_panel.set_unknown()
             return
+        collector = getattr(self._service, "collect_host_capabilities", None)
         try:
-            recommendation = getter()
+            if callable(collector):
+                capabilities = collector()
+                recommendation = getter(capabilities)
+            else:
+                capabilities = None
+                recommendation = getter()
         except Exception as exc:
             logger.error("acceleration recommendation failed: %s", exc)
             self._acceleration_panel.set_error(str(exc))
             return
-        self._acceleration_panel.set_recommendation(recommendation)
+        self._acceleration_panel.set_recommendation(
+            recommendation, capabilities=capabilities
+        )
 
     # ------------------------------------------------------------------
     # M1-2E LOT E.4: Read-only update checks (informational only)

@@ -6,9 +6,11 @@ Displays the acceleration recommendation computed by the service and a
 no subprocess, nvidia-smi, /sys, platform probing, or CUDA compatibility
 decision logic.  The configure action routes through
 ``service.prepare_gpu_setup_intent`` and never claims installation success.
-The panel stores the recommendation it is currently displaying and passes
-that exact recommendation to ``prepare_gpu_setup_intent`` on click, so the
-configure action never triggers a second hardware observation.
+The panel stores the recommendation it is currently displaying — plus the
+host capabilities observation it was derived from, when supplied — and
+passes those exact stored values to ``prepare_gpu_setup_intent`` and the
+GPU plan preview on click, so the configure action never triggers a second
+hardware observation.
 """
 
 from __future__ import annotations
@@ -24,7 +26,11 @@ from PySide6.QtWidgets import (
 )
 
 from zealfie.gui.presentation import gpu_plan_preview_lines
-from zealfie.host import AccelerationRecommendation, RecommendationStatus
+from zealfie.host import (
+    AccelerationRecommendation,
+    HostCapabilities,
+    RecommendationStatus,
+)
 
 
 def configure_button_visible(recommendation: AccelerationRecommendation | None) -> bool:
@@ -115,15 +121,18 @@ def _short_multiline(text: str, limit: int = 240) -> str:
 class AccelerationPanel(QFrame):
     """A compact hardware acceleration status panel.
 
-    Receives a recommendation via :meth:`set_recommendation`.  The configure
-    button only routes through the service's preparatory intent and displays
-    an honest message; it never performs or claims an install.
+    Receives a recommendation (and, optionally, the host capabilities
+    observation it was derived from) via :meth:`set_recommendation`.  The
+    configure button only routes through the service's preparatory intent
+    and the read-only GPU plan preview, reusing the stored observation;
+    it never performs or claims an install.
     """
 
     def __init__(self, service, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._service = service
         self._recommendation: AccelerationRecommendation | None = None
+        self._capabilities: HostCapabilities | None = None
         self._summary_label: QLabel | None = None
         self._detail_label: QLabel | None = None
         self._button: QPushButton | None = None
@@ -166,10 +175,19 @@ class AccelerationPanel(QFrame):
     # ------------------------------------------------------------------
 
     def set_recommendation(
-        self, recommendation: AccelerationRecommendation | None
+        self,
+        recommendation: AccelerationRecommendation | None,
+        capabilities: HostCapabilities | None = None,
     ) -> None:
-        """Render a recommendation (or an unknown state when ``None``)."""
+        """Render a recommendation (or an unknown state when ``None``).
+
+        *capabilities* is the host observation the recommendation was
+        derived from.  When both are supplied, the configure action
+        reuses the exact stored pair for the GPU plan preview, so it
+        never triggers a second hardware observation.
+        """
         self._recommendation = recommendation
+        self._capabilities = capabilities
         summary = panel_summary(recommendation)
         detail = panel_detail(recommendation)
 
@@ -188,6 +206,7 @@ class AccelerationPanel(QFrame):
     def set_error(self, message: str) -> None:
         """Show an unknown/error state when the recommendation probe fails."""
         self._recommendation = None
+        self._capabilities = None
         if self._summary_label is not None:
             self._summary_label.setText("GPU acceleration status is unknown.")
         if self._detail_label is not None:
@@ -224,18 +243,25 @@ class AccelerationPanel(QFrame):
         """Build the read-only GPU deployment plan preview (M1-2H).
 
         Uses the service's ``build_accelerated_deployment_plan`` when
-        available, passing the currently displayed recommendation so
-        the plan never triggers a second hardware observation.  A
-        missing method degrades to no preview lines; a planning
-        failure degrades to an honest notice — never a crash.
+        available, passing the currently displayed recommendation —
+        plus the stored capabilities observation when one was supplied
+        — so the plan never triggers a second hardware observation.
+        When only a recommendation is stored, the builder is called
+        recommendation-only (documented fallback: the service then
+        re-observes capabilities itself).  A missing method degrades
+        to no preview lines; a planning failure degrades to an honest
+        notice — never a crash.
         """
         builder = getattr(
             self._service, "build_accelerated_deployment_plan", None
         )
         if not callable(builder):
             return []
+        kwargs: dict = {"recommendation": self._recommendation}
+        if self._capabilities is not None and self._recommendation is not None:
+            kwargs["capabilities"] = self._capabilities
         try:
-            plan = builder(recommendation=self._recommendation)
+            plan = builder(**kwargs)
         except Exception as exc:
             return [f"GPU plan preview unavailable: {_short(str(exc))}"]
         return list(gpu_plan_preview_lines(plan))

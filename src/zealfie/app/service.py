@@ -593,13 +593,19 @@ class ZeAlfieService:
         """Build the read-only accelerated GPU deployment plan (M1-2H).
 
         Collects the host observation (unless *capabilities* is
-        provided), derives the acceleration recommendation (unless
-        *recommendation* is provided — the recommendation is then
-        derived from the exact same observation, so host probes run
-        only once), reads the current runtime status, documents KEEP
-        products verbatim from active provenance and the installed
-        runtime lock, and delegates to the pure
+        provided) and derives the acceleration recommendation (unless
+        *recommendation* is provided), reads the current runtime
+        status, documents KEEP products verbatim from active
+        provenance and the installed runtime lock, and delegates to
+        the pure
         :func:`~zealfie.acceleration.planning.build_accelerated_deployment_plan`.
+
+        Callers that already hold both the capabilities observation
+        and the recommendation derived from it — such as the GUI
+        preview — should pass both, so no second hardware observation
+        occurs.  Supplying only *recommendation* still triggers a
+        fresh capability observation (the recommendation alone is not
+        an observation), and supplying neither triggers exactly one.
 
         **100% read-only:** no writes, no network, no runtime
         mutation, no selection persistence, no install.  KEEP identity
@@ -608,7 +614,9 @@ class ZeAlfieService:
         ``wheel_sha256``; products known only from the installed lock
         degrade ``commit_sha`` / ``wheel_sha256`` to ``None``; when no
         provenance or installed-lock record exists at all,
-        ``keep_products`` may be empty.
+        ``keep_products`` may be empty.  Every KEEP entry carries a
+        ``source`` tag (``"provenance"`` or ``"installed_lock"``)
+        documenting which read-only store supplied it.
 
         *variant_catalog* defaults to
         :func:`~zealfie.acceleration.variants.default_variant_catalog`
@@ -652,12 +660,14 @@ class ZeAlfieService:
 
         1. active provenance (authoritative): ``product_id``,
            ``version``, ``commit_sha`` and ``wheel_sha256`` are copied
-           verbatim — never re-resolved, never revalidated;
+           verbatim — never re-resolved, never revalidated — with
+           ``source="provenance"``;
         2. installed-runtime lock (fallback): a primary installed
            distribution whose name maps to a catalog product without a
            provenance record contributes ``product_id`` + installed
            ``version`` with ``commit_sha`` / ``wheel_sha256`` degraded
-           to ``None`` (planning never fabricates).
+           to ``None`` (planning never fabricates) and
+           ``source="installed_lock"``.
 
         Products from provenance are kept even when absent from the
         catalog (verbatim documentation).  Returns an empty mapping
@@ -671,6 +681,7 @@ class ZeAlfieService:
                 version=prov.version,
                 commit_sha=prov.commit_sha,
                 wheel_sha256=prov.wheel_sha256,
+                source="provenance",
             )
         lock = self.active_installed_lock()
         if lock is not None and lock.dependencies:
@@ -689,6 +700,7 @@ class ZeAlfieService:
                     version=dep.version,
                     commit_sha=None,
                     wheel_sha256=None,
+                    source="installed_lock",
                 )
         return keeps
 
