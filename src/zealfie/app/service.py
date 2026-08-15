@@ -59,12 +59,16 @@ from zealfie.acceleration import (
     AcceleratedSlotMetadataStore,
     AcceleratedVariantCatalog,
     CooperativeCancellationError,
+    HardwareCompatibilityStatus,
     PlannedKeepProduct,
     apply_accelerated_deployment,
     build_accelerated_deployment_plan,
     default_accelerated_artifact_acquirer,
     default_accelerated_gate,
     default_variant_catalog,
+)
+from zealfie.acceleration.compatibility import (
+    evaluate_acceleration_compatibility,
 )
 from zealfie.app.progress import InstallPhase, InstallProgress, PHASE_PERCENT
 from zealfie.app.updates import (
@@ -770,6 +774,22 @@ class ZeAlfieService:
            performs NO acquisition and NO runtime work.  This is the
            honest default on TINYDEBIAN today: no product declares GPU
            requirements and the default variant catalog is empty.
+        2b. Deploy-time hardware re-verification (TOCTOU, fail-closed):
+            strictly after the plan-status gate and strictly BEFORE any
+            base preparation or acquisition, the catalog's acceleration
+            requirements for ``plan.products_concerned`` are
+            re-evaluated against a fresh host observation
+            (:func:`~zealfie.acceleration.compatibility.evaluate_acceleration_compatibility`).
+            This closes the planning->deployment observation window
+            (driver removed, GPU disabled, partial evidence, or a
+            catalog requirement vanished after planning): a fresh
+            non-``SUPPORTED`` verdict — or a recommendation backend that
+            no longer matches ``plan.backend`` — fails closed at
+            ``phase=PREPARE`` with an honest "late GPU compatibility
+            conflict" reason and zero mutation.  Provided
+            *capabilities* / *recommendation* are reused verbatim (no
+            second probe); omitted values are collected/derived exactly
+            once at this check.
         3. The base deployment plan is produced for the current full
            desired state: every managed product at its exact installed
            version.  Base artifacts come from ``full_state_provider()``
@@ -806,8 +826,11 @@ class ZeAlfieService:
             Optional pre-built accelerated plan.  ``None`` builds it via
             the read-only M1-2H path.
         capabilities / recommendation:
-            Passed to the plan build when *plan* is ``None``; omitted
-            values are collected/derived exactly once.
+            Reused verbatim wherever supplied — by the read-only plan
+            build when *plan* is ``None`` and by the deploy-time
+            hardware re-verification (no probe when provided).  When
+            omitted, each consumer that needs them collects/derives its
+            own observation exactly once.
         acquirer:
             Accelerated artifact source.  Defaults to the fail-closed
             default acquirer (no real source configured yet).
@@ -883,6 +906,64 @@ class ZeAlfieService:
                 cancelled=False,
                 phase=AcceleratedDeploymentPhase.PREPARE,
                 reason="accelerated plan has no backend",
+            )
+
+        # ---- 2b. Deploy-time hardware re-verification (TOCTOU) ------------
+        # The read-only plan and this transactional install are separate
+        # observations: between planning and deployment the host may have
+        # changed (driver removed, GPU disabled, partial evidence).  Like
+        # artifact revalidation, the hardware side is re-checked here —
+        # strictly after the plan-status gate (so a non-PLAN_READY plan
+        # never probes) and strictly BEFORE any base preparation or
+        # acquisition, so a late conflict performs zero mutation.
+        # Provided *capabilities* / *recommendation* are reused verbatim
+        # (no second probe); omitted values are collected/derived exactly
+        # once.  The evaluator result is used directly: SUPPORTED passes,
+        # anything else fails closed with the honest reason — including an
+        # empty requirements map, because a PLAN_READY plan whose catalog
+        # requirements vanished is itself a late conflict.
+        deploy_capabilities = (
+            capabilities
+            if capabilities is not None
+            else self.collect_host_capabilities()
+        )
+        deploy_recommendation = (
+            recommendation
+            if recommendation is not None
+            else self.get_acceleration_recommendation(deploy_capabilities)
+        )
+        requirements_map = {}
+        for pid in plan.products_concerned:
+            descriptor = self._catalog.get(pid)
+            if descriptor.acceleration is not None:
+                requirements_map[pid] = descriptor.acceleration
+        hardware = evaluate_acceleration_compatibility(
+            requirements_map, deploy_capabilities, deploy_recommendation
+        )
+        if hardware.status is not HardwareCompatibilityStatus.SUPPORTED:
+            return AcceleratedDeploymentResult(
+                success=False,
+                cancelled=False,
+                phase=AcceleratedDeploymentPhase.PREPARE,
+                reason=(
+                    "late GPU compatibility conflict detected at "
+                    f"deployment time: {hardware.reason}"
+                ),
+            )
+        if (
+            plan.backend is not None
+            and deploy_recommendation.backend != plan.backend
+        ):
+            return AcceleratedDeploymentResult(
+                success=False,
+                cancelled=False,
+                phase=AcceleratedDeploymentPhase.PREPARE,
+                reason=(
+                    "late GPU compatibility conflict detected at "
+                    "deployment time: accelerator backend changed from "
+                    f"{plan.backend!r} at planning to "
+                    f"{deploy_recommendation.backend!r} at deployment"
+                ),
             )
 
         # ---- 3. Base full-state plan (KEEP semantics) + ACQUIRE + apply --

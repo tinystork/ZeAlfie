@@ -67,6 +67,7 @@ from zealfie.runtime import (
     DesiredRuntimeState,
     InstalledLockStore,
     RuntimeLayout,
+    RuntimeReasonCode,
     RuntimeState,
     RuntimeStatus,
     SharedRuntime,
@@ -864,5 +865,66 @@ def test_accelerated_plan_without_backend_refused(
     assert result.cancelled is False
     assert result.phase is AcceleratedDeploymentPhase.PREPARE
     assert "has no backend" in (result.reason or "")
+    assert rt.status().active_slot_id == active_before
+    _assert_slot_usable(layout, active_before, "zealfie-witness")
+
+class _ActivationFailingRuntime:
+    """Thin proxy over a real ``SharedRuntime``: every method
+    delegates unchanged except ``activate``, which deterministically
+    reports a failed activation.
+
+    A non-READY activation status is the runtime layer's own failure
+    channel — the M0-8B engine maps it to ``reason="activation
+    failed: ..."`` without ever touching the active pointer, which the
+    accelerated orchestrator classifies as phase ACTIVATE.
+    """
+
+    def __init__(self, real: SharedRuntime) -> None:
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def activate(self, txn) -> RuntimeStatus:
+        return RuntimeStatus(
+            state=RuntimeState.BROKEN,
+            runtime_root=self._real.layout.root,
+            reason_code=RuntimeReasonCode.ACTIVATION_FAILED,
+            reason="synthetic activation failure injection",
+        )
+
+
+def test_activation_failure_preserves_active_runtime(
+    tmp_path: Path, witness_v1: Path, fake_accel_wheel: Path,
+) -> None:
+    """Activation failure (I.7 case 7): the orchestrator reports
+    success=False at phase ACTIVATE and the previously active slot
+    stays the active pointer — untouched and still usable."""
+    rt, layout, _, _, dep_plan, active_before = _prepare(tmp_path, witness_v1)
+    accel_plan = _accel_plan(active_before)
+
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    acquired = _SingleWheelAcquirer(fake_accel_wheel).acquire(
+        accel_plan, work_root
+    )
+
+    result = apply_accelerated_deployment(
+        accelerated_plan=accel_plan,
+        deployment_plan=dep_plan,
+        registry=_registry(),
+        runtime=_ActivationFailingRuntime(rt),
+        acquired=acquired,
+        declaring_distributions={"zewitness": "zealfie-witness"},
+    )
+
+    assert result.success is False
+    assert result.cancelled is False
+    assert result.phase is AcceleratedDeploymentPhase.ACTIVATE
+    assert "activation failed" in (result.reason or "")
+    assert result.old_runtime_preserved is True
+
+    # The active pointer was never switched: the old runtime is still
+    # the active slot and remains fully usable.
     assert rt.status().active_slot_id == active_before
     _assert_slot_usable(layout, active_before, "zealfie-witness")

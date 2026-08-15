@@ -44,6 +44,7 @@ from zealfie.acceleration import (
     AcceleratedDeploymentPlan,
     AcceleratedPlanStatus,
     AcceleratedVariant,
+    AcceleratedVariantCatalog,
     CooperativeCancellationError,
     HardwareCompatibility,
     HardwareCompatibilityReasonCode,
@@ -70,9 +71,12 @@ from zealfie.app import (
 )
 from zealfie.building import inspect_wheel
 from zealfie.components.model import EntryPointContract
+from zealfie.host import recommend
 from zealfie.host.models import (
     AccelerationRecommendation,
     CapabilityStatus,
+    GpuInfo,
+    GpuKind,
     HostCapabilities,
     HostReasonCode,
     RecommendationStatus,
@@ -169,6 +173,35 @@ def _recommendation() -> AccelerationRecommendation:
         reason_code=HostReasonCode.ACCELERATION_OFFER_SETUP,
         reason="supported accelerator detected; setup offered",
     )
+
+
+def _variant_catalog() -> AcceleratedVariantCatalog:
+    """Synthetic variant catalog: fake-accel 1.0.0 for NVIDIA_CUDA on
+    the service host platform tag."""
+    return AcceleratedVariantCatalog((
+        AcceleratedVariant(
+            distribution="fake-accel",
+            version="1.0.0",
+            backend="NVIDIA_CUDA",
+            platform="linux_x86_64",
+        ),
+    ))
+
+
+def _driver_unavailable_caps() -> HostCapabilities:
+    """SUPPORTED-looking host with an NVIDIA GPU whose driver is gone."""
+    return _caps(gpus=(
+        GpuInfo(
+            vendor="NVIDIA",
+            model="Tesla T4",
+            kind=GpuKind.DISCRETE,
+            hardware_present=True,
+            driver_status=CapabilityStatus.UNAVAILABLE,
+            driver_version=None,
+            driver_reason_code=HostReasonCode.NVIDIA_DRIVER_UNAVAILABLE,
+            driver_reason="nvidia driver not available",
+        ),
+    ))
 
 
 def _sha256(path: Path) -> str:
@@ -511,6 +544,8 @@ def test_service_default_acquirer_fail_closed(tmp_path, witness_v1):
 
     result = service.install_accelerated_runtime(
         plan=plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=None,  # -> fail-closed default
         full_state_provider=lambda: [_witness_ppa(witness_v1)],
         dependency_wheelhouse=_empty_wheelhouse(tmp_path),
@@ -555,6 +590,8 @@ def test_service_late_conflict_specifier_violation(
 
     result = service.install_accelerated_runtime(
         plan=plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=wrong_version_acquirer,
         full_state_provider=lambda: [_witness_ppa(witness_v1)],
         dependency_wheelhouse=_empty_wheelhouse(tmp_path),
@@ -598,6 +635,8 @@ def test_service_cancellation_at_acquire(tmp_path, witness_v1):
 
     result = service.install_accelerated_runtime(
         plan=plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=acquirer,
         full_state_provider=lambda: [_witness_ppa(witness_v1)],
         dependency_wheelhouse=_empty_wheelhouse(tmp_path),
@@ -612,6 +651,222 @@ def test_service_cancellation_at_acquire(tmp_path, witness_v1):
     assert calls == [1]
     assert acquirer.calls == 0
     assert not layout.slots.exists()
+
+
+# =============================================================================
+# Deploy-time hardware re-verification (late GPU conflict, FAST)
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "changed_caps",
+    [
+        pytest.param(_caps(partial=True), id="partial-evidence"),
+        pytest.param(_driver_unavailable_caps(), id="driver-unavailable"),
+    ],
+)
+def test_service_deploy_time_late_conflict_no_mutation(
+    tmp_path, changed_caps,
+):
+    """A plan built with SUPPORTED capabilities is refused when the
+    deploy-time re-verification observes changed hardware evidence:
+    success=False, phase=PREPARE, honest late-conflict reason, and zero
+    mutation (no candidate slot, no acquisition, no base preparation)."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    runtime = SharedRuntime(layout=layout)
+    service = ZeAlfieService(
+        catalog=_catalog(),
+        runtime=runtime,
+        selection_store=SelectionStore(path=tmp_path / "desired-products.toml"),
+        host=_host(),
+        capability_collector=lambda: _caps(),
+        recommender=recommend,
+    )
+    plan = service.build_accelerated_deployment_plan(
+        capabilities=_caps(),
+        recommendation=_recommendation(),
+        variant_catalog=_variant_catalog(),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    assert plan.backend == "NVIDIA_CUDA"
+
+    acquirer = _SpyAcquirer()
+    provider_calls: list[int] = []
+
+    def provider():
+        provider_calls.append(1)
+        raise AssertionError("full_state_provider must not be called")
+
+    slots_before = (
+        sorted(p.name for p in layout.slots.iterdir())
+        if layout.slots.exists()
+        else []
+    )
+
+    result = service.install_accelerated_runtime(
+        plan=plan,
+        capabilities=changed_caps,
+        acquirer=acquirer,
+        full_state_provider=provider,
+        work_root=tmp_path / "work",
+    )
+
+    assert result.success is False
+    assert result.cancelled is False
+    assert result.phase is AcceleratedDeploymentPhase.PREPARE
+    assert "late GPU compatibility conflict detected at deployment time" in (
+        result.reason or ""
+    )
+    assert result.old_runtime_preserved is True
+    assert acquirer.calls == 0
+    assert provider_calls == []
+    slots_after = (
+        sorted(p.name for p in layout.slots.iterdir())
+        if layout.slots.exists()
+        else []
+    )
+    assert slots_after == slots_before
+    assert runtime.status().state.value == "ABSENT"
+    assert runtime.status().active_slot_id is None
+
+
+def test_service_deploy_time_check_probe_counting(tmp_path, witness_v1):
+    """A counting capability collector proves the deploy-time
+    re-verification collects exactly once when capabilities are omitted
+    and never when capabilities + recommendation are both provided."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    runtime = SharedRuntime(layout=layout)
+
+    class _CountingCollector:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return _caps()
+
+    collector = _CountingCollector()
+    service = ZeAlfieService(
+        catalog=_catalog(),
+        runtime=runtime,
+        selection_store=SelectionStore(path=tmp_path / "desired-products.toml"),
+        host=_host(),
+        capability_collector=collector,
+        recommender=lambda caps: _recommendation(),
+    )
+    keep = PlannedKeepProduct(
+        product_id="zewitness",
+        version="0.0.1",
+        commit_sha=WITNESS_SHA,
+        wheel_sha256=_sha256(witness_v1),
+        source="provenance",
+    )
+    plan = _accel_plan(None, keep=(keep,))
+
+    # (1) Both provided -> no collection at all; the deploy-time check
+    # passes and the flow reaches ACQUIRE (fail-closed default acquirer).
+    result = service.install_accelerated_runtime(
+        plan=plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
+        acquirer=None,
+        full_state_provider=lambda: [_witness_ppa(witness_v1)],
+        dependency_wheelhouse=_empty_wheelhouse(tmp_path),
+        work_root=tmp_path / "work-provided",
+    )
+    assert collector.calls == 0
+    assert result.success is False
+    assert result.phase is AcceleratedDeploymentPhase.ACQUIRE
+    assert "no accelerated artifact source configured" in (result.reason or "")
+
+    # (2) Both omitted -> exactly one collection at the deploy-time
+    # check, then the same ACQUIRE outcome.
+    result = service.install_accelerated_runtime(
+        plan=plan,
+        acquirer=None,
+        full_state_provider=lambda: [_witness_ppa(witness_v1)],
+        dependency_wheelhouse=_empty_wheelhouse(tmp_path),
+        work_root=tmp_path / "work-collected",
+    )
+    assert collector.calls == 1
+    assert result.success is False
+    assert result.phase is AcceleratedDeploymentPhase.ACQUIRE
+    assert "no accelerated artifact source configured" in (result.reason or "")
+
+
+@pytest.mark.parametrize(
+    ("fresh_recommendation", "expected_fragment"),
+    [
+        pytest.param(
+            lambda: AccelerationRecommendation(
+                status=RecommendationStatus.NOT_APPLICABLE,
+                backend="NVIDIA_CUDA",
+                reason_code=HostReasonCode.ACCELERATION_NOT_APPLICABLE,
+                reason="no supported accelerator hardware detected",
+            ),
+            "no supported accelerator hardware detected",
+            id="not-applicable",
+        ),
+        pytest.param(
+            lambda: AccelerationRecommendation(
+                status=RecommendationStatus.OFFER_SETUP,
+                backend="OTHER_BACKEND",
+                reason_code=HostReasonCode.ACCELERATION_OFFER_SETUP,
+                reason="synthetic backend drift",
+            ),
+            (
+                "backend changed from 'NVIDIA_CUDA' at planning to "
+                "'OTHER_BACKEND' at deployment"
+            ),
+            id="backend-mismatch",
+        ),
+    ],
+)
+def test_service_deploy_time_backend_coherence(
+    tmp_path, fresh_recommendation, expected_fragment,
+):
+    """A fresh recommendation that no longer matches the plan (backend
+    changed, or acceleration no longer applicable) fails closed at
+    PREPARE before any base preparation or acquisition."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    runtime = SharedRuntime(layout=layout)
+    service = ZeAlfieService(
+        catalog=_catalog(),
+        runtime=runtime,
+        selection_store=SelectionStore(path=tmp_path / "desired-products.toml"),
+        host=_host(),
+        capability_collector=lambda: _caps(),
+        recommender=lambda caps: _recommendation(),
+    )
+    plan = _accel_plan(None)
+    acquirer = _SpyAcquirer()
+    provider_calls: list[int] = []
+
+    def provider():
+        provider_calls.append(1)
+        raise AssertionError("full_state_provider must not be called")
+
+    result = service.install_accelerated_runtime(
+        plan=plan,
+        capabilities=_caps(),
+        recommendation=fresh_recommendation(),
+        acquirer=acquirer,
+        full_state_provider=provider,
+        work_root=tmp_path / "work",
+    )
+
+    assert result.success is False
+    assert result.cancelled is False
+    assert result.phase is AcceleratedDeploymentPhase.PREPARE
+    assert "late GPU compatibility conflict detected at deployment time" in (
+        result.reason or ""
+    )
+    assert expected_fragment in (result.reason or "")
+    assert result.old_runtime_preserved is True
+    assert acquirer.calls == 0
+    assert provider_calls == []
+    assert not layout.slots.exists()
+    assert runtime.status().state.value == "ABSENT"
 
 
 # =============================================================================
@@ -682,6 +937,8 @@ def test_service_accelerated_full_flow(
 
     result = service.install_accelerated_runtime(
         plan=accel_plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=acquirer,
         gate=None,  # -> default gate (real probe inside candidate venv)
         metadata_store=None,  # -> derived from the runtime layout
@@ -760,6 +1017,8 @@ def test_service_acquisition_failure_preserves_active_runtime(
 
     result = service.install_accelerated_runtime(
         plan=accel_plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=failing,
         full_state_provider=lambda: [_witness_ppa(witness_v1)],
         dependency_wheelhouse=_empty_wheelhouse(tmp_path),
@@ -802,6 +1061,8 @@ def test_service_gate_failure_blocks_and_never_mutates_active(
 
     result = service.install_accelerated_runtime(
         plan=accel_plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=_SingleWheelAcquirer(fake_accel_wheel),
         gate=_FailingGate(),
         metadata_store=metadata_store,
@@ -848,6 +1109,8 @@ def test_service_cancellation_during_apply(
 
     result = service.install_accelerated_runtime(
         plan=accel_plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=_SingleWheelAcquirer(
             fake_accel_wheel, honour_cancel=False,
         ),
@@ -888,6 +1151,8 @@ def test_service_keep_exactness_no_drift(
 
     result = service.install_accelerated_runtime(
         plan=accel_plan,
+        capabilities=_caps(),
+        recommendation=_recommendation(),
         acquirer=_SpyAcquirer(),
         full_state_provider=lambda: [drifted],
         dependency_wheelhouse=_empty_wheelhouse(tmp_path),

@@ -1628,6 +1628,21 @@ active runtime.
    record is the only new persistent state.  The method never installs
    into the active slot.
 
+Deploy-time hardware re-verification (fail-closed): after the
+``PLAN_READY`` gate, ``install_accelerated_runtime`` re-obtains the host
+capabilities and acceleration recommendation (provided values are reused
+verbatim — no second probe) and re-evaluates the catalog's acceleration
+requirements for the plan's products; a fresh non-``SUPPORTED`` verdict
+or a changed recommendation backend fails closed at ``phase=PREPARE``
+("late GPU compatibility conflict detected at deployment time") before
+any base preparation, acquisition, or candidate-slot creation — closing
+the planning→deployment observation window.  Failure coverage includes a
+dedicated activation-failure injection (``phase=ACTIVATE``, the
+previously active runtime stays the active pointer and remains usable).
+Accepted Nono notes: a metadata entry written before a failed activation
+is not purged (observational only), and the phase reported for
+cancellation is cosmetic.
+
 ### CLI
 
 ``zealfie system gpu-install`` is a fail-closed stub: it prints the honest
