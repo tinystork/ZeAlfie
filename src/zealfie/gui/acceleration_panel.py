@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from zealfie.gui.presentation import gpu_plan_preview_lines
 from zealfie.host import AccelerationRecommendation, RecommendationStatus
 
 
@@ -86,6 +87,29 @@ def _short(text: str, limit: int = 240) -> str:
     if len(text) > limit:
         text = text[: limit - 1] + "\u2026"
     return text
+
+
+def _short_multiline(text: str, limit: int = 240) -> str:
+    """Collapse whitespace per line, preserving line breaks.
+
+    Same discipline as :func:`_short` (collapse, truncate, never leak
+    raw tracebacks) but keeps the line structure so multi-line plan
+    previews stay readable in the detail label.
+    """
+    lines: list[str] = []
+    total = 0
+    for raw_line in str(text or "").split("\n"):
+        line = " ".join(raw_line.split())
+        if not line:
+            continue
+        remaining = limit - total - 1
+        if remaining <= 0:
+            break
+        if len(line) > remaining:
+            line = line[:remaining] + "\u2026"
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines)
 
 
 class AccelerationPanel(QFrame):
@@ -192,9 +216,31 @@ class AccelerationPanel(QFrame):
                 f"GPU configuration check failed: {_short(str(exc))}"
             )
             return
-        self._show_detail(intent.message)
+        lines = [intent.message]
+        lines.extend(self._plan_preview_lines())
+        self._show_detail("\n".join(lines))
+
+    def _plan_preview_lines(self) -> list[str]:
+        """Build the read-only GPU deployment plan preview (M1-2H).
+
+        Uses the service's ``build_accelerated_deployment_plan`` when
+        available, passing the currently displayed recommendation so
+        the plan never triggers a second hardware observation.  A
+        missing method degrades to no preview lines; a planning
+        failure degrades to an honest notice — never a crash.
+        """
+        builder = getattr(
+            self._service, "build_accelerated_deployment_plan", None
+        )
+        if not callable(builder):
+            return []
+        try:
+            plan = builder(recommendation=self._recommendation)
+        except Exception as exc:
+            return [f"GPU plan preview unavailable: {_short(str(exc))}"]
+        return list(gpu_plan_preview_lines(plan))
 
     def _show_detail(self, message: str) -> None:
         if self._detail_label is not None:
-            self._detail_label.setText(_short(message))
+            self._detail_label.setText(_short_multiline(message, limit=1600))
             self._detail_label.setVisible(True)

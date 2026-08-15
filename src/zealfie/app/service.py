@@ -25,6 +25,9 @@ M1-2D.4.2C: Service integration — dependency acquisition before
             the caller does not supply ``dependency_wheelhouse``.
             Acquired staging is cleaned in ``finally`` after plan/
             apply/TOCTOU/install/activation.
+M1-2H: read-only accelerated GPU deployment plan preview
+       (``build_accelerated_deployment_plan``) — no writes, no
+       network, no runtime mutation.
 """
 
 from __future__ import annotations
@@ -37,6 +40,15 @@ import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from packaging.utils import canonicalize_name
+
+from zealfie.acceleration import (
+    AcceleratedDeploymentPlan,
+    AcceleratedVariantCatalog,
+    PlannedKeepProduct,
+    build_accelerated_deployment_plan,
+    default_variant_catalog,
+)
 from zealfie.app.progress import InstallPhase, InstallProgress, PHASE_PERCENT
 from zealfie.app.updates import (
     ProductUpdateResult,
@@ -449,6 +461,10 @@ class ZeAlfieService:
     ``ComponentRegistry``.  The ``ComponentRegistry`` remains the
     deployment/launch contract for pre-D4 paths.
 
+    M1-2H adds ``build_accelerated_deployment_plan`` — the read-only
+    accelerated GPU deployment plan preview wired to the CLI
+    (``zealfie system gpu-plan``) and the GUI configure panel.
+
     Dependencies (registry, runtime, catalog, host, selection_store)
     are injectable so tests can supply synthetic instances.
     """
@@ -562,6 +578,119 @@ class ZeAlfieService:
         if recommendation is None:
             recommendation = self.get_acceleration_recommendation()
         return build_gpu_setup_intent(recommendation)
+
+    # ------------------------------------------------------------------
+    # M1-2H: Read-only accelerated deployment plan preview
+    # ------------------------------------------------------------------
+
+    def build_accelerated_deployment_plan(
+        self,
+        *,
+        capabilities: HostCapabilities | None = None,
+        recommendation: AccelerationRecommendation | None = None,
+        variant_catalog: AcceleratedVariantCatalog | None = None,
+    ) -> AcceleratedDeploymentPlan:
+        """Build the read-only accelerated GPU deployment plan (M1-2H).
+
+        Collects the host observation (unless *capabilities* is
+        provided), derives the acceleration recommendation (unless
+        *recommendation* is provided — the recommendation is then
+        derived from the exact same observation, so host probes run
+        only once), reads the current runtime status, documents KEEP
+        products verbatim from active provenance and the installed
+        runtime lock, and delegates to the pure
+        :func:`~zealfie.acceleration.planning.build_accelerated_deployment_plan`.
+
+        **100% read-only:** no writes, no network, no runtime
+        mutation, no selection persistence, no install.  KEEP identity
+        is never re-resolved and never fabricated: active provenance
+        is authoritative for ``version`` / ``commit_sha`` /
+        ``wheel_sha256``; products known only from the installed lock
+        degrade ``commit_sha`` / ``wheel_sha256`` to ``None``; when no
+        provenance or installed-lock record exists at all,
+        ``keep_products`` may be empty.
+
+        *variant_catalog* defaults to
+        :func:`~zealfie.acceleration.variants.default_variant_catalog`
+        (empty, fail-closed): until a real variant catalog is
+        available, any declared accelerated requirement blocks the
+        plan honestly.  The platform tag comes from the service host
+        target (default: :meth:`~zealfie.releases.model.HostTarget.from_current_host`).
+
+        Returns
+        -------
+        AcceleratedDeploymentPlan
+            The read-only plan.  ``status`` is one of
+            ``NO_ACCELERATED_REQUIREMENTS`` / ``PLAN_READY`` /
+            ``BLOCKED`` / ``UNKNOWN``; blocked plans are honest
+            previews, not errors.
+        """
+        if capabilities is None:
+            capabilities = self.collect_host_capabilities()
+        if recommendation is None:
+            recommendation = self.get_acceleration_recommendation(capabilities)
+        runtime_status = self._runtime.status()
+        keep_products = self._keep_products_for_acceleration_plan()
+        if variant_catalog is None:
+            variant_catalog = default_variant_catalog()
+        return build_accelerated_deployment_plan(
+            catalog=self._catalog,
+            capabilities=capabilities,
+            recommendation=recommendation,
+            runtime_status=runtime_status,
+            variant_catalog=variant_catalog,
+            keep_products=keep_products,
+            platform_tag=self._host.platform_tag,
+        )
+
+    def _keep_products_for_acceleration_plan(
+        self,
+    ) -> dict[str, PlannedKeepProduct]:
+        """Document KEEP products verbatim for the acceleration plan.
+
+        Two read-only sources, merged deterministically:
+
+        1. active provenance (authoritative): ``product_id``,
+           ``version``, ``commit_sha`` and ``wheel_sha256`` are copied
+           verbatim — never re-resolved, never revalidated;
+        2. installed-runtime lock (fallback): a primary installed
+           distribution whose name maps to a catalog product without a
+           provenance record contributes ``product_id`` + installed
+           ``version`` with ``commit_sha`` / ``wheel_sha256`` degraded
+           to ``None`` (planning never fabricates).
+
+        Products from provenance are kept even when absent from the
+        catalog (verbatim documentation).  Returns an empty mapping
+        when neither store has records — the plan then honestly
+        carries no KEEP products.
+        """
+        keeps: dict[str, PlannedKeepProduct] = {}
+        for product_id, prov in self.active_provenance().items():
+            keeps[product_id] = PlannedKeepProduct(
+                product_id=product_id,
+                version=prov.version,
+                commit_sha=prov.commit_sha,
+                wheel_sha256=prov.wheel_sha256,
+            )
+        lock = self.active_installed_lock()
+        if lock is not None and lock.dependencies:
+            by_distribution = {
+                canonicalize_name(desc.distribution_name): desc.product_id
+                for desc in self._catalog.list()
+            }
+            for name, dep in lock.dependencies.items():
+                if not (dep.primary or name in lock.primary_names):
+                    continue
+                product_id = by_distribution.get(canonicalize_name(name))
+                if product_id is None or product_id in keeps:
+                    continue
+                keeps[product_id] = PlannedKeepProduct(
+                    product_id=product_id,
+                    version=dep.version,
+                    commit_sha=None,
+                    wheel_sha256=None,
+                )
+        return keeps
 
     # ------------------------------------------------------------------
     # Release directory convention

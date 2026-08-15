@@ -152,6 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="show host capabilities and acceleration recommendation "
              "(read-only, no mutation)",
     )
+    system_subs.add_parser(
+        "gpu-plan",
+        help="preview the accelerated GPU deployment plan "
+             "(read-only, no mutation)",
+    )
     return parser
 
 
@@ -528,7 +533,7 @@ def _handle_install(args, *, stdout: TextIO) -> int:
 
 
 def _handle_system(args, *, stdout: TextIO) -> int:
-    """Handle ``zealfie system capabilities``."""
+    """Handle ``zealfie system capabilities`` and ``zealfie system gpu-plan``."""
     if args.system_command == "capabilities":
         service = _make_service()
         capabilities = service.collect_host_capabilities()
@@ -537,6 +542,16 @@ def _handle_system(args, *, stdout: TextIO) -> int:
             _format_host_capabilities(capabilities, recommendation),
             file=stdout,
         )
+        return 0
+
+    if args.system_command == "gpu-plan":
+        service = _make_service()
+        try:
+            plan = service.build_accelerated_deployment_plan()
+        except Exception as exc:
+            print(f"gpu plan failed: {exc}", file=sys.stderr)
+            return 4
+        print(_format_accelerated_deployment_plan(plan), file=stdout)
         return 0
 
     # No system subcommand given → show help.
@@ -566,6 +581,64 @@ def _format_host_capabilities(capabilities, recommendation) -> str:
     lines.append(f" Reason: {recommendation.reason}")
     if recommendation.reason_code is not None:
         lines.append(f" Reason code: {recommendation.reason_code.value}")
+    return "\n".join(lines)
+
+
+def _format_accelerated_deployment_plan(plan) -> str:
+    """Format an accelerated GPU deployment plan for CLI output.
+
+    Pure and deterministic: reads only the plan fields (the planner
+    already sorts every collection).  A blocked plan is a preview, not
+    an error — the summary reports the blocked reason honestly.
+    """
+    lines = [
+        "Accelerated GPU deployment plan:",
+        f" Status: {plan.status.value}",
+        f" Hardware status: {plan.hardware.status.value}",
+        f" Hardware reason: {plan.hardware.reason}",
+    ]
+    if plan.backend is not None:
+        lines.append(f" Backend: {plan.backend}")
+    else:
+        lines.append(" Backend: none")
+    if plan.products_concerned:
+        lines.append(
+            f" Products concerned: {', '.join(plan.products_concerned)}"
+        )
+    else:
+        lines.append(" Products concerned: none")
+    if plan.keep_products:
+        for keep in plan.keep_products:
+            commit = keep.commit_sha or "unknown"
+            lines.append(
+                f" KEEP {keep.product_id} version {keep.version} "
+                f"(commit {commit})"
+            )
+    else:
+        lines.append(" KEEP products: none")
+    if plan.added_requirements:
+        for entry in plan.added_requirements:
+            specifier = entry.specifier or "any version"
+            extras = (
+                f" extras [{', '.join(entry.extras)}]" if entry.extras else ""
+            )
+            variant_version = (
+                entry.variant.version if entry.variant is not None else "none"
+            )
+            lines.append(
+                f" Accelerated dependency: {entry.distribution}{extras} "
+                f"({specifier}) [variant version {variant_version}]"
+            )
+    else:
+        lines.append(" Accelerated dependencies: none")
+    if plan.blocked:
+        lines.append(f" Blocked: {plan.blocked_reason or 'yes'}")
+    if plan.closure_impact:
+        lines.append(" Closure impact:")
+        lines.extend(f"  - {impact}" for impact in plan.closure_impact)
+    else:
+        lines.append(" Closure impact: none")
+    lines.append("No changes have been applied (read-only preview).")
     return "\n".join(lines)
 
 

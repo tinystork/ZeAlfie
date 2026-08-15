@@ -6,6 +6,7 @@ Never shows raw enum names to users.
 
 from __future__ import annotations
 
+from zealfie.acceleration import AcceleratedPlanStatus
 from zealfie.app import (
     ManagedStatus,
     ProductState,
@@ -166,3 +167,62 @@ def runtime_summary(
         f"Runtime: ready — {installed_count}/{total_known} installed"
         + (f", {managed_count} managed" if managed_count > 0 else "")
     )
+
+
+# ---------------------------------------------------------------------------
+# Accelerated GPU plan → UI text (M1-2H)
+# ---------------------------------------------------------------------------
+
+
+def gpu_plan_preview_lines(plan) -> tuple[str, ...]:
+    """Return honest user-facing preview lines for an accelerated plan.
+
+    Pure presentation mapping (no Qt, no I/O) covering all four
+    :class:`~zealfie.acceleration.planning.AcceleratedPlanStatus`
+    values:
+
+    * ``NO_ACCELERATED_REQUIREMENTS`` — no product declares GPU
+      requirements and the CPU closure is preserved unchanged;
+    * ``UNKNOWN`` — honest unknown, no fabricated detail;
+    * ``BLOCKED`` — the blocked reason;
+    * ``PLAN_READY`` — hardware, backend, products concerned, KEEP
+      products, and the planned actions exactly as the planner
+      documented them (never invented), plus the explicit statement
+      that nothing has been modified yet.
+
+    Never renders raw enum names or traceback content.
+    """
+    status = plan.status
+    if status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS:
+        return (
+            "No product declares GPU acceleration requirements.",
+            "The CPU deployment closure is preserved unchanged.",
+        )
+    if status is AcceleratedPlanStatus.UNKNOWN:
+        return (
+            "GPU acceleration status could not be determined.",
+            "No accelerated change has been planned.",
+        )
+    if status is AcceleratedPlanStatus.BLOCKED:
+        reason = plan.blocked_reason or "no reason recorded"
+        return (
+            "GPU acceleration planning is blocked.",
+            f"Reason: {reason}",
+        )
+    # PLAN_READY
+    lines = [
+        f"Hardware: {plan.hardware.status.value}",
+        f"Backend: {plan.backend}",
+    ]
+    concerned = ", ".join(plan.products_concerned)
+    lines.append(f"Products concerned: {concerned or 'none'}")
+    for keep in plan.keep_products:
+        commit = keep.commit_sha or "unknown"
+        lines.append(f"Keep {keep.product_id} {keep.version} (commit {commit})")
+    if plan.closure_impact:
+        lines.append("Planned actions:")
+        lines.extend(f" - {line}" for line in plan.closure_impact)
+    else:
+        lines.append("Planned actions: none recorded")
+    lines.append("Aucune modification n'a encore été effectuée.")
+    return tuple(lines)
