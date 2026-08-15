@@ -18,6 +18,7 @@ from typing import Any
 from packaging.utils import canonicalize_name
 
 from zealfie.components.model import EntryPointContract
+from zealfie.products.policy import VALID_CHANNELS
 from zealfie.sources import InvalidRemoteSourceError, RemoteSource
 
 CATALOG_PACKAGE = "zealfie.manifests"
@@ -79,6 +80,18 @@ class ProductDescriptor:
     # M1-2D.1: Optional remote source metadata.
     # None for products without a declared remote repository.
     remote_source: RemoteSource | None = None
+    # M1-2F Phase 5: product-specific channel -> ref mapping.
+    #
+    # Declares which discovery channels a product actually exposes and which
+    # mutable ref each one resolves to.  This is the per-product authority:
+    # ``DEFAULT_CHANNEL_REFS`` in :mod:`zealfie.products.policy` remains a
+    # default mapper only and never grants a channel to a product that does
+    # not declare it here.
+    #
+    # Immutable tuple of ``(channel, ref)`` pairs in declaration order.  An
+    # empty tuple means "no channels" (product has no remote source, or the
+    # descriptor is constructed without channel metadata).
+    channel_refs: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in ("product_id", "display_name", "distribution_name"):
@@ -113,6 +126,64 @@ class ProductDescriptor:
                 f"remote_source must be None or a RemoteSource instance, "
                 f"got {type(rs).__qualname__}"
             )
+
+        # Validate channel_refs.  Backward-compatible fallback: a product
+        # with a remote source but no explicit channels exposes exactly the
+        # ``stable`` channel pointing at ``remote_source.ref`` — and nothing
+        # else.  This deliberately does NOT inherit beta/development from
+        # DEFAULT_CHANNEL_REFS.
+        channel_refs = tuple(self.channel_refs)
+        if not channel_refs and rs is not None:
+            channel_refs = (("stable", rs.ref),)
+        if channel_refs and rs is None:
+            raise ValueError("channel_refs requires remote_source")
+
+        normalized: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw_channel, raw_ref in channel_refs:
+            if not isinstance(raw_channel, str):
+                raise ValueError("channel_refs channels must be strings")
+            channel = raw_channel.strip()
+            if not channel:
+                raise ValueError("channel_refs channels must not be empty")
+            if channel not in VALID_CHANNELS:
+                raise ValueError(
+                    f"channel_refs channel {channel!r} is not a known channel "
+                    f"(expected one of {VALID_CHANNELS})"
+                )
+            if not isinstance(raw_ref, str):
+                raise ValueError(
+                    f"channel_refs ref for {channel!r} must be a string"
+                )
+            ref = raw_ref.strip()
+            if not ref:
+                raise ValueError(
+                    f"channel_refs ref for {channel!r} must not be empty"
+                )
+            if channel in seen:
+                raise ValueError(f"duplicate channel in channel_refs: {channel!r}")
+            seen.add(channel)
+            normalized.append((channel, ref))
+        object.__setattr__(self, "channel_refs", tuple(normalized))
+
+    @property
+    def channel_ref_map(self) -> dict[str, str]:
+        """Return ``channel_refs`` as a plain ``{channel: ref}`` mapping."""
+        return dict(self.channel_refs)
+
+    @property
+    def available_channels(self) -> tuple[str, ...]:
+        """Return the product's declared channels in declaration order."""
+        return tuple(channel for channel, _ in self.channel_refs)
+
+    def channel_ref(self, channel: str) -> str | None:
+        """Return the ref for a declared *channel*, or ``None`` if undeclared."""
+        key = str(channel or "").strip()
+        for ch, ref in self.channel_refs:
+            if ch == key:
+                return ref
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Catalog
@@ -332,6 +403,9 @@ def _product_from_payload(
     # --- optional remote_source (M1-2D.1) ---
     remote_source = _parse_optional_remote_source(raw, label_prefix)
 
+    # --- optional channels (M1-2F Phase 5) ---
+    channel_refs = _parse_optional_channels(raw, label_prefix, remote_source)
+
     return ProductDescriptor(
         product_id=product_id,
         display_name=display_name,
@@ -340,6 +414,7 @@ def _product_from_payload(
         required_extras=required_extras,
         description=description,
         remote_source=remote_source,
+        channel_refs=channel_refs,
     )
 
 
@@ -381,3 +456,59 @@ def _parse_optional_remote_source(
         )
     except InvalidRemoteSourceError as exc:
         raise InvalidCatalogError(f"{label_prefix}.remote_source: {exc}") from exc
+
+
+def _parse_optional_channels(
+    raw: dict[str, Any],
+    label_prefix: str,
+    remote_source: RemoteSource | None,
+) -> tuple[tuple[str, str], ...]:
+    """Parse an optional ``[products.channels]`` table.
+
+    Returns ``()`` when absent — the per-product fallback (``stable =
+    remote_source.ref`` only) is applied later in
+    :class:`ProductDescriptor`.
+
+    Fail-closed rules:
+
+    * ``channels`` must be a table of non-empty-string → non-empty-string.
+    * channel names must be known policy channels (``stable``, ``beta``,
+      ``development``).
+    * duplicate channel names are rejected.
+    * a channel table without ``remote_source`` is rejected — a product
+      cannot declare discoverable channels without a remote repository.
+    """
+    raw_channels = raw.get("channels")
+    if raw_channels is None:
+        return ()
+    if not isinstance(raw_channels, dict):
+        raise InvalidCatalogError(f"{label_prefix}.channels must be a table")
+    if remote_source is None:
+        raise InvalidCatalogError(
+            f"{label_prefix}.channels requires a remote_source table"
+        )
+
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_channel, raw_ref in raw_channels.items():
+        if not isinstance(raw_channel, str) or not raw_channel.strip():
+            raise InvalidCatalogError(
+                f"{label_prefix}.channels keys must be non-empty strings"
+            )
+        channel = raw_channel.strip()
+        if channel not in VALID_CHANNELS:
+            raise InvalidCatalogError(
+                f"{label_prefix}.channels.{channel!r} is not a known channel "
+                f"(expected one of {VALID_CHANNELS})"
+            )
+        if not isinstance(raw_ref, str) or not raw_ref.strip():
+            raise InvalidCatalogError(
+                f"{label_prefix}.channels.{channel} must be a non-empty string"
+            )
+        if channel in seen:
+            raise InvalidCatalogError(
+                f"{label_prefix}.channels: duplicate channel {channel!r}"
+            )
+        seen.add(channel)
+        result.append((channel, raw_ref.strip()))
+    return tuple(result)

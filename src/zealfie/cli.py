@@ -22,10 +22,12 @@ from .app import (
     LaunchPreparationError,
     LaunchScriptNotFoundError,
     ManagedStatus,
+    ProductChannelUnavailableError,
     ProductDeploymentPlanningError,
     ProductDependencyAcquisitionError,
     OfflineReleaseError,
     ProductInstallPreparationError,
+    ProductPolicy,
     ProductShellState,
     ProductState,
     RemoteSourceUnavailableError,
@@ -126,6 +128,19 @@ def build_parser() -> argparse.ArgumentParser:
         "install", help="install a product from its remote source",
     )
     install_parser.add_argument("product_id", help="product id to install")
+    install_policy_group = install_parser.add_mutually_exclusive_group()
+    install_policy_group.add_argument(
+        "--channel",
+        dest="channel",
+        help="discovery channel to follow for this product "
+             "(mutually exclusive with --pin)",
+    )
+    install_policy_group.add_argument(
+        "--pin",
+        dest="pin_sha",
+        help="exact 40-hex commit SHA to install "
+             "(mutually exclusive with --channel)",
+    )
     return parser
 
 
@@ -290,7 +305,13 @@ def _handle_products(args, *, stdout: TextIO) -> int:
                 file=sys.stderr,
             )
             return 2
-        print(_format_product_state(state), file=stdout)
+        lines = _format_product_state(state)
+        policy_lines = _format_product_channels_and_policy(
+            service, args.product_id,
+        )
+        if policy_lines:
+            lines += "\n" + policy_lines
+        print(lines, file=stdout)
         return 0
     else:
         shell_state = service.collect_product_state()
@@ -337,6 +358,39 @@ def _format_product_state(state: ProductState) -> str:
     return "\n".join(lines)
 
 
+def _format_product_channels_and_policy(
+    service, product_id: str,
+) -> str:
+    """Return a lightweight channels/policy display for a product.
+
+    Tolerates service fakes that predate the Phase 5 policy API by returning
+    ``""`` when the relevant methods are unavailable.
+    """
+    get_channels = getattr(service, "available_product_channels", None)
+    get_policy = getattr(service, "product_policy", None)
+    if not callable(get_channels) or not callable(get_policy):
+        return ""
+    try:
+        channels = get_channels(product_id)
+        policy = get_policy(product_id)
+    except Exception:
+        return ""
+
+    lines: list[str] = []
+    if channels:
+        channel_text = ", ".join(
+            f"{channel} -> {ref}" for channel, ref in channels
+        )
+    else:
+        channel_text = "none"
+    lines.append(f" Available channels: {channel_text}")
+    if policy.policy == "pin":
+        lines.append(f" Policy: pin (sha {policy.pin_sha})")
+    else:
+        lines.append(f" Policy: follow (channel {policy.channel})")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # D.4.1G: install handler
 # ---------------------------------------------------------------------------
@@ -376,12 +430,46 @@ def _make_work_root() -> Path:
 
 
 def _handle_install(args, *, stdout: TextIO) -> int:
-    """Handle ``zealfie install <product_id>``."""
+    """Handle ``zealfie install <product_id> [--channel C | --pin SHA]``."""
     service = _make_service()
     resolver, fetcher, work_root = _make_install_deps()
 
     # Ensure work root exists so the service can stage artifacts.
     work_root.mkdir(parents=True, exist_ok=True)
+
+    # Persist the requested policy before installing so the same config is
+    # observed by later update checks (GUI/CLI) and by the install
+    # orchestration itself (which reads the persisted policy).  Policy-value
+    # errors (invalid pin SHA, undeclared channel) are surfaced here, before
+    # any install work, with clean messages.
+    try:
+        if args.channel:
+            service.set_product_channel(args.product_id, args.channel)
+        elif args.pin_sha:
+            service.set_product_policy(
+                ProductPolicy(
+                    product_id=args.product_id,
+                    policy="pin",
+                    pin_sha=args.pin_sha,
+                )
+            )
+    except UnknownProductError:
+        catalog_ids = ", ".join(service.catalog.available_ids()) or "none"
+        print(
+            f"Unknown product: {args.product_id}. Known products: {catalog_ids}",
+            file=sys.stderr,
+        )
+        return 2
+    except ProductChannelUnavailableError as exc:
+        print(f"cannot install {args.product_id!r}: {exc}", file=sys.stderr)
+        return 3
+    except RemoteSourceUnavailableError as exc:
+        print(f"cannot install {args.product_id!r}: {exc}", file=sys.stderr)
+        return 7
+    except ValueError as exc:
+        # Invalid pin_sha (or other policy-value failure) surfaced cleanly.
+        print(f"invalid policy for {args.product_id!r}: {exc}", file=sys.stderr)
+        return 3
 
     try:
         result = service.install_product(

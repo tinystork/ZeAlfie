@@ -1788,3 +1788,174 @@ def test_install_dependency_acquisition_error_returns_11(monkeypatch, tmp_path):
         assert stdout.getvalue() == ""
     finally:
         sys.stderr = backup
+
+
+# ===========================================================================
+# M1-2F Phase 5: install --channel / --pin policy wiring
+# ===========================================================================
+
+
+class _FakeInstallPolicyService:
+    """Fake service exposing the Phase 5 policy + install API."""
+
+    def __init__(
+        self,
+        result,
+        *,
+        catalog_ids=("zesolver",),
+        channel_error=None,
+        policy_error=None,
+    ):
+        self._result = result
+        self._catalog_ids = catalog_ids
+        self._channel_error = channel_error
+        self._policy_error = policy_error
+        self.channel_calls: list[tuple] = []
+        self.policy_calls: list = []
+        self.install_called_with: list[dict] = []
+
+    @property
+    def catalog(self):
+        return _FakeInstallCatalog(self._catalog_ids)
+
+    def set_product_channel(self, product_id, channel):
+        self.channel_calls.append((product_id, channel))
+        if self._channel_error is not None:
+            raise self._channel_error
+
+    def set_product_policy(self, policy):
+        self.policy_calls.append(policy)
+        if self._policy_error is not None:
+            raise self._policy_error
+
+    def install_product(self, product_id, *, resolver, fetcher, work_root,
+                        dependency_wheelhouse=None, probe_distribution=None):
+        self.install_called_with.append({"product_id": product_id})
+        return self._result
+
+
+def test_install_channel_and_pin_mutually_exclusive():
+    """--channel and --pin together are rejected by the parser."""
+    p = cli.build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(
+            ["install", "zesolver", "--channel", "stable", "--pin", "a" * 40]
+        )
+
+
+def test_install_parser_channel_flag():
+    """--channel parses into args.channel, leaving pin_sha None."""
+    p = cli.build_parser()
+    args = p.parse_args(["install", "zesolver", "--channel", "beta"])
+    assert args.channel == "beta"
+    assert args.pin_sha is None
+
+
+def test_install_parser_pin_flag():
+    """--pin parses into args.pin_sha, leaving channel None."""
+    p = cli.build_parser()
+    args = p.parse_args(["install", "zesolver", "--pin", "a" * 40])
+    assert args.pin_sha == "a" * 40
+    assert args.channel is None
+
+
+def test_install_with_channel_persists_follow_policy(monkeypatch, tmp_path):
+    """--channel persists a follow policy before install."""
+    result = DeploymentResult(success=True, active_slot_id="rt-x")
+    service = _FakeInstallPolicyService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(
+        cli, "_make_install_deps",
+        lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"),
+    )
+    stdout = StringIO()
+    code = run(["install", "zesolver", "--channel", "beta"], stdout=stdout)
+    assert code == 0
+    assert service.channel_calls == [("zesolver", "beta")]
+    assert service.policy_calls == []
+    assert service.install_called_with == [{"product_id": "zesolver"}]
+
+
+def test_install_with_pin_persists_pin_policy(monkeypatch, tmp_path):
+    """--pin persists a pin policy (exact SHA) before install."""
+    from zealfie.app import ProductPolicy
+
+    result = DeploymentResult(success=True, active_slot_id="rt-x")
+    service = _FakeInstallPolicyService(result)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(
+        cli, "_make_install_deps",
+        lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"),
+    )
+    stdout = StringIO()
+    code = run(["install", "zesolver", "--pin", "a" * 40], stdout=stdout)
+    assert code == 0
+    assert service.channel_calls == []
+    assert len(service.policy_calls) == 1
+    policy = service.policy_calls[0]
+    assert isinstance(policy, ProductPolicy)
+    assert policy.product_id == "zesolver"
+    assert policy.policy == "pin"
+    assert policy.pin_sha == "a" * 40
+    assert service.install_called_with == [{"product_id": "zesolver"}]
+
+
+def test_install_invalid_channel_clean_error(monkeypatch, tmp_path):
+    """Undeclared channel → exit 3, clear stderr, no traceback."""
+    from zealfie.app import ProductChannelUnavailableError
+
+    service = _FakeInstallPolicyService(
+        DeploymentResult(success=True),
+        channel_error=ProductChannelUnavailableError(
+            product_id="zesolver", channel="beta", available=("stable",),
+        ),
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(
+        cli, "_make_install_deps",
+        lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"),
+    )
+    import sys
+
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver", "--channel", "beta"], stdout=stdout)
+        assert code == 3
+        err = stderr.getvalue()
+        assert "cannot install 'zesolver'" in err
+        assert "beta" in err
+        assert "stable" in err
+        assert "Traceback" not in err
+        assert service.install_called_with == []  # no install attempted
+    finally:
+        sys.stderr = backup
+
+
+def test_install_invalid_pin_clean_error(monkeypatch, tmp_path):
+    """Invalid pin SHA → exit 3, clear stderr, no traceback."""
+    service = _FakeInstallPolicyService(
+        DeploymentResult(success=True),
+        policy_error=ValueError("pin_sha is required (40-hex) when policy is 'pin'"),
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    monkeypatch.setattr(
+        cli, "_make_install_deps",
+        lambda: (_fake_resolver, _fake_fetcher, tmp_path / "work"),
+    )
+    import sys
+
+    backup = sys.stderr
+    try:
+        sys.stderr = stderr = StringIO()
+        stdout = StringIO()
+        code = run(["install", "zesolver", "--pin", "not-hex"], stdout=stdout)
+        assert code == 3
+        err = stderr.getvalue()
+        assert "invalid policy for 'zesolver'" in err
+        assert "pin_sha" in err
+        assert "Traceback" not in err
+        assert service.install_called_with == []
+    finally:
+        sys.stderr = backup

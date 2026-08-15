@@ -237,6 +237,8 @@ class ZeAlfieMainWindow(QMainWindow):
             card.install_requested.connect(self._on_install_requested)
             # M1-2E E.6a: connect update_requested (same worker path)
             card.update_requested.connect(self._on_update_requested)
+            # M1-2F Phase 5: connect channel_changed (persist + re-check)
+            card.channel_changed.connect(self._on_channel_changed)
             # Insert before the stretch at the end
             cards_layout.insertWidget(cards_layout.count() - 1, card)
 
@@ -484,6 +486,30 @@ class ZeAlfieMainWindow(QMainWindow):
             self._status_label.setText(
                 f"Mise à jour de {card._descriptor.display_name}\u2026"
             )
+
+    def _on_channel_changed(self, product_id: str, channel: str) -> None:
+        """Persist a channel change and re-run the read-only update check.
+
+        The card only offers declared channels, so this normally succeeds.
+        On failure the card is re-synced to the persisted truth (no policy
+        mutation is attempted directly by the card itself).
+        """
+        set_channel = getattr(self._service, "set_product_channel", None)
+        if callable(set_channel):
+            try:
+                set_channel(product_id, channel)
+            except Exception as exc:
+                logger.error(
+                    "set_product_channel failed for %r: %s", product_id, exc
+                )
+
+        card = self._cards.get(product_id)
+        if card is not None:
+            card.refresh_policy()
+
+        coordinator = self._update_coordinator
+        if coordinator is not None:
+            coordinator.start((product_id,))
 
     def _set_global_install_lock(self, locked: bool) -> None:
         """Enable/disable install buttons, progress bar, and refresh action."""

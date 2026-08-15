@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Mapping
 
 from zealfie.runtime.provenance import ProductProvenance
 from zealfie.sources import RemoteSource, SourceRefResolver, resolve_source
@@ -100,6 +101,7 @@ def check_product_update(
     *,
     resolver: SourceRefResolver,
     policy: ProductPolicy | None = None,
+    channel_refs: Mapping[str, str] | None = None,
 ) -> ProductUpdateResult:
     """Check *product_id* for an update, given its active provenance.
 
@@ -186,11 +188,13 @@ def check_product_update(
     # ``requested_ref`` so unconfigured callers behave exactly as today.
     ref: str | None = None
     try:
-        ref = (
-            effective_ref(effective_policy)
-            if policy is not None
-            else provenance.requested_ref
-        )
+        if policy is not None:
+            if channel_refs is not None:
+                ref = effective_ref(effective_policy, channel_refs=channel_refs)
+            else:
+                ref = effective_ref(effective_policy)
+        else:
+            ref = provenance.requested_ref
         source = RemoteSource(
             owner=provenance.source_owner,
             repo=provenance.source_repo,

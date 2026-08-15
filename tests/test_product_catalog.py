@@ -1672,3 +1672,214 @@ def test_product_descriptor_rejects_non_remote_source_object():
         product_id="test2", display_name="T2", distribution_name="t2",
         launch_entry_points=(), remote_source=None,
     )
+
+
+# ===========================================================================
+# M1-2F Phase 5 — product-specific channel refs
+# ===========================================================================
+
+
+def test_zesolver_defaults_to_stable_main_channel():
+    """ZeSolver exposes exactly ``stable -> main`` (no implicit beta/development)."""
+    catalog = default_catalog()
+    desc = catalog.get("zesolver")
+    assert desc.channel_refs == (("stable", "main"),)
+    assert desc.channel_ref_map == {"stable": "main"}
+    assert desc.available_channels == ("stable",)
+    assert desc.channel_ref("stable") == "main"
+    assert desc.channel_ref("beta") is None
+
+
+def test_zemosaic_defaults_to_stable_main_channel():
+    """ZeMosaic exposes exactly ``stable -> main``."""
+    catalog = default_catalog()
+    desc = catalog.get("zemosaic")
+    assert desc.channel_refs == (("stable", "main"),)
+    assert desc.channel_ref_map == {"stable": "main"}
+
+
+def test_no_remote_source_products_have_no_channels():
+    """Products without remote_source expose no channels (fail-closed)."""
+    catalog = default_catalog()
+    for pid in ("zeseestarstacker", "zeanalyser"):
+        desc = catalog.get(pid)
+        assert desc.channel_refs == ()
+        assert desc.channel_ref_map == {}
+        assert desc.available_channels == ()
+        assert desc.channel_ref("stable") is None
+
+
+def test_all_real_catalog_descriptors_have_valid_channels():
+    """Every real catalog descriptor carries only valid channel metadata."""
+    from zealfie.products.policy import VALID_CHANNELS
+
+    catalog = default_catalog()
+    for desc in catalog.list():
+        for channel, ref in desc.channel_refs:
+            assert channel in VALID_CHANNELS, desc.product_id
+            assert isinstance(ref, str) and ref.strip(), desc.product_id
+        # remote_source presence must match channel availability.
+        if desc.remote_source is None:
+            assert desc.channel_refs == (), desc.product_id
+        else:
+            assert desc.channel_refs, desc.product_id
+
+
+def test_descriptor_default_stable_fallback():
+    """A descriptor with remote_source and no channels exposes only stable."""
+    desc = ProductDescriptor(
+        product_id="test",
+        display_name="Test",
+        distribution_name="test",
+        launch_entry_points=(),
+        remote_source=RemoteSource(owner="tinystork", repo="Test", ref="main"),
+    )
+    assert desc.channel_refs == (("stable", "main"),)
+
+
+def test_descriptor_without_remote_source_has_no_channel_fallback():
+    """A descriptor without remote_source gets no channel fallback."""
+    desc = ProductDescriptor(
+        product_id="test",
+        display_name="Test",
+        distribution_name="test",
+        launch_entry_points=(),
+    )
+    assert desc.channel_refs == ()
+
+
+def test_descriptor_rejects_channels_without_remote_source():
+    """Direct descriptor construction also rejects channels without a source."""
+    with pytest.raises(ValueError, match="channel_refs requires remote_source"):
+        ProductDescriptor(
+            product_id="test",
+            display_name="Test",
+            distribution_name="test",
+            launch_entry_points=(),
+            remote_source=None,
+            channel_refs=(("stable", "main"),),
+        )
+
+
+def test_load_catalog_explicit_channels():
+    """Explicit ``[products.channels]`` parse into ordered channel refs."""
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+[products.remote_source]
+owner = "tinystork"
+repo = "ZeSolver"
+ref = "main"
+[products.channels]
+stable = "main"
+beta = "beta"
+development = "development"
+"""
+    catalog = load_catalog_from_text(toml)
+    desc = catalog.get("zesolver")
+    assert desc.channel_refs == (
+        ("stable", "main"),
+        ("beta", "beta"),
+        ("development", "development"),
+    )
+    assert desc.available_channels == ("stable", "beta", "development")
+
+
+def test_load_catalog_rejects_unknown_channel():
+    """An unknown channel name in ``[products.channels]`` fails closed."""
+    from zealfie.products.catalog import InvalidCatalogError
+
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+[products.remote_source]
+owner = "tinystork"
+repo = "ZeSolver"
+ref = "main"
+[products.channels]
+nightly = "nightly"
+"""
+    with pytest.raises(InvalidCatalogError, match="not a known channel"):
+        load_catalog_from_text(toml)
+
+
+def test_load_catalog_rejects_channels_without_remote_source():
+    """A ``[products.channels]`` table without remote_source fails closed."""
+    from zealfie.products.catalog import InvalidCatalogError
+
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+[products.channels]
+stable = "main"
+"""
+    with pytest.raises(InvalidCatalogError, match="requires a remote_source"):
+        load_catalog_from_text(toml)
+
+
+def test_load_catalog_rejects_empty_channel_ref():
+    """A channel mapping to an empty ref fails closed."""
+    from zealfie.products.catalog import InvalidCatalogError
+
+    toml = """\
+schema_version = 1
+
+[[products]]
+id = "zesolver"
+display_name = "ZeSolver"
+distribution_name = "ZeSolver"
+[products.launch]
+entry_points = [{group = "gui_scripts", name = "zesolver"}]
+[products.remote_source]
+owner = "tinystork"
+repo = "ZeSolver"
+ref = "main"
+[products.channels]
+stable = ""
+"""
+    with pytest.raises(InvalidCatalogError, match="non-empty string"):
+        load_catalog_from_text(toml)
+
+
+def test_descriptor_rejects_unknown_channel():
+    """Direct descriptor construction rejects unknown channel names."""
+    with pytest.raises(ValueError, match="not a known channel"):
+        ProductDescriptor(
+            product_id="test",
+            display_name="Test",
+            distribution_name="test",
+            launch_entry_points=(),
+            remote_source=RemoteSource(owner="tinystork", repo="Test", ref="main"),
+            channel_refs=(("nightly", "nightly"),),
+        )
+
+
+def test_descriptor_rejects_duplicate_channel():
+    """Direct descriptor construction rejects duplicate channels."""
+    with pytest.raises(ValueError, match="duplicate channel"):
+        ProductDescriptor(
+            product_id="test",
+            display_name="Test",
+            distribution_name="test",
+            launch_entry_points=(),
+            remote_source=RemoteSource(owner="tinystork", repo="Test", ref="main"),
+            channel_refs=(("stable", "main"), ("stable", "main")),
+        )

@@ -73,6 +73,7 @@ from zealfie.launching import (
 from zealfie.products.catalog import (
     ProductCatalog,
     ProductDescriptor,
+    UnknownProductError,
     default_catalog,
 )
 from zealfie.products.policy import (
@@ -201,6 +202,37 @@ class RemoteSourceUnavailableError(ProductInstallPreparationError):
     raised before any resolver, fetcher, or build call is made so that
     callers can detect the condition early and provide a clear message.
     """
+
+
+class ProductChannelUnavailableError(ProductInstallPreparationError):
+    """Raised when a follow policy names a channel the product does not
+    declare in its catalog descriptor (M1-2F Phase 5).
+
+    This is a **fail-closed** preflight signal raised before any resolver,
+    fetcher, build, apply, or network call.  ``DEFAULT_CHANNEL_REFS`` is a
+    default mapper only; it never grants a channel to a product that did not
+    declare it in ``manifests/products.toml``.
+
+    ``pin`` policies never raise this — pin resolves the exact immutable
+    SHA and ignores the discovery channel entirely (the product id and
+    remote source are still validated by the normal install path).
+    """
+
+    def __init__(
+        self,
+        *,
+        product_id: str,
+        channel: str,
+        available: tuple[str, ...] = (),
+    ) -> None:
+        self.product_id = str(product_id)
+        self.channel = str(channel)
+        self.available = tuple(available)
+        avail = ", ".join(self.available) or "none"
+        super().__init__(
+            f"channel {self.channel!r} is not available for product "
+            f"{self.product_id!r} (available channels: {avail})"
+        )
 
 
 
@@ -844,7 +876,7 @@ class ZeAlfieService:
             )
             return replace(prepared, policy=policy)
 
-        ref = effective_ref(policy)
+        ref = _effective_product_ref(desc, policy)
         kwargs = dict(
             resolver=resolver,
             fetcher=fetcher,
@@ -2342,6 +2374,77 @@ class ZeAlfieService:
         return store.load_active()
 
     # ------------------------------------------------------------------
+    # M1-2F Phase 5: Per-product channel/policy read/write API
+    # ------------------------------------------------------------------
+
+    def available_product_channels(
+        self,
+        product_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return the product's declared ``(channel, ref)`` pairs.
+
+        This is the per-product channel authority: a channel is only ever
+        available when the catalog descriptor declares it.  Unknown products
+        raise :class:`~zealfie.products.catalog.UnknownProductError`.
+        """
+        desc = self._catalog.get(product_id)  # raises UnknownProductError
+        return desc.channel_refs
+
+    def product_policy(self, product_id: str) -> ProductPolicy:
+        """Return the configured policy for *product_id*.
+
+        Validates the product is catalog-known first (fail-closed);
+        unconfigured products yield the factory default (``stable`` /
+        ``follow``).
+        """
+        self._catalog.get(product_id)  # raises UnknownProductError
+        return self._policy_store.policy_for(product_id)
+
+    def set_product_policy(self, policy: ProductPolicy) -> ProductPolicy:
+        """Validate and persist *policy* for its product id.
+
+        Fail-closed: the product must be catalog-known, and a ``follow``
+        policy must name a channel the product declares.  ``pin`` policies
+        skip channel validation (pin resolves the exact SHA) but still
+        require a known product id.
+
+        Raises
+        ------
+        UnknownProductError
+            If the product is not in the catalog.
+        ProductChannelUnavailableError
+            If a follow policy names an undeclared channel.
+        """
+        desc = self._catalog.get(policy.product_id)  # UnknownProductError
+        if desc.remote_source is None:
+            raise RemoteSourceUnavailableError(
+                f"product {policy.product_id!r} has no remote source — "
+                f"cannot configure install/update policy"
+            )
+        if policy.policy == "follow" and policy.channel not in desc.channel_ref_map:
+            raise ProductChannelUnavailableError(
+                product_id=policy.product_id,
+                channel=policy.channel,
+                available=desc.available_channels,
+            )
+        return self._policy_store.set_policy(policy)
+
+    def set_product_channel(
+        self,
+        product_id: str,
+        channel: str,
+    ) -> ProductPolicy:
+        """Set the product's discovery channel (``policy=follow``).
+
+        Convenience wrapper around :meth:`set_product_policy` for the common
+        follow-channel case.  Persists the policy so later install/update
+        checks (CLI and GUI) observe the same configuration.
+        """
+        return self.set_product_policy(
+            ProductPolicy(product_id=product_id, channel=channel, policy="follow")
+        )
+
+    # ------------------------------------------------------------------
     # M1-2E E.2: Read-only update detection
     # ------------------------------------------------------------------
 
@@ -2370,11 +2473,16 @@ class ZeAlfieService:
 
         Never raises for missing provenance or resolver failure.
         """
+        try:
+            desc = self._catalog.get(product_id)
+        except UnknownProductError:
+            desc = None
         return _check_product_update(
             product_id,
             self.product_provenance(product_id),
             resolver=resolver,
             policy=self._policy_store.policy_for(product_id),
+            channel_refs=desc.channel_ref_map if desc is not None else None,
         )
 
     def check_updates(
@@ -2853,6 +2961,38 @@ def _desired_state_from_prepared_artifacts(
         for pa in prepared_artifacts
     )
     return DesiredRuntimeState(components=components)
+
+
+def _effective_product_ref(
+    desc: ProductDescriptor,
+    policy: ProductPolicy,
+) -> str:
+    """Return the effective requested ref for *policy* against *desc*.
+
+    M1-2F Phase 5: the product descriptor is the authority for which
+    channels exist.  ``DEFAULT_CHANNEL_REFS`` is only a default mapper, so a
+    follow policy naming a channel the product did not declare fails closed
+    here (before any resolver/network) with
+    :class:`ProductChannelUnavailableError`.
+
+    * ``pin``    → the pinned immutable SHA (``policy.pin_sha``).  The
+      channel is ignored and never validated; the product id/remote source
+      are still validated by the caller.
+    * ``follow`` → the declared channel ref (or the policy's explicit
+      ``source_ref`` override when present), via
+      :func:`~zealfie.products.policy.effective_ref` using the descriptor's
+      product-specific channel mapping.
+    """
+    if policy.policy == "pin":
+        return policy.pin_sha  # validated non-None 40-hex by ProductPolicy
+    channel_ref_map = desc.channel_ref_map
+    if policy.channel not in channel_ref_map:
+        raise ProductChannelUnavailableError(
+            product_id=desc.product_id,
+            channel=policy.channel,
+            available=desc.available_channels,
+        )
+    return effective_ref(policy, channel_refs=channel_ref_map)
 
 
 def _provenance_entries_for(

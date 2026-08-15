@@ -28,7 +28,7 @@ from zealfie.app import (
 from zealfie.components.model import EntryPointContract
 from zealfie.runtime.layout import RuntimeLayout
 from zealfie.runtime.state import save_active_state
-from zealfie.sources import SourceResolutionError
+from zealfie.sources import RemoteSource, SourceResolutionError
 
 
 VALID_SHA = "d4a0f1e2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8"  # 40 hex
@@ -69,6 +69,11 @@ def _catalog() -> ProductCatalog:
             display_name="ZeWitness",
             distribution_name="zealfie-witness",
             launch_entry_points=_EP,
+            remote_source=RemoteSource(
+                owner="tinystork",
+                repo="ZeWitness",
+                ref="main",
+            ),
         ),
     ))
 

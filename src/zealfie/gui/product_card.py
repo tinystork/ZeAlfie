@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -68,6 +69,12 @@ class ProductCard(QFrame):
     # The card never calls service.update_product directly.
     update_requested = Signal(str)  # product_id
 
+    # Emitted when the user selects a different channel in the channel
+    # selector (M1-2F Phase 5).  MainWindow persists the policy via the
+    # service and re-checks updates.  The card never mutates the policy
+    # store directly.
+    channel_changed = Signal(str, str)  # product_id, channel
+
     def __init__(
         self,
         descriptor: ProductDescriptor,
@@ -95,6 +102,9 @@ class ProductCard(QFrame):
         self._update_available: bool = False
         self._progress_bar: QProgressBar | None = None
         self._action_button: QPushButton | None = None
+        self._channel_combo: QComboBox | None = None
+        self._policy_label: QLabel | None = None
+        self._updating_channel: bool = False
         self._last_spawn_error: str | None = None
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
@@ -192,6 +202,9 @@ class ProductCard(QFrame):
         self._update_label.setVisible(False)
         layout.addWidget(self._update_label)
 
+        # --- Channel / policy selector (M1-2F Phase 5) ---
+        self._build_channel_selector(layout)
+
         # --- Determinate install progress bar (hidden unless installing) ---
         self._progress_bar = QProgressBar()
         self._progress_bar.setObjectName("installProgressBar")
@@ -220,6 +233,85 @@ class ProductCard(QFrame):
         btn_layout.addWidget(self._action_button)
 
         layout.addLayout(btn_layout)
+
+    # ------------------------------------------------------------------
+    # Channel / policy selector (M1-2F Phase 5)
+    # ------------------------------------------------------------------
+
+    def _build_channel_selector(self, layout) -> None:
+        """Add a channel selector when the product exposes multiple channels.
+
+        Shown only when the descriptor declares a ``remote_source`` and more
+        than one channel.  Pin is intentionally not surfaced here (CLI-only
+        for Phase 5); the GUI remains follow-channel only.
+        """
+        descriptor = self._descriptor
+        channels = descriptor.channel_refs
+        if descriptor.remote_source is None or len(channels) <= 1:
+            return
+
+        self._policy_label = QLabel()
+        self._policy_label.setObjectName("channelPolicyLabel")
+        layout.addWidget(self._policy_label)
+
+        self._channel_combo = QComboBox()
+        self._channel_combo.setObjectName("channelCombo")
+        for channel, ref in channels:
+            self._channel_combo.addItem(f"{channel} ({ref})", channel)
+        self._channel_combo.currentIndexChanged.connect(
+            self._on_channel_combo_changed
+        )
+        layout.addWidget(self._channel_combo)
+        self.refresh_policy()
+
+    def _service_policy(self):
+        """Return the service's current policy for this product, or ``None``."""
+        get_policy = getattr(self._service, "product_policy", None)
+        if not callable(get_policy):
+            return None
+        try:
+            return get_policy(self._descriptor.product_id)
+        except Exception:
+            return None
+
+    def _policy_text(self, policy) -> str:
+        """Return a compact, user-facing policy summary (``""`` when unknown)."""
+        if policy is None:
+            return ""
+        if getattr(policy, "policy", None) == "pin":
+            sha = getattr(policy, "pin_sha", None) or ""
+            if len(sha) > 7:
+                sha = sha[:7] + "\u2026"
+            return f"Policy: pin ({sha})"
+        channel = getattr(policy, "channel", None) or ""
+        return f"Channel: {channel}" if channel else ""
+
+    def refresh_policy(self) -> None:
+        """Re-sync the channel selector and policy label to the service state."""
+        if self._channel_combo is None:
+            return
+        policy = self._service_policy()
+        self._updating_channel = True
+        try:
+            if policy is not None and getattr(policy, "policy", None) == "follow":
+                idx = self._channel_combo.findData(
+                    getattr(policy, "channel", None)
+                )
+                if idx >= 0:
+                    self._channel_combo.setCurrentIndex(idx)
+            if self._policy_label is not None:
+                self._policy_label.setText(self._policy_text(policy))
+        finally:
+            self._updating_channel = False
+
+    def _on_channel_combo_changed(self, index: int) -> None:
+        """Emit ``channel_changed`` when the user picks a different channel."""
+        if self._updating_channel or self._channel_combo is None:
+            return
+        channel = self._channel_combo.itemData(index)
+        if not channel:
+            return
+        self.channel_changed.emit(self._descriptor.product_id, channel)
 
     # ------------------------------------------------------------------
     # State → UI

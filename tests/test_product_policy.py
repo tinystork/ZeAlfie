@@ -83,7 +83,12 @@ def _prov(
     return ProductProvenance(**defaults)
 
 
-def _descriptor(product_id: str, *, ref: str = "main") -> ProductDescriptor:
+def _descriptor(
+    product_id: str,
+    *,
+    ref: str = "main",
+    channel_refs: tuple[tuple[str, str], ...] | None = None,
+) -> ProductDescriptor:
     return ProductDescriptor(
         product_id=product_id,
         display_name=product_id.capitalize(),
@@ -95,6 +100,7 @@ def _descriptor(product_id: str, *, ref: str = "main") -> ProductDescriptor:
             repo=f"Ze{product_id.capitalize()}",
             ref=ref,
         ),
+        channel_refs=channel_refs or (),
     )
 
 
@@ -296,7 +302,14 @@ def test_effective_ref_central_mapping_and_override() -> None:
 
 
 def test_stable_beta_resolve_different_refs_service_level(tmp_path: Path) -> None:
-    catalog = _catalog("alpha", "beta")
+    catalog = ProductCatalog((
+        _descriptor("alpha", ref="main"),
+        _descriptor(
+            "beta",
+            ref="main",
+            channel_refs=(("stable", "main"), ("beta", "beta")),
+        ),
+    ))
     service = _service(
         tmp_path,
         catalog,

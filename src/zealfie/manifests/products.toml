@@ -12,6 +12,9 @@ owner = "tinystork"
 repo = "ZeSolver"
 ref = "main"
 
+[products.channels]
+stable = "main"
+
 [[products.launch.entry_points]]
 group = "gui_scripts"
 name = "zesolver"
@@ -26,6 +29,9 @@ description = "Mosaic planner and composer — stitch, align, and blend multi-pa
 owner = "tinystork"
 repo = "zemosaic"
 ref = "main"
+
+[products.channels]
+stable = "main"
 
 [[products.launch.entry_points]]
 group = "gui_scripts"
