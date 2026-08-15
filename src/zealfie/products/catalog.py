@@ -15,8 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 
+from zealfie.acceleration.models import (
+    AcceleratedRequirement,
+    AccelerationIncompatibility,
+    KNOWN_BACKENDS,
+    ProductAccelerationRequirements,
+)
 from zealfie.components.model import EntryPointContract
 from zealfie.products.policy import VALID_CHANNELS
 from zealfie.sources import InvalidRemoteSourceError, RemoteSource
@@ -92,6 +99,14 @@ class ProductDescriptor:
     # empty tuple means "no channels" (product has no remote source, or the
     # descriptor is constructed without channel metadata).
     channel_refs: tuple[tuple[str, str], ...] = ()
+    # M1-2H: Optional structured accelerated requirements.
+    #
+    # None for products that declare no acceleration needs.  When present,
+    # the declaration is fully validated (known backend, canonicalized
+    # distributions, parseable specifiers, no self-conflicts).  ZeAlfie
+    # never selects a concrete accelerated framework — this only records
+    # what the product declares.
+    acceleration: ProductAccelerationRequirements | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("product_id", "display_name", "distribution_name"):
@@ -165,6 +180,15 @@ class ProductDescriptor:
             seen.add(channel)
             normalized.append((channel, ref))
         object.__setattr__(self, "channel_refs", tuple(normalized))
+
+        # Validate acceleration (M1-2H): must be None or a validated
+        # ProductAccelerationRequirements instance.
+        acc = self.acceleration
+        if acc is not None and not isinstance(acc, ProductAccelerationRequirements):
+            raise ValueError(
+                "acceleration must be None or a ProductAccelerationRequirements "
+                f"instance, got {type(acc).__qualname__}"
+            )
 
     @property
     def channel_ref_map(self) -> dict[str, str]:
@@ -406,6 +430,12 @@ def _product_from_payload(
     # --- optional channels (M1-2F Phase 5) ---
     channel_refs = _parse_optional_channels(raw, label_prefix, remote_source)
 
+    # --- optional acceleration requirements (M1-2H) ---
+    # Purely additive and backward compatible: schema_version stays at 1
+    # because an older ZeAlfie simply ignores the table and keeps treating
+    # the product as having no acceleration requirements.
+    acceleration = _parse_optional_acceleration(raw, label_prefix, product_id)
+
     return ProductDescriptor(
         product_id=product_id,
         display_name=display_name,
@@ -415,6 +445,7 @@ def _product_from_payload(
         description=description,
         remote_source=remote_source,
         channel_refs=channel_refs,
+        acceleration=acceleration,
     )
 
 
@@ -512,3 +543,185 @@ def _parse_optional_channels(
         seen.add(channel)
         result.append((channel, raw_ref.strip()))
     return tuple(result)
+
+
+def _reject_unknown_keys(
+    table: dict[str, Any],
+    known_keys: set[str],
+    label: str,
+) -> None:
+    """Fail closed on any key outside *known_keys* in a catalog table."""
+    unknown = sorted(set(table) - known_keys)
+    if unknown:
+        raise InvalidCatalogError(
+            f"{label} contains unknown key(s): "
+            + ", ".join(repr(key) for key in unknown)
+        )
+
+
+def _parse_optional_acceleration(
+    raw: dict[str, Any],
+    label_prefix: str,
+    product_id: str,
+) -> ProductAccelerationRequirements | None:
+    """Parse an optional ``[products.acceleration]`` table (M1-2H).
+
+    Returns ``None`` when the key is absent.  Fail-closed and strict
+    when present:
+
+    * only the keys ``backend``, ``optional``, ``requirements`` and
+      ``incompatibilities`` are allowed — unknown keys anywhere inside
+      the acceleration tables are rejected;
+    * ``backend`` is required and must be in
+      :data:`zealfie.acceleration.models.KNOWN_BACKENDS`;
+    * requirement ``specifier`` values must parse as PEP 440
+      :class:`~packaging.specifiers.SpecifierSet`;
+    * duplicate requirements, duplicate incompatibilities and
+      distributions declared both ways are rejected.
+
+    ZeAlfie never selects a concrete accelerated framework here — this
+    only records what the product declares as distribution names.
+    """
+    raw_acc = raw.get("acceleration")
+    if raw_acc is None:
+        return None
+    label = f"{label_prefix}.acceleration"
+    if not isinstance(raw_acc, dict):
+        raise InvalidCatalogError(f"{label} must be a table")
+
+    _reject_unknown_keys(
+        raw_acc,
+        {"backend", "optional", "requirements", "incompatibilities"},
+        label,
+    )
+
+    backend = _required_str(raw_acc, "backend", f"{label}.backend")
+    if backend not in KNOWN_BACKENDS:
+        raise InvalidCatalogError(
+            f"{label}.backend: unsupported acceleration backend {backend!r}"
+        )
+
+    optional = raw_acc.get("optional", True)
+    if not isinstance(optional, bool):
+        raise InvalidCatalogError(f"{label}.optional must be a bool")
+
+    try:
+        requirements = _parse_acceleration_requirements(raw_acc, label)
+        incompatibilities = _parse_acceleration_incompatibilities(raw_acc, label)
+        return ProductAccelerationRequirements(
+            product_id=product_id,
+            backend=backend,
+            optional=optional,
+            requirements=requirements,
+            incompatibilities=incompatibilities,
+        )
+    except InvalidCatalogError:
+        raise
+    except ValueError as exc:
+        raise InvalidCatalogError(f"{label}: {exc}") from exc
+
+
+def _parse_acceleration_requirements(
+    raw_acc: dict[str, Any],
+    label: str,
+) -> tuple[AcceleratedRequirement, ...]:
+    """Parse ``acceleration.requirements`` array of tables."""
+    raw_reqs = raw_acc.get("requirements")
+    if raw_reqs is None:
+        return ()
+    if not isinstance(raw_reqs, list):
+        raise InvalidCatalogError(
+            f"{label}.requirements must be an array of tables"
+        )
+
+    parsed: list[AcceleratedRequirement] = []
+    for idx, raw_req in enumerate(raw_reqs):
+        req_label = f"{label}.requirements[{idx}]"
+        if not isinstance(raw_req, dict):
+            raise InvalidCatalogError(f"{req_label} must be a table")
+        _reject_unknown_keys(
+            raw_req, {"distribution", "specifier", "extras"}, req_label
+        )
+
+        distribution = _required_str(
+            raw_req, "distribution", f"{req_label}.distribution"
+        )
+
+        specifier = raw_req.get("specifier")
+        if specifier is not None:
+            if not isinstance(specifier, str):
+                raise InvalidCatalogError(
+                    f"{req_label}.specifier must be a string"
+                )
+            specifier = specifier.strip()
+            if not specifier:
+                raise InvalidCatalogError(
+                    f"{req_label}.specifier must not be empty"
+                )
+            try:
+                SpecifierSet(specifier)
+            except InvalidSpecifier as exc:
+                raise InvalidCatalogError(
+                    f"{req_label}.specifier is not a valid PEP 440 "
+                    f"specifier: {exc}"
+                ) from exc
+
+        extras: list[str] = []
+        raw_extras = raw_req.get("extras")
+        if raw_extras is not None:
+            if not isinstance(raw_extras, list):
+                raise InvalidCatalogError(
+                    f"{req_label}.extras must be an array of strings"
+                )
+            for extra_idx, raw_extra in enumerate(raw_extras):
+                if not isinstance(raw_extra, str):
+                    raise InvalidCatalogError(
+                        f"{req_label}.extras[{extra_idx}] must be a string"
+                    )
+                extra = raw_extra.strip()
+                if not extra:
+                    raise InvalidCatalogError(
+                        f"{req_label}.extras[{extra_idx}] must not be empty"
+                    )
+                extras.append(canonicalize_name(extra))
+
+        parsed.append(
+            AcceleratedRequirement(
+                distribution=distribution,
+                specifier=specifier,
+                extras=tuple(extras),
+            )
+        )
+    return tuple(parsed)
+
+
+def _parse_acceleration_incompatibilities(
+    raw_acc: dict[str, Any],
+    label: str,
+) -> tuple[AccelerationIncompatibility, ...]:
+    """Parse ``acceleration.incompatibilities`` array of tables."""
+    raw_incs = raw_acc.get("incompatibilities")
+    if raw_incs is None:
+        return ()
+    if not isinstance(raw_incs, list):
+        raise InvalidCatalogError(
+            f"{label}.incompatibilities must be an array of tables"
+        )
+
+    parsed: list[AccelerationIncompatibility] = []
+    for idx, raw_inc in enumerate(raw_incs):
+        inc_label = f"{label}.incompatibilities[{idx}]"
+        if not isinstance(raw_inc, dict):
+            raise InvalidCatalogError(f"{inc_label} must be a table")
+        _reject_unknown_keys(
+            raw_inc, {"distribution", "reason"}, inc_label
+        )
+
+        distribution = _required_str(
+            raw_inc, "distribution", f"{inc_label}.distribution"
+        )
+        reason = _required_str(raw_inc, "reason", f"{inc_label}.reason")
+        parsed.append(
+            AccelerationIncompatibility(distribution=distribution, reason=reason)
+        )
+    return tuple(parsed)
