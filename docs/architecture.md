@@ -1434,3 +1434,114 @@ installation success); driver blocked → details, no configure button; no
 supported GPU → CPU-mode message; unknown → honest unknown message, no offer.
 A probe/service failure degrades to the unknown state and never crashes the
 window.
+
+## M1-2H — Shared GPU Runtime Planning (read-only)
+
+M1-2H answers: *if the user accepts GPU configuration, what must ZeAlfie
+build and install in the shared runtime?*  It is **planning-only**: no
+runtime mutation, no download, no installation, no network.  It transforms
+the M1-2G observation chain into a pure, deterministic
+``AcceleratedDeploymentPlan``.
+
+### Architectural invariant
+
+```text
+HostCapabilities (M1-2G)
+    -> AccelerationRecommendation (M1-2G)
+    -> ProductAccelerationRequirements (catalog, declared)
+    -> HardwareCompatibility (pure evaluation)
+    -> AcceleratedDeploymentPlan (pure, read-only)
+    -> GUI preview / CLI ``system gpu-plan``
+```
+
+**ZeAlfie never selects a concrete accelerated framework.**  No PyTorch /
+CuPy / TensorFlow / Numba decision exists in production code.  Products
+declare their accelerated needs as distribution-level requirements against a
+known backend; ZeAlfie only evaluates declared backends and cross-product
+consistency, fail-closed.
+
+### Product acceleration contract
+
+``products.toml`` gains an optional, strictly parsed
+``[products.acceleration]`` table per product (catalog schema stays at 1 —
+absence simply means "no accelerated requirements"):
+
+* ``backend`` — must be a known backend (only ``NVIDIA_CUDA``);
+* ``optional`` — bool, default true (carried for future planning);
+* ``requirements[]`` — ``distribution`` (canonicalized), optional PEP 440
+  ``specifier``, canonicalized ``extras``;
+* ``incompatibilities[]`` — ``distribution`` + ``reason``.
+
+Unknown keys, malformed specifiers, duplicates, and self-conflicts are
+rejected at parse time (fail-closed).  The current packaged catalog declares
+no acceleration for any product, so real deployments produce the honest
+``NO_ACCELERATED_REQUIREMENTS`` preview and the CPU closure is preserved
+unchanged.
+
+### Compatibility evaluation
+
+``evaluate_acceleration_compatibility(requirements_map, capabilities,
+recommendation)`` is pure and deterministic.  Verdicts:
+
+* ``SUPPORTED`` — host satisfies all declared requirements, no conflicts;
+* ``BLOCKED`` — no requirements, unsupported backend, no accelerator
+  hardware, driver blocked, or cross-product conflicts (exact-pin
+  disagreements, pin vs excluding range, requirement vs declared
+  incompatibility);
+* ``UNKNOWN`` — partial host evidence or unknown recommendation.
+
+Fail-closed: silence never means "supported"; an unknown state never
+produces an applicable plan.
+
+### Accelerated variant catalog
+
+``AcceleratedVariantCatalog`` is an immutable, injectable registry of
+declared accelerated variants (distribution + version + backend + optional
+platform + optional sha256).  Lookups are fail-closed: zero matches →
+``None``, more than one match → ``AmbiguousVariantError``.  The default
+catalog is **empty**: real plans stay blocked until M1-2I supplies artifact
+acquisition.  A missing variant blocks the whole plan — no partial fallback,
+no approximate stack.
+
+### Accelerated DeploymentPlan
+
+``build_accelerated_deployment_plan(...)`` (``zealfie.acceleration.planning``)
+is pure — all inputs are passed in, nothing is read from or written to the
+filesystem.  The plan documents:
+
+* ``status``: ``NO_ACCELERATED_REQUIREMENTS`` / ``PLAN_READY`` / ``BLOCKED``
+  / ``UNKNOWN``;
+* the full hardware compatibility verdict;
+* the single acceleration backend;
+* sorted ``products_concerned``;
+* ``keep_products`` copied **verbatim** from provenance (product id, exact
+  version, commit SHA, wheel SHA-256) — never re-resolved; products known
+  only from the installed-runtime lock degrade commit/wheel SHAs to
+  ``None`` (never fabricated);
+* merged ``added_requirements`` — one entry per distribution (combined
+  specifier, union of extras, sorted declaring products, selected variant);
+* source runtime state/slot snapshot and a descriptive ``target_runtime``;
+* ``blocked`` / ``blocked_reason`` and deterministic ``closure_impact``
+  lines.
+
+The plan is deterministic: equal inputs produce equal plans.
+
+### Service, CLI, GUI
+
+* ``ZeAlfieService.build_accelerated_deployment_plan(...)`` — read-only
+  preview; capabilities/recommendation/variant catalog are injectable for
+  hermetic tests; defaults to the fail-closed empty variant catalog.
+* ``zealfie system gpu-plan`` — read-only CLI preview; a blocked plan is a
+  preview (exit 0), unexpected exceptions exit non-zero.
+* ``AccelerationPanel`` — the "Configurer le GPU" click now appends the
+  honest plan preview (pure ``gpu_plan_preview_lines`` presentation) to the
+  existing detail area.  No install action exists; a planning failure
+  degrades to an honest notice, never a crash.  The preview never claims an
+  installation happened.
+
+### Deferred to M1-2I
+
+Artifact acquisition, candidate runtime build, compatibility gate, lock/
+provenance persistence, atomic activation, rollback, cancellation, and the
+GUI install path remain deferred to M1-2I.  The first real accelerated
+deployment on physical hardware requires explicit human authorization.
