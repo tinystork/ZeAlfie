@@ -439,9 +439,21 @@ def test_witness_wheel_no_deps_resolves(
 
 
 @pytest.fixture(scope="session")
-def zesolver_wheel() -> Path:
-    return Path("/home/tristan/.openclaw/workspace/projects/ZeSolver/dist/zesolver-1.0.0-py3-none-any.whl")
+def zesolver_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Autonomous ZeSolver fixture wheel (no external checkout/wheel).
 
+    Builds a minimal wheel whose METADATA mirrors the ZeSolver product
+    contract: Name=ZeSolver, Version=1.0.0, a base ``Requires-Dist`` on
+    ``numpy``, and a ``gui`` extra that additionally requires ``PySide6``.
+    """
+    wheelhouse = tmp_path_factory.mktemp("zesolver")
+    return _build_metadata_wheel_with_extras(
+        "ZeSolver",
+        "1.0.0",
+        requires_dist=["numpy", 'PySide6; extra == "gui"'],
+        output=wheelhouse,
+        provides_extra=["gui"],
+    )
 
 def test_zesolver_reads_metadata(
     zesolver_wheel: Path,
