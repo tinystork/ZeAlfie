@@ -388,6 +388,136 @@ def test_pin_install_prepares_exact_sha_no_resolver(
     assert len(entries) == 1
     assert entries[0].commit_sha == PIN_SHA
     assert entries[0].requested_ref == PIN_SHA
+    # Pin provenance records policy=pin, pin_sha, and no channel.
+    assert entries[0].policy == "pin"
+    assert entries[0].pin_sha == PIN_SHA
+    assert entries[0].channel is None
+
+
+def test_follow_install_provenance_records_channel_policy_distinct(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A follow/stable install records channel, policy, requested_ref, and
+    commit_sha as distinct facts: channel is the discovery channel
+    ('stable'), requested_ref is the effective mapped ref ('main'), and
+    commit_sha is the resolved immutable SHA."""
+    catalog = _catalog("alpha")
+    service = _service(
+        tmp_path,
+        catalog,
+        policies=[ProductPolicy(product_id="alpha", channel="stable", policy="follow")],
+    )
+
+    prepared_calls: list[list] = []
+    resolver = _resolver(OTHER_SHA)
+
+    def _fake_prepare(product_id, *, resolver, fetcher, work_root,
+                      progress_callback=None):
+        return _fake_ppa(product_id, commit_sha=OTHER_SHA, requested_ref="main")
+
+    monkeypatch.setattr(service, "prepare_product_artifact", _fake_prepare)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda prepared_artifacts, *, dependency_wheelhouse=None,
+               probe_distribution=None, progress_callback=None: (
+            prepared_calls.append(list(prepared_artifacts))
+            or DeploymentResult(success=True, active_slot_id="rt-1")
+        ),
+    )
+
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+
+    result = service.install_product(
+        "alpha",
+        resolver=resolver,
+        fetcher=lambda o, r, sha: b"",
+        work_root=tmp_path / "work",
+        dependency_wheelhouse=wheelhouse,
+    )
+
+    assert result.success is True
+    entries = _provenance_entries_for(prepared_calls[0])
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.channel == "stable"
+    assert entry.policy == "follow"
+    assert entry.requested_ref == "main"
+    assert entry.commit_sha == OTHER_SHA
+    assert entry.pin_sha is None
+
+
+def test_keep_propagates_policy_never_resolves(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A KEEP product is materialized from its exact active commit SHA
+    (never re-resolved) and its known policy metadata is carried forward
+    onto the rebuilt provenance entry."""
+    catalog = _catalog("alpha", "beta")
+    service = _service(
+        tmp_path,
+        catalog,
+        entries=[
+            _prov(
+                product_id="alpha",
+                commit_sha=VALID_SHA,
+                version="1.0.0",
+                requested_ref="beta",
+                channel="beta",
+                policy="follow",
+            ),
+        ],
+        policies=[ProductPolicy(product_id="beta", channel="stable", policy="follow")],
+    )
+
+    keep_calls: list[dict] = []
+    resolve_calls: list[str] = []
+    prepared_calls: list[list] = []
+
+    def _fake_at_commit(product_id, *, commit_sha, source_owner, source_repo,
+                        requested_ref, fetcher, work_root, progress_callback=None):
+        keep_calls.append({"product_id": product_id, "commit_sha": commit_sha})
+        return _fake_ppa(product_id, commit_sha=commit_sha, requested_ref=requested_ref)
+
+    def _fake_prepare(product_id, *, resolver, fetcher, work_root,
+                      progress_callback=None):
+        resolve_calls.append(product_id)
+        return _fake_ppa(product_id, commit_sha=OTHER_SHA, requested_ref="main")
+
+    monkeypatch.setattr(service, "prepare_product_artifact_at_commit", _fake_at_commit)
+    monkeypatch.setattr(service, "prepare_product_artifact", _fake_prepare)
+    monkeypatch.setattr(
+        service, "install_prepared_product_deployment",
+        lambda prepared_artifacts, *, dependency_wheelhouse=None,
+               probe_distribution=None, progress_callback=None: (
+            prepared_calls.append(list(prepared_artifacts))
+            or DeploymentResult(success=True, active_slot_id="rt-2")
+        ),
+    )
+
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+
+    result = service.install_product(
+        "beta",
+        resolver=_resolver(OTHER_SHA),
+        fetcher=lambda o, r, sha: b"",
+        work_root=tmp_path / "work",
+        dependency_wheelhouse=wheelhouse,
+    )
+
+    assert result.success is True
+    # KEEP alpha materialized from exact SHA, never the resolver path.
+    assert keep_calls == [{"product_id": "alpha", "commit_sha": VALID_SHA}]
+    assert resolve_calls == ["beta"]
+
+    entries = _provenance_entries_for(prepared_calls[0])
+    by_id = {e.product_id: e for e in entries}
+    keep_entry = by_id["alpha"]
+    assert keep_entry.commit_sha == VALID_SHA  # exact SHA preserved
+    assert keep_entry.policy == "follow"        # known policy propagated
+    assert keep_entry.channel == "beta"
+    assert keep_entry.pin_sha is None
 
 
 # ---------------------------------------------------------------------------

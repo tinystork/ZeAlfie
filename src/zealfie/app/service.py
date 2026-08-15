@@ -34,7 +34,7 @@ import hashlib
 import logging
 import tempfile
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from zealfie.app.progress import InstallPhase, InstallProgress, PHASE_PERCENT
@@ -115,6 +115,11 @@ from zealfie.runtime.model import (
     RuntimeStatus,
 )
 from zealfie.runtime.provenance import ProductProvenance, ProductProvenanceStore
+from zealfie.runtime.installed_lock import (
+    InstalledLockStore,
+    InstalledRuntimeLock,
+    installed_lock_from_runtime_lock,
+)
 from zealfie.runtime.planning import (
     DeploymentPlan,
     DesiredComponent,
@@ -341,6 +346,11 @@ class PreparedProductArtifact:
 
     No installation has occurred.  The shared runtime and selection
     store are untouched.
+
+    ``policy`` is the exact discovery policy that produced this artifact
+    (``None`` when unknown, e.g. for KEEP products whose active provenance
+    predates Phase 4).  It is metadata for provenance persistence only and
+    never drives resolution here.
     """
 
     product_id: str
@@ -348,6 +358,7 @@ class PreparedProductArtifact:
     resolved_source: ResolvedSource
     wheel_path: Path
     verified_artifact: VerifiedArtifact
+    policy: ProductPolicy | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +423,7 @@ class ZeAlfieService:
         selection_store: SelectionStore | None = None,
         acquirer: object | None = None,
         provenance_store: ProductProvenanceStore | None = None,
+        installed_lock_store: InstalledLockStore | None = None,
         policy_store: ProductPolicyStore | None = None,
     ) -> None:
         self._registry = registry or default_registry()
@@ -434,6 +446,17 @@ class ZeAlfieService:
             layout = getattr(self._runtime, "layout", None)
             self._provenance_store = (
                 ProductProvenanceStore(layout) if layout is not None else None
+            )
+        # M1-2F Phase 4 corrective: installed-runtime lock read model.
+        # Explicit injection wins; otherwise derive from the runtime's layout
+        # when available (real SharedRuntime).  Fake runtimes without a layout
+        # leave it disabled rather than writing to the real user runtime.
+        if installed_lock_store is not None:
+            self._installed_lock_store = installed_lock_store
+        else:
+            layout = getattr(self._runtime, "layout", None)
+            self._installed_lock_store = (
+                InstalledLockStore(layout) if layout is not None else None
             )
         # M1-2F Phase 3 (F.2): per-product channel/follow/pin configuration.
         # Explicit injection wins; otherwise a default store reads the
@@ -767,7 +790,9 @@ class ZeAlfieService:
                 f"{prepared.verified_artifact.version!r}, expected "
                 f"{provenance.version!r} from active provenance"
             )
-        return prepared
+        # Propagate known discovery-policy metadata forward (no re-resolution).
+        # A pre-Phase-4 provenance record yields None → policy-unknown.
+        return replace(prepared, policy=_policy_from_provenance(provenance))
 
     def _prepare_target_product_artifact(
         self,
@@ -813,21 +838,27 @@ class ZeAlfieService:
             )
             if progress_callback is not None:
                 kwargs["progress_callback"] = progress_callback
-            return self.prepare_product_artifact_at_commit(
+            prepared = self.prepare_product_artifact_at_commit(
                 product_id,
                 **kwargs,
             )
+            return replace(prepared, policy=policy)
 
         ref = effective_ref(policy)
-        kwargs = dict(resolver=resolver, fetcher=fetcher, work_root=work_root)
+        kwargs = dict(
+            resolver=resolver,
+            fetcher=fetcher,
+            work_root=work_root,
+        )
         if progress_callback is not None:
             kwargs["progress_callback"] = progress_callback
         if ref != desc.remote_source.ref:
             kwargs["source_ref"] = ref
-        return self.prepare_product_artifact(
+        prepared = self.prepare_product_artifact(
             product_id,
             **kwargs,
         )
+        return replace(prepared, policy=policy)
 
 
     # ------------------------------------------------------------------
@@ -1247,6 +1278,10 @@ class ZeAlfieService:
             # Ordering invariant: provenance is written LAST, so any apply or
             # selection failure leaves the old active provenance authoritative.
             self._persist_provenance(prepared_artifacts, result)
+            # ---- 10. Persist installed-runtime lock (observational) ----
+            # Reduced installed-reality lock, written alongside/after
+            # provenance.  Never drives install/rollback decisions.
+            self._persist_installed_lock(plan, result)
             ready_message = _completion_message(
                 self._catalog, prepared_artifacts,
             )
@@ -1301,6 +1336,51 @@ class ZeAlfieService:
         except Exception:
             logger.warning(
                 "failed to persist product provenance for slot %r; "
+                "runtime activation is unaffected",
+                slot_id,
+                exc_info=True,
+            )
+
+
+    # ------------------------------------------------------------------
+    # M1-2F Phase 4 corrective: installed-runtime lock persistence
+    # ------------------------------------------------------------------
+
+    def _persist_installed_lock(
+        self,
+        plan: DeploymentPlan,
+        result: DeploymentResult,
+    ) -> None:
+        """Persist the reduced installed-runtime lock after activation.
+
+        Called only after ``apply_deployment_plan`` returned success and
+        selection persistence succeeded (alongside provenance).  The lock is
+        reduced from ``plan.dependency_lock`` — transient install-input
+        fields (``wheel_path`` / ``size`` / ``sha256``) are dropped — and
+        keyed by the new active slot id so it always describes the active
+        runtime, never a failed candidate.
+
+        A ``None`` ``dependency_lock`` (no resolved closure was used) records
+        a known-empty lock for the slot, so "no closure used" is
+        distinguishable from UNKNOWN (no record).
+
+        This store is **observational only**: no install/update/rollback/KEEP
+        decision reads it.  A persistence failure here does **not** roll back
+        the runtime and is logged, never raised (identical non-destructive
+        semantics to provenance persistence).
+        """
+        store = self._installed_lock_store
+        if store is None:
+            return
+        slot_id = result.active_slot_id
+        if not slot_id:
+            return
+        try:
+            lock = installed_lock_from_runtime_lock(plan.dependency_lock)
+            store.record(slot_id, lock)
+        except Exception:
+            logger.warning(
+                "failed to persist installed-runtime lock for slot %r; "
                 "runtime activation is unaffected",
                 slot_id,
                 exc_info=True,
@@ -2216,6 +2296,12 @@ class ZeAlfieService:
         disabled, e.g. for synthetic runtimes without a layout)."""
         return self._provenance_store
 
+    @property
+    def installed_lock_store(self) -> InstalledLockStore | None:
+        """The installed-runtime lock store (may be ``None`` when disabled,
+        e.g. for synthetic runtimes without a layout)."""
+        return self._installed_lock_store
+
     # ------------------------------------------------------------------
     # M1-2E E.1: Installed-product provenance readback
     # ------------------------------------------------------------------
@@ -2238,6 +2324,22 @@ class ZeAlfieService:
         if store is None:
             return None
         return store.product_provenance(product_id)
+
+    # ------------------------------------------------------------------
+    # M1-2F Phase 4 corrective: Installed-runtime lock readback
+    # ------------------------------------------------------------------
+
+    def active_installed_lock(self) -> InstalledRuntimeLock | None:
+        """Return the installed-runtime lock for the active slot, or ``None``.
+
+        Observational only: this readback is never used to drive an
+        install/update/rollback/KEEP decision.  A runtime with no recorded
+        lock (or no store) yields ``None`` (UNKNOWN), never a fabricated lock.
+        """
+        store = self._installed_lock_store
+        if store is None:
+            return None
+        return store.load_active()
 
     # ------------------------------------------------------------------
     # M1-2E E.2: Read-only update detection
@@ -2762,11 +2864,17 @@ def _provenance_entries_for(
     (owner/repo/ref, exact commit SHA) and ``verified_artifact`` (version,
     wheel SHA-256).  ``version`` is the verified artifact's ``version``
     (equal to ``wheel_version`` for prepared artifacts).
+
+    Discovery-policy metadata (M1-2F Phase 4) is persisted only when the
+    artifact carries an exact :class:`ProductPolicy`; otherwise the entry
+    records ``None`` policy metadata (policy-unknown) without fabricating
+    a channel/policy/pin.
     """
     entries: list[ProductProvenance] = []
     for pa in prepared_artifacts:
         resolved = pa.resolved_source
         verified = pa.verified_artifact
+        channel, policy, pin_sha = _provenance_policy_fields(pa.policy)
         entries.append(
             ProductProvenance(
                 product_id=pa.product_id,
@@ -2776,9 +2884,64 @@ def _provenance_entries_for(
                 requested_ref=resolved.source.ref,
                 commit_sha=resolved.commit_sha,
                 wheel_sha256=verified.sha256,
+                channel=channel,
+                policy=policy,
+                pin_sha=pin_sha,
             )
         )
     return tuple(entries)
+
+
+def _provenance_policy_fields(
+    policy: ProductPolicy | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Map a discovery policy to provenance metadata fields.
+
+    * ``follow`` → ``(channel, "follow", None)`` — the discovery channel is
+      recorded; ``requested_ref`` (elsewhere) holds the effective ref.
+    * ``pin``    → ``(None, "pin", pin_sha)`` — no discovery channel; the
+      pinned SHA is recorded as the immutable target.
+    * ``None``   → ``(None, None, None)`` — policy-unknown (never invented).
+    """
+    if policy is None:
+        return None, None, None
+    if policy.policy == "pin":
+        return None, "pin", policy.pin_sha
+    return policy.channel, "follow", None
+
+
+def _policy_from_provenance(provenance: ProductProvenance) -> ProductPolicy | None:
+    """Reconstruct discovery-policy metadata from an active provenance record.
+
+    Used by the KEEP path to propagate known policy metadata forward without
+    any re-resolution.  Returns ``None`` (policy-unknown) when the provenance
+    carries no policy metadata (pre-Phase-4 v1 entry) or its metadata is not
+    self-consistent enough to form a valid :class:`ProductPolicy`.  Never
+    invents a follow/stable default for a legacy entry.
+    """
+    if provenance.policy == "pin":
+        if provenance.pin_sha:
+            try:
+                return ProductPolicy(
+                    product_id=provenance.product_id,
+                    policy="pin",
+                    pin_sha=provenance.pin_sha,
+                )
+            except ValueError:
+                return None
+        return None
+    if provenance.policy == "follow":
+        if provenance.channel:
+            try:
+                return ProductPolicy(
+                    product_id=provenance.product_id,
+                    policy="follow",
+                    channel=provenance.channel,
+                )
+            except ValueError:
+                return None
+        return None
+    return None
 
 
 # ---------------------------------------------------------------------------

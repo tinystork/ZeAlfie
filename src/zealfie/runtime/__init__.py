@@ -11,6 +11,13 @@ M0-8B adds the transactional offline deployment engine.
 from __future__ import annotations
 
 from .deployment import apply_deployment_plan
+from .installed_lock import (
+    INSTALLED_LOCK_SCHEMA_VERSION,
+    InstalledDependency,
+    InstalledLockStore,
+    InstalledRuntimeLock,
+    installed_lock_from_runtime_lock,
+)
 from .layout import RuntimeLayout, default_runtime_layout, default_runtime_root, validate_slot_id
 from .manager import SharedRuntime, SharedRuntimeError
 from .model import (
@@ -56,6 +63,10 @@ __all__ = [
     "DesiredRuntimeState",
     "InstallOutcome",
     "InstallResult",
+    "INSTALLED_LOCK_SCHEMA_VERSION",
+    "InstalledDependency",
+    "InstalledLockStore",
+    "InstalledRuntimeLock",
     "PlanningError",
     "PROVENANCE_SCHEMA_VERSION",
     "ProductProvenance",
@@ -76,6 +87,7 @@ __all__ = [
     "default_runtime_root",
     "generate_slot_id",
     "load_active_state",
+    "installed_lock_from_runtime_lock",
     "probe_runtime_distribution",
     "probe_runtime_python_version",
     "save_active_state",

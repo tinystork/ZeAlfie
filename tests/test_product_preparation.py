@@ -1999,7 +1999,18 @@ def test_d4e2_prepared_install_receives_exact_ppa_from_preparation(
     artifacts_list = received_artifacts[0]
     assert isinstance(artifacts_list, list)
     assert len(artifacts_list) == 1
-    assert artifacts_list[0] is fake_ppa
+    received = artifacts_list[0]
+    # Pass-through of the prepared identity fields is preserved exactly.
+    assert received.product_id == fake_ppa.product_id
+    assert received.component_id == fake_ppa.component_id
+    assert received.resolved_source == fake_ppa.resolved_source
+    assert received.wheel_path == fake_ppa.wheel_path
+    assert received.verified_artifact == fake_ppa.verified_artifact
+    # M1-2F Phase 4: the target artifact is enriched with its exact policy
+    # (the unconfigured factory default here: follow/stable).
+    assert received.policy is not None
+    assert received.policy.policy == "follow"
+    assert received.policy.channel == "stable"
 
 
 # =========================================================================

@@ -9,6 +9,9 @@ provenance of the **currently active runtime**:
 * ``requested_ref`` (the mutable branch/tag requested at install time)
 * ``commit_sha`` (the resolved, immutable commit that was built)
 * ``wheel_sha256`` (SHA-256 of the verified product wheel)
+* ``channel`` (discovery channel ``stable|beta|development``, if known)
+* ``policy`` (``follow|pin``, if known)
+* ``pin_sha`` (the pinned immutable SHA, only for ``policy == "pin"``)
 
 Provenance describes *runtime state*, not *user desire*.  It is therefore
 kept strictly separate from the ``SelectionStore`` (``desired-products.toml``)
@@ -29,11 +32,22 @@ Storage layout (``RuntimeLayout.state_dir / product-provenance.json``)::
             "source_repo": "...",
             "requested_ref": "...",
             "commit_sha": "...",
-            "wheel_sha256": "..."
+            "wheel_sha256": "...",
+            "channel": "...",      // optional (follow only)
+            "policy": "follow",    // optional
+            "pin_sha": "..."       // optional (pin only)
           }
         }
       }
     }
+
+Schema evolution (M1-2F Phase 4): the discovery-policy fields
+``channel`` / ``policy`` / ``pin_sha`` are **optional** and were added to
+the existing ``schema_version: 1`` file without bumping the version.  A
+pre-Phase-4 v1 entry simply lacks these keys and loads with ``None``
+policy metadata (policy-unknown), still fully usable for KEEP exact-SHA
+reconstruction.  New writes emit the fields only when known; they are
+never fabricated for legacy entries.
 
 This module is pure Python and Qt-free.  It never downloads, builds,
 installs, or mutates the runtime.
@@ -75,6 +89,9 @@ class ProductProvenance:
     requested_ref: str
     commit_sha: str
     wheel_sha256: str
+    channel: str | None = None
+    policy: str | None = None
+    pin_sha: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -107,6 +124,44 @@ class ProductProvenance:
             )
         object.__setattr__(self, "wheel_sha256", wheel_sha)
 
+        # -- Optional discovery-policy metadata (M1-2F Phase 4) ------------
+        # ``None`` means "policy unknown" (e.g. a pre-Phase-4 v1 entry).
+        # It is never silently upgraded to a follow/stable default.
+        policy = str(self.policy or "").strip() or None
+        if policy is not None and policy not in ("follow", "pin"):
+            raise ValueError(
+                f"product provenance policy must be 'follow' or 'pin' when "
+                f"present, got {self.policy!r}"
+            )
+        object.__setattr__(self, "policy", policy)
+
+        pin_sha = self.pin_sha
+        if pin_sha is not None:
+            pin_sha = str(pin_sha).strip().lower()
+        if policy == "pin":
+            if not pin_sha or not _SHA1_RE.match(pin_sha):
+                raise ValueError(
+                    "product provenance pin_sha must be a 40-hex string "
+                    "when policy is 'pin'"
+                )
+            object.__setattr__(self, "pin_sha", pin_sha)
+        else:
+            if pin_sha:
+                raise ValueError(
+                    "product provenance pin_sha must not be present when "
+                    "policy is not 'pin'"
+                )
+            object.__setattr__(self, "pin_sha", None)
+
+        channel = self.channel
+        if channel is not None:
+            channel = str(channel).strip() or None
+        if policy == "follow" and channel is None:
+            raise ValueError(
+                "product provenance channel is required when policy is 'follow'"
+            )
+        object.__setattr__(self, "channel", channel)
+
 
 # ---------------------------------------------------------------------------
 # Serialisation helpers
@@ -115,7 +170,7 @@ class ProductProvenance:
 
 def _entry_to_dict(entry: ProductProvenance) -> dict[str, str]:
     """Render a provenance entry as its JSON object (product_id is the key)."""
-    return {
+    payload: dict[str, str] = {
         "version": entry.version,
         "source_owner": entry.source_owner,
         "source_repo": entry.source_repo,
@@ -123,6 +178,13 @@ def _entry_to_dict(entry: ProductProvenance) -> dict[str, str]:
         "commit_sha": entry.commit_sha,
         "wheel_sha256": entry.wheel_sha256,
     }
+    if entry.channel is not None:
+        payload["channel"] = entry.channel
+    if entry.policy is not None:
+        payload["policy"] = entry.policy
+    if entry.pin_sha is not None:
+        payload["pin_sha"] = entry.pin_sha
+    return payload
 
 
 def _entry_from_dict(product_id: str, payload: object) -> ProductProvenance | None:

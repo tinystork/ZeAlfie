@@ -600,3 +600,123 @@ def test_provenance_write_failure_does_not_rollback_or_raise(
     # Readback stays safe (unknown), never invented.
     assert service.product_provenance("zewitness") is None
     assert service.active_provenance() == {}
+
+
+# ---------------------------------------------------------------------------
+# M1-2F Phase 4 — discovery-policy provenance metadata (backward-compatible)
+# ---------------------------------------------------------------------------
+
+
+def test_old_v1_provenance_loads_policy_unknown(tmp_path: Path) -> None:
+    """A pre-Phase-4 v1 entry (no channel/policy/pin_sha) loads with None
+    policy metadata and remains fully usable for KEEP exact SHA."""
+    store = _fake_store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "slots": {
+                "rt-old": {
+                    "zewitness": {
+                        "version": "0.0.1",
+                        "source_owner": "tinystork",
+                        "source_repo": "ZeWitness",
+                        "requested_ref": "main",
+                        "commit_sha": VALID_SHA,
+                        "wheel_sha256": WHEEL_SHA,
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    loaded = store.load_slot("rt-old")
+    prov = loaded["zewitness"]
+    assert prov.commit_sha == VALID_SHA  # exact SHA preserved for KEEP
+    assert prov.channel is None
+    assert prov.policy is None
+    assert prov.pin_sha is None
+
+
+def test_follow_provenance_roundtrip_with_channel(tmp_path: Path) -> None:
+    store = _fake_store(tmp_path)
+    store.record("rt-1", [
+        _make_provenance(channel="beta", policy="follow"),
+    ])
+    loaded = store.load_slot("rt-1")["zewitness"]
+    assert loaded.channel == "beta"
+    assert loaded.policy == "follow"
+    assert loaded.pin_sha is None
+    assert loaded.requested_ref == "main"
+    assert loaded.commit_sha == VALID_SHA
+
+    # Serialized form omits pin_sha and records channel/policy distinctly.
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    entry = raw["slots"]["rt-1"]["zewitness"]
+    assert entry["channel"] == "beta"
+    assert entry["policy"] == "follow"
+    assert "pin_sha" not in entry
+
+
+def test_pin_provenance_roundtrip_with_pin_sha(tmp_path: Path) -> None:
+    store = _fake_store(tmp_path)
+    store.record("rt-1", [
+        _make_provenance(policy="pin", pin_sha=VALID_SHA),
+    ])
+    loaded = store.load_slot("rt-1")["zewitness"]
+    assert loaded.policy == "pin"
+    assert loaded.pin_sha == VALID_SHA
+    assert loaded.channel is None
+
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    entry = raw["slots"]["rt-1"]["zewitness"]
+    assert entry["policy"] == "pin"
+    assert entry["pin_sha"] == VALID_SHA
+    assert "channel" not in entry
+
+
+def test_pin_provenance_requires_pin_sha() -> None:
+    with pytest.raises(ValueError, match="pin_sha"):
+        _make_provenance(policy="pin")  # missing pin_sha
+    with pytest.raises(ValueError, match="pin_sha"):
+        _make_provenance(policy="pin", pin_sha="not-hex")
+
+
+def test_follow_provenance_requires_channel() -> None:
+    with pytest.raises(ValueError, match="channel"):
+        _make_provenance(policy="follow")  # missing channel
+
+
+def test_unknown_policy_value_is_rejected() -> None:
+    with pytest.raises(ValueError, match="policy"):
+        _make_provenance(policy="floating")
+
+
+def test_corrupt_policy_entry_reads_unknown_safe(tmp_path: Path) -> None:
+    """A provenance entry with an inconsistent policy (pin without a valid
+    pin_sha) is skipped entirely — readback is UNKNOWN, never a fabricated
+    SHA or policy."""
+    store = _fake_store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "slots": {
+                "rt-bad": {
+                    "zewitness": {
+                        "version": "0.0.1",
+                        "source_owner": "tinystork",
+                        "source_repo": "ZeWitness",
+                        "requested_ref": "main",
+                        "commit_sha": VALID_SHA,
+                        "wheel_sha256": WHEEL_SHA,
+                        "policy": "pin",
+                        "pin_sha": "not-hex",
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    assert store.load_slot("rt-bad") == {}
+    assert store.product_provenance("zewitness") is None

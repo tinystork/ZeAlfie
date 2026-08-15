@@ -46,6 +46,13 @@ from zealfie.runtime.provenance import (
     ProductProvenance,
     ProductProvenanceStore,
 )
+# M1-2F Phase 4 corrective: Installed-runtime lock read model re-exported
+# from the runtime layer for consistency with the provenance re-export.
+from zealfie.runtime.installed_lock import (
+    InstalledDependency,
+    InstalledLockStore,
+    InstalledRuntimeLock,
+)
 
 # M1-2A: Product-shell API re-exported from the application layer so that
 # CLI and future GUI consumers import from the application layer, not from
@@ -111,6 +118,9 @@ __all__ = [
     "FULL_NAME",
     "InstallPhase",
     "InstallProgress",
+    "InstalledDependency",
+    "InstalledLockStore",
+    "InstalledRuntimeLock",
     "InvalidRemoteSourceError",
     "LaunchContractNotSatisfiedError",
     "LaunchPreparationError",
