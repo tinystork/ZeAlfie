@@ -1,0 +1,44 @@
+# ZA-M1-2J Phase D: real accelerated artifact manifest (human-gated, curated).
+#
+# One [[artifacts]] table per accelerated wheel that ZeAlfie may acquire.
+# Every fact below was verified against PyPI on 2026-08-15 (JSON API +
+# downloaded wheel bytes + wheel METADATA); see
+# AGENT/reports/m1_2j_phase_cde_implementation_20260815.md for the
+# verification log and the cited upstream sources.
+#
+# Rules (fail-closed, enforced by zealfie.acceleration.acquisition):
+#   * sha256 is MANDATORY (64 hex chars) — an entry without it is rejected;
+#   * url must be file:// or http(s)://;
+#   * (distribution, backend, platform, python) must be unique per entry,
+#     and filenames must be unique;
+#   * refresh procedure: re-verify the new wheel bytes against PyPI (JSON
+#     API https://pypi.org/pypi/<dist>/<version>/json), update version/
+#     filename/url/size/sha256/requires_python, and keep the contract in
+#     products.toml (>=13.4.0,<14 / >=0.5,<1) and the anti-drift snapshot
+#     tests/fixtures/zemosaic_gpu_extra_snapshot.toml in sync.
+
+schema_version = 1
+
+[[artifacts]]
+distribution = "cupy-cuda12x"
+version = "13.6.0"
+backend = "NVIDIA_CUDA"
+platform = "linux_x86_64"
+python = "cp313"
+requires_python = ">=3.9"
+filename = "cupy_cuda12x-13.6.0-cp313-cp313-manylinux2014_x86_64.whl"
+url = "https://files.pythonhosted.org/packages/f8/b8/30127bcdac53a25f94ee201bf4802fcd8d012145567d77c54174d6d01c01/cupy_cuda12x-13.6.0-cp313-cp313-manylinux2014_x86_64.whl"
+size = 112654824
+sha256 = "52d9e7f83d920da7d81ec2e791c2c2c747fdaa1d7b811971b34865ce6371e98a"
+
+[[artifacts]]
+distribution = "fastrlock"
+version = "0.8.3"
+backend = "NVIDIA_CUDA"
+platform = "linux_x86_64"
+python = "cp313"
+requires_python = ""
+filename = "fastrlock-0.8.3-cp313-cp313-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_28_x86_64.whl"
+url = "https://files.pythonhosted.org/packages/f9/4e/94480fb3fd93991dd6f4e658b77698edc343f57caa2870d77b38c89c2e3b/fastrlock-0.8.3-cp313-cp313-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_28_x86_64.whl"
+size = 52535
+sha256 = "dbdea6deeccea1917c6017d353987231c4e46c93d5338ca3e66d6cd88fbce259"

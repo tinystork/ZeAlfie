@@ -38,6 +38,7 @@ from .app import (
     format_status,
     startup_message,
 )
+from .acceleration import AcceleratedPlanStatus
 from .app.install_defaults import default_install_work_root
 from .components import UnknownComponentError, default_registry
 from .launching import LaunchError, LaunchResult
@@ -534,6 +535,74 @@ def _handle_install(args, *, stdout: TextIO) -> int:
 
 
 # ---------------------------------------------------------------------------
+# ZA-M1-2J Phase D: gpu-install handler (transactional, real artifact source)
+# ---------------------------------------------------------------------------
+
+
+def _handle_gpu_install(*, stdout: TextIO) -> int:
+    """Handle ``zealfie system gpu-install``.
+
+    Builds the read-only accelerated plan first; a non-``PLAN_READY``
+    plan is reported honestly with a non-zero exit and performs NO
+    acquisition and NO runtime work.  A ``PLAN_READY`` plan is handed
+    to :meth:`~zealfie.app.service.ZeAlfieService.install_accelerated_runtime`
+    with the service default acquirer (the packaged artifact manifest)
+    and a simple progress line per phase on stdout.  The final result
+    is always reported honestly (success or the phase where the
+    deployment stopped).
+    """
+    service = _make_service()
+    try:
+        plan = service.build_accelerated_deployment_plan()
+    except Exception as exc:
+        print(f"gpu install failed: {exc}", file=sys.stderr)
+        return 4
+
+    if plan.status is not AcceleratedPlanStatus.PLAN_READY:
+        detail = plan.blocked_reason or "no accelerated deployment planned"
+        print(
+            "accelerated GPU deployment is not available: plan status "
+            f"{plan.status.value}: {detail}",
+            file=sys.stderr,
+        )
+        return 4
+
+    def _progress(progress) -> None:
+        percent = getattr(progress, "percent", None)
+        message = getattr(progress, "message", "")
+        label = f"{percent}%" if isinstance(percent, int) else "..."
+        print(f"  [{label}] {message}", file=stdout)
+
+    try:
+        result = service.install_accelerated_runtime(
+            plan=plan,
+            progress_callback=_progress,
+        )
+    except Exception as exc:
+        print(f"gpu install failed: {exc}", file=sys.stderr)
+        return 4
+
+    print(_format_accelerated_deployment_result(result), file=stdout)
+    return 0 if result.success else 3
+
+
+def _format_accelerated_deployment_result(result) -> str:
+    """Format an AcceleratedDeploymentResult for CLI output."""
+    lines = ["Accelerated deployment result:"]
+    if result.success:
+        lines.append(" Success: yes")
+        if result.active_slot_id:
+            lines.append(f" Active slot: {result.active_slot_id}")
+        if result.previous_slot_id:
+            lines.append(f" Previous slot: {result.previous_slot_id}")
+    else:
+        lines.append(" Success: no")
+        if result.reason:
+            lines.append(f" Reason: {result.reason}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # M1-2G: system capabilities handler (read-only)
 # ---------------------------------------------------------------------------
 
@@ -561,19 +630,7 @@ def _handle_system(args, *, stdout: TextIO) -> int:
         return 0
 
     if args.system_command == "gpu-install":
-        # M1-2I: fail-closed stub.  No real accelerated artifact source is
-        # configured yet, and a real GPU deployment is human-gated.  This
-        # command performs NO acquisition, NO planning, NO service
-        # construction, and NO runtime mutation — it only reports the
-        # honest gate and exits non-zero.
-        print(
-            "accelerated GPU deployment is not available: no accelerated "
-            "artifact source is configured. A real GPU deployment "
-            "requires explicit authorization and a configured artifact "
-            "source.",
-            file=sys.stderr,
-        )
-        return 4
+        return _handle_gpu_install(stdout=stdout)
 
     # No system subcommand given → show help.
     return 0

@@ -4,8 +4,10 @@ Turns the read-only :class:`~zealfie.acceleration.planning.AcceleratedDeployment
 produced by M1-2H into a real new shared runtime, transactionally:
 
 * **Acquire** concrete accelerated artifact wheels (fail-closed: the
-  production default acquirer refuses until a real, human-gated
-  artifact source is configured);
+  production default acquirer is the manifest-backed acquirer from
+  :mod:`zealfie.acceleration.acquisition`; the unconditional
+  fail-closed acquirer below remains available for callers with no
+  source configured at all);
 * **Resolve** the FULL closure by extending the base product
   ``RuntimeLock`` — every base entry is preserved verbatim (same
   ``LockedDependency`` objects, same insertion order) and the
@@ -186,10 +188,13 @@ class AcceleratedArtifactAcquirer(Protocol):
 
 
 class _UnavailableAcquirer:
-    """Fail-closed acquirer: no real artifact source is configured yet.
+    """Unconditional fail-closed acquirer (no artifact source at all).
 
-    Both callable and ``acquire``-method styles are supported; the
-    protocol contract is the ``acquire`` method.
+    The production default is the manifest-backed acquirer
+    (:mod:`zealfie.acceleration.acquisition`); this acquirer remains
+    for callers that must refuse unconditionally.  Both callable and
+    ``acquire``-method styles are supported; the protocol contract is
+    the ``acquire`` method.
     """
 
     def acquire(
@@ -214,10 +219,12 @@ class _UnavailableAcquirer:
 
 
 def default_accelerated_artifact_acquirer() -> AcceleratedArtifactAcquirer:
-    """Return the fail-closed default acquirer.
+    """Return the unconditional fail-closed acquirer.
 
-    No real accelerated artifact source is configured yet (real sources
-    arrive with the human-gated real witness), so the returned acquirer
+    This is NOT the production default any more (ZA-M1-2J Phase D): the
+    service wires the manifest-backed acquirer from
+    :mod:`zealfie.acceleration.acquisition`.  The acquirer returned
+    here remains for callers with no configured artifact source: it
     ALWAYS raises :class:`AcceleratedAcquisitionUnavailable`.
     """
     return _UnavailableAcquirer()

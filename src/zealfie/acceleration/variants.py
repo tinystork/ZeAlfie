@@ -175,9 +175,11 @@ class AcceleratedVariantCatalog:
 
 
 def default_variant_catalog() -> AcceleratedVariantCatalog:
-    """Return the empty variant catalog (fail-closed default).
+    """Return the empty variant catalog (pure fail-closed default).
 
-    Real deployments stay blocked until M1-2I supplies an explicit
-    artifact acquisition layer that populates a real catalog.
+    Kept empty for hermetic unit tests.  The production default is the
+    manifest-derived catalog
+    :func:`~zealfie.acceleration.acquisition.default_manifest_variant_catalog`
+    (ZA-M1-2J Phase D).
     """
     return AcceleratedVariantCatalog(variants=())

@@ -32,9 +32,14 @@ M1-2I: transactional accelerated deployment
        (``install_accelerated_runtime``) — acquire -> resolve ->
        build -> validate -> gate -> persist -> activate through the
        M1-2I engine, extending the current full desired runtime
-       (KEEP semantics).  Fail-closed default acquirer; no provenance
-       or selection writes (products unchanged); the engine's
-       observational metadata record is the only new persistent state.
+       (KEEP semantics).  No provenance or selection writes (products
+       unchanged); the engine's observational metadata record is the
+       only new persistent state.
+M1-2J Phase D: real artifact source — the service defaults
+       (``build_accelerated_deployment_plan`` variant catalog and
+       ``install_accelerated_runtime`` acquirer) are wired to the
+       packaged accelerated artifact manifest; explicit injection
+       always wins.
 """
 
 from __future__ import annotations
@@ -63,9 +68,9 @@ from zealfie.acceleration import (
     PlannedKeepProduct,
     apply_accelerated_deployment,
     build_accelerated_deployment_plan,
-    default_accelerated_artifact_acquirer,
     default_accelerated_gate,
-    default_variant_catalog,
+    default_manifest_artifact_acquirer,
+    default_manifest_variant_catalog,
 )
 from zealfie.acceleration.compatibility import (
     evaluate_acceleration_compatibility,
@@ -647,11 +652,14 @@ class ZeAlfieService:
         documenting which read-only store supplied it.
 
         *variant_catalog* defaults to
+        :func:`~zealfie.acceleration.acquisition.default_manifest_variant_catalog`
+        — the real variant catalog derived from the packaged artifact
+        manifest (ZA-M1-2J Phase D).  Explicit injection always wins;
+        the pure empty
         :func:`~zealfie.acceleration.variants.default_variant_catalog`
-        (empty, fail-closed): until a real variant catalog is
-        available, any declared accelerated requirement blocks the
-        plan honestly.  The platform tag comes from the service host
-        target (default: :meth:`~zealfie.releases.model.HostTarget.from_current_host`).
+        remains available for unit tests.  The platform tag comes from
+        the service host target (default:
+        :meth:`~zealfie.releases.model.HostTarget.from_current_host`).
 
         Returns
         -------
@@ -668,7 +676,7 @@ class ZeAlfieService:
         runtime_status = self._runtime.status()
         keep_products = self._keep_products_for_acceleration_plan()
         if variant_catalog is None:
-            variant_catalog = default_variant_catalog()
+            variant_catalog = default_manifest_variant_catalog()
         return build_accelerated_deployment_plan(
             catalog=self._catalog,
             capabilities=capabilities,
@@ -800,12 +808,14 @@ class ZeAlfieService:
            requires *fetcher*).  The base plan must carry a
            ``dependency_lock`` to extend; when no lock can be produced
            the deployment fails before any candidate slot creation.
-        4. ACQUIRE uses *acquirer* or the fail-closed
+        4. ACQUIRE uses *acquirer* or the manifest-backed default
+           :func:`~zealfie.acceleration.acquisition.default_manifest_artifact_acquirer`
+           (real, human-gated artifact source from the packaged
+           accelerated artifact manifest; downloads are sha256-verified,
+           fail-closed) and honours cooperative cancellation.  The
+           explicit fail-closed
            :func:`~zealfie.acceleration.deployment.default_accelerated_artifact_acquirer`
-           (which always raises
-           :class:`~zealfie.acceleration.deployment.AcceleratedAcquisitionUnavailable`
-           until a real, human-gated artifact source is configured) and
-           honours cooperative cancellation.
+           remains available for callers that must refuse unconditionally.
         5. :func:`~zealfie.acceleration.deployment.apply_accelerated_deployment`
            runs the engine with the default gate / metadata store when
            not provided, deriving ``declaring_distributions`` from the
@@ -832,8 +842,8 @@ class ZeAlfieService:
             omitted, each consumer that needs them collects/derives its
             own observation exactly once.
         acquirer:
-            Accelerated artifact source.  Defaults to the fail-closed
-            default acquirer (no real source configured yet).
+            Accelerated artifact source.  Defaults to the manifest-backed
+            acquirer (real source, sha256-verified, fail-closed).
         gate:
             Pre-activation compatibility gate.  Defaults to the
             stdlib-only distribution/version probe gate.
@@ -1053,7 +1063,7 @@ class ZeAlfieService:
             effective_acquirer = (
                 acquirer
                 if acquirer is not None
-                else default_accelerated_artifact_acquirer()
+                else default_manifest_artifact_acquirer()
             )
             if cancel_check is not None:
                 try:
