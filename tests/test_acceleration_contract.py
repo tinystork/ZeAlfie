@@ -372,11 +372,17 @@ def test_absent_acceleration_is_none():
     assert catalog.get("zebench").acceleration is None
 
 
-def test_real_catalog_products_declare_no_acceleration():
-    """The packaged catalog declares no acceleration tables (M1-2H
-    leaves products.toml untouched; the section is purely additive)."""
+def test_real_catalog_acceleration_contracts():
+    """The packaged catalog declares exactly one acceleration table:
+    zemosaic (ZA-M1-2J Phase C); every other product stays None."""
     catalog = default_catalog()
+    declared = [
+        desc.product_id for desc in catalog.list() if desc.acceleration is not None
+    ]
+    assert declared == ["zemosaic"]
     for desc in catalog.list():
+        if desc.product_id == "zemosaic":
+            continue
         assert desc.acceleration is None, desc.product_id
 
 

@@ -180,12 +180,13 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 # ---------------------------------------------------------------------------
 
 
-def test_default_catalog_no_accelerated_requirements_plan_read_only(
+def test_default_catalog_blocked_plan_read_only(
     tmp_path,
 ):
-    """Default catalog (no acceleration declared) -> honest
-    NO_ACCELERATED_REQUIREMENTS plan; the runtime (status + files,
-    including active.json bytes) is unchanged after planning."""
+    """Default catalog (zemosaic declares acceleration; the synthetic
+    recommender says NOT_APPLICABLE) -> honest BLOCKED plan naming
+    zemosaic; the runtime (status + files, including active.json bytes)
+    is unchanged after planning."""
     layout = RuntimeLayout(root=tmp_path / "rt")
     save_active_state(layout.active_pointer, "rt-abc123", None)
     runtime = _FakeRt(
@@ -222,18 +223,15 @@ def test_default_catalog_no_accelerated_requirements_plan_read_only(
     status_after = runtime.status()
     snapshot_after = _snapshot(tmp_path)
 
-    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
     assert plan.blocked is True
     assert plan.backend is None
-    assert plan.products_concerned == ()
+    assert plan.products_concerned == ("zemosaic",)
     assert plan.added_requirements == ()
     assert plan.keep_products == ()
     assert plan.target_runtime == "no new runtime required"
-    assert "no product declares accelerated requirements" in (
+    assert "no supported accelerator hardware detected" in (
         plan.blocked_reason or ""
-    )
-    assert any(
-        "preserved" in line.lower() for line in plan.closure_impact
     )
 
     # 100% read-only: identical status and identical file bytes,
@@ -256,7 +254,8 @@ def test_planning_never_writes_files_with_absent_runtime(tmp_path):
         ),
     )
     plan = service.build_accelerated_deployment_plan()
-    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.products_concerned == ("zemosaic",)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -342,8 +341,9 @@ def test_plan_uses_default_collection_once_when_not_injected():
 
 
 def test_missing_variant_blocks_plan_honestly():
-    """Default (empty) variant catalog -> BLOCKED, fail-closed, no
-    partial fallback — the plan is still a successful preview."""
+    """A synthetic accelerated distribution absent from the default
+    manifest variant catalog -> BLOCKED, fail-closed, no partial
+    fallback — the plan is still a successful preview."""
     service = ZeAlfieService(
         catalog=ProductCatalog((_descriptor_with_acceleration(),)),
         runtime=_absent_runtime(Path("/fake")),

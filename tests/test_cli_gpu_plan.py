@@ -175,14 +175,15 @@ class _FakePlanService:
 
 
 # ===========================================================================
-# Default catalog: honest no-requirements output, nothing written
+# Default catalog: honest blocked output (zemosaic contract, no GPU), nothing
+# written
 # ===========================================================================
 
 
-def test_gpu_plan_default_catalog_honest_no_requirements(monkeypatch, tmp_path):
-    """With the real default catalog (no acceleration declared), the
-    command prints the honest no-requirements summary and creates no
-    files."""
+def test_gpu_plan_default_catalog_honest_blocked(monkeypatch, tmp_path):
+    """With the real default catalog (zemosaic declares acceleration)
+    and a NOT_APPLICABLE synthetic recommender, the command prints the
+    honest BLOCKED preview naming zemosaic and creates no files."""
     service = ZeAlfieService(
         catalog=default_catalog(),
         runtime=_AbsentRt(),
@@ -196,9 +197,9 @@ def test_gpu_plan_default_catalog_honest_no_requirements(monkeypatch, tmp_path):
     assert code == 0
     output = stdout.getvalue()
     assert "Accelerated GPU deployment plan:" in output
-    assert "NO_ACCELERATED_REQUIREMENTS" in output
-    assert "no product declares accelerated requirements" in output.lower()
-    assert "preserved" in output.lower()
+    assert "Status: BLOCKED" in output
+    assert "Products concerned: zemosaic" in output
+    assert "no supported accelerator hardware detected" in output
     assert "No changes have been applied" in output
     after = sorted(p.name for p in tmp_path.iterdir())
     assert before == after

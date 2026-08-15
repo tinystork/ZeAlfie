@@ -523,8 +523,10 @@ def test_service_blocked_plan_no_side_effects(tmp_path):
 
 
 def test_service_default_acquirer_fail_closed(tmp_path, witness_v1):
-    """The production default acquirer refuses (no real artifact source
-    configured) -> phase ACQUIRE, no candidate slot, runtime untouched."""
+    """The production default acquirer is the manifest-backed acquirer
+    (real source, M1-2J Phase D): the synthetic fake-accel distribution
+    has no manifest entry -> fail-closed MissingArtifact at ACQUIRE, no
+    candidate slot, runtime untouched."""
     layout = RuntimeLayout(root=tmp_path / "rt")
     runtime = SharedRuntime(layout=layout)
     service = ZeAlfieService(
@@ -546,7 +548,7 @@ def test_service_default_acquirer_fail_closed(tmp_path, witness_v1):
         plan=plan,
         capabilities=_caps(),
         recommendation=_recommendation(),
-        acquirer=None,  # -> fail-closed default
+        acquirer=None,  # -> manifest-backed service default
         full_state_provider=lambda: [_witness_ppa(witness_v1)],
         dependency_wheelhouse=_empty_wheelhouse(tmp_path),
         work_root=tmp_path / "work",
@@ -556,7 +558,11 @@ def test_service_default_acquirer_fail_closed(tmp_path, witness_v1):
     assert result.cancelled is False
     assert result.phase is AcceleratedDeploymentPhase.ACQUIRE
     assert result.old_runtime_preserved is True
-    assert "no accelerated artifact source configured" in (result.reason or "")
+    # The manifest-backed default refuses the unknown synthetic
+    # distribution fail-closed (MissingArtifact) — no network, no slot.
+    assert "no accelerated artifact for distribution 'fake-accel'" in (
+        result.reason or ""
+    )
     assert not layout.slots.exists()
     assert runtime.status().state.value == "ABSENT"
 
@@ -764,7 +770,8 @@ def test_service_deploy_time_check_probe_counting(tmp_path, witness_v1):
     plan = _accel_plan(None, keep=(keep,))
 
     # (1) Both provided -> no collection at all; the deploy-time check
-    # passes and the flow reaches ACQUIRE (fail-closed default acquirer).
+    # passes and the flow reaches ACQUIRE (manifest-backed default
+    # acquirer refuses the unknown synthetic distribution).
     result = service.install_accelerated_runtime(
         plan=plan,
         capabilities=_caps(),
@@ -777,7 +784,9 @@ def test_service_deploy_time_check_probe_counting(tmp_path, witness_v1):
     assert collector.calls == 0
     assert result.success is False
     assert result.phase is AcceleratedDeploymentPhase.ACQUIRE
-    assert "no accelerated artifact source configured" in (result.reason or "")
+    assert "no accelerated artifact for distribution 'fake-accel'" in (
+        result.reason or ""
+    )
 
     # (2) Both omitted -> exactly one collection at the deploy-time
     # check, then the same ACQUIRE outcome.
@@ -791,7 +800,9 @@ def test_service_deploy_time_check_probe_counting(tmp_path, witness_v1):
     assert collector.calls == 1
     assert result.success is False
     assert result.phase is AcceleratedDeploymentPhase.ACQUIRE
-    assert "no accelerated artifact source configured" in (result.reason or "")
+    assert "no accelerated artifact for distribution 'fake-accel'" in (
+        result.reason or ""
+    )
 
 
 @pytest.mark.parametrize(

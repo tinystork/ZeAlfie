@@ -1,8 +1,9 @@
 """CLI tests for ``zealfie system capabilities`` (M1-2G) and the
-``zealfie system gpu-install`` fail-closed stub (M1-2I).
+real ``zealfie system gpu-install`` handler (ZA-M1-2J Phase D).
 
-Read-only diagnostic command; the fake service is injected via
-``_make_service`` so no real host probing occurs.
+Diagnostic and install commands; the fake service is injected via
+``_make_service`` so no real host probing, acquisition, or runtime
+mutation occurs.
 """
 
 from __future__ import annotations
@@ -11,7 +12,17 @@ from io import StringIO
 
 import pytest
 
+from types import SimpleNamespace
+
 import zealfie.cli as cli
+from zealfie.acceleration import (
+    AcceleratedDeploymentPhase,
+    AcceleratedDeploymentPlan,
+    AcceleratedDeploymentResult,
+    AcceleratedPlanStatus,
+    HardwareCompatibility,
+    HardwareCompatibilityStatus,
+)
 from zealfie.host.models import (
     CapabilityStatus,
     GpuKind,
@@ -162,49 +173,173 @@ def test_system_gpu_install_in_parser():
     assert args.system_command == "gpu-install"
 
 
-def test_system_gpu_install_fail_closed_stub(monkeypatch):
-    """`zealfie system gpu-install` is a fail-closed stub: honest
-    human-gate message, non-zero exit, and NO service construction (so
-    no acquisition, no planning, no runtime mutation)."""
-    made: list[bool] = []
-
-    def _spy_make_service():
-        made.append(True)
-        raise AssertionError("gpu-install must not construct a service")
-
-    monkeypatch.setattr(cli, "_make_service", _spy_make_service)
-    code = cli.run(["system", "gpu-install"])
-    assert code != 0
-    assert made == []
-
-
-def test_system_gpu_install_message_is_honest(monkeypatch, capsys):
-    """The stub's message states the human gate honestly: no artifact
-    source configured, explicit authorization required."""
-    monkeypatch.setattr(
-        cli, "_make_service",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("gpu-install must not construct a service")
+def _blocked_plan() -> AcceleratedDeploymentPlan:
+    return AcceleratedDeploymentPlan(
+        status=AcceleratedPlanStatus.BLOCKED,
+        hardware=HardwareCompatibility(
+            status=HardwareCompatibilityStatus.BLOCKED,
+            reason_code="ACCELERATION_BLOCKED",
+            reason="nvidia driver too old",
+            products_concerned=("zebench",),
         ),
+        backend=None,
+        products_concerned=("zebench",),
+        keep_products=(),
+        added_requirements=(),
+        source_runtime_state="READY",
+        source_active_slot_id=None,
+        source_previous_slot_id=None,
+        target_runtime="no new runtime required",
+        blocked=True,
+        blocked_reason="nvidia driver too old",
+        closure_impact=(),
     )
+
+
+def _ready_plan() -> AcceleratedDeploymentPlan:
+    return AcceleratedDeploymentPlan(
+        status=AcceleratedPlanStatus.PLAN_READY,
+        hardware=HardwareCompatibility(
+            status=HardwareCompatibilityStatus.SUPPORTED,
+            reason_code="COMPATIBLE",
+            reason="compatible",
+            products_concerned=("zebench",),
+        ),
+        backend="NVIDIA_CUDA",
+        products_concerned=("zebench",),
+        keep_products=(),
+        added_requirements=(),
+        source_runtime_state="READY",
+        source_active_slot_id="rt-old",
+        source_previous_slot_id=None,
+        target_runtime="new shared runtime slot with accelerated "
+        "NVIDIA_CUDA closure",
+        blocked=False,
+        blocked_reason=None,
+        closure_impact=(),
+    )
+
+
+class _FakeGpuInstallService:
+    """Fake service for the real gpu-install handler."""
+
+    def __init__(self, plan=None, plan_raises=None, result=None,
+                 install_raises=None) -> None:
+        self._plan = plan
+        self._plan_raises = plan_raises
+        self._result = result
+        self._install_raises = install_raises
+        self.plan_calls = 0
+        self.install_kwargs: list[dict] = []
+
+    def build_accelerated_deployment_plan(self, **kwargs):
+        self.plan_calls += 1
+        if self._plan_raises is not None:
+            raise self._plan_raises
+        return self._plan
+
+    def install_accelerated_runtime(self, **kwargs):
+        self.install_kwargs.append(kwargs)
+        if self._install_raises is not None:
+            raise self._install_raises
+        return self._result
+
+
+def _success_result() -> AcceleratedDeploymentResult:
+    return AcceleratedDeploymentResult(
+        success=True,
+        cancelled=False,
+        phase=AcceleratedDeploymentPhase.COMPLETED,
+        active_slot_id="rt-new",
+        previous_slot_id="rt-old",
+    )
+
+
+def test_system_gpu_install_not_plan_ready_honest_nonzero(monkeypatch, capsys):
+    """A non-PLAN_READY plan is reported honestly with a non-zero exit
+    and the installer is never called."""
+    service = _FakeGpuInstallService(plan=_blocked_plan())
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
     code = cli.run(["system", "gpu-install"])
-    captured = capsys.readouterr()
     assert code != 0
-    assert "no accelerated artifact source" in captured.err
-    assert "explicit authorization" in captured.err
+    assert service.plan_calls == 1
+    assert service.install_kwargs == []
+    err = capsys.readouterr().err
+    assert "not available" in err
+    assert "BLOCKED" in err
+    assert "nvidia driver too old" in err
+
+
+def test_system_gpu_install_plan_ready_delegates_with_service_defaults(
+    monkeypatch,
+):
+    """A PLAN_READY plan is delegated to install_accelerated_runtime
+    WITHOUT an explicit acquirer (the service manifest default is
+    used), with progress on stdout and an honest final result."""
+    service = _FakeGpuInstallService(plan=_ready_plan(), result=_success_result())
+
+    def _fake_install(**kwargs):
+        progress = kwargs.get("progress_callback")
+        if progress is not None:
+            progress(SimpleNamespace(
+                percent=45, message="Planning accelerated runtime"
+            ))
+        service.install_kwargs.append(kwargs)
+        return _success_result()
+
+    service.install_accelerated_runtime = _fake_install
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = cli.run(["system", "gpu-install"], stdout=stdout)
+    assert code == 0
+    assert service.plan_calls == 1
+    assert len(service.install_kwargs) == 1
+    kwargs = service.install_kwargs[0]
+    assert kwargs.get("plan") is service._plan
+    assert "acquirer" not in kwargs
+    output = stdout.getvalue()
+    assert "[45%] Planning accelerated runtime" in output
+    assert "Accelerated deployment result:" in output
+    assert "Success: yes" in output
+    assert "Active slot: rt-new" in output
+
+
+def test_system_gpu_install_failed_result_honest_nonzero(monkeypatch):
+    """A failed deployment result is reported honestly with a non-zero
+    exit (success is never fabricated)."""
+    failure = AcceleratedDeploymentResult(
+        success=False,
+        cancelled=False,
+        phase=AcceleratedDeploymentPhase.ACQUIRE,
+        reason="accelerated artifact acquisition failed: synthetic",
+    )
+    service = _FakeGpuInstallService(plan=_ready_plan(), result=failure)
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = cli.run(["system", "gpu-install"], stdout=stdout)
+    assert code != 0
+    output = stdout.getvalue()
+    assert "Success: no" in output
+    assert "accelerated artifact acquisition failed: synthetic" in output
+
+
+def test_system_gpu_install_build_error_nonzero(monkeypatch, capsys):
+    """A plan-builder exception surfaces honestly with a non-zero exit."""
+    service = _FakeGpuInstallService(plan_raises=RuntimeError("probe exploded"))
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    code = cli.run(["system", "gpu-install"])
+    assert code != 0
+    assert service.install_kwargs == []
+    assert "gpu install failed" in capsys.readouterr().err
 
 
 def test_system_gpu_install_never_mutates_runtime(monkeypatch, tmp_path):
-    """Invoking the stub leaves an existing runtime state file
-    byte-identical and creates no files."""
+    """A refused (BLOCKED) gpu-install leaves an existing runtime state
+    file byte-identical and creates no files."""
     import hashlib
 
-    monkeypatch.setattr(
-        cli, "_make_service",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("gpu-install must not construct a service")
-        ),
-    )
+    service = _FakeGpuInstallService(plan=_blocked_plan())
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     state_file = state_dir / "active.json"
@@ -217,6 +352,7 @@ def test_system_gpu_install_never_mutates_runtime(monkeypatch, tmp_path):
 
     code = cli.run(["system", "gpu-install"])
     assert code != 0
+    assert service.install_kwargs == []
 
     after_hash = hashlib.sha256(state_file.read_bytes()).hexdigest()
     after_files = sorted(
