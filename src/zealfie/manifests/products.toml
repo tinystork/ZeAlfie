@@ -33,6 +33,38 @@ ref = "main"
 [products.channels]
 stable = "main"
 
+# ZA-M1-2J Phase C: accelerated contract declared by ZeMosaic itself.
+#
+# ZeMosaic's real GPU backend is CuPy (audit M1-2J Phase A), shipped as the
+# optional `[gpu]` extra `cupy-cuda12x` (pyproject.toml @ f76f9cca...).  The
+# wheel of cupy-cuda12x 13.6.0 declares `fastrlock>=0.5` as a runtime
+# dependency (METADATA Requires-Dist, verified from the PyPI wheel), so the
+# contract records both distributions.
+#
+# Specifiers:
+#   * cupy-cuda12x `>=13.4.0,<14` — floor is the first release with
+#     cp313 manylinux x86_64 wheels (verified via the PyPI JSON API on
+#     2026-08-16: 13.0.0 through 13.3.0 have none; 13.4.0 is the first
+#     that does).  The 13.x line supports Compute Capability 3.0+ (sm_61
+#     Pascal/MX150 included) per the CuPy v13.6.0 install docs and
+#     bundles CUDA 12.x; 14.x introduces cuda-pathfinder and is excluded
+#     until its CC 6.1 and driver-550 support are verified.
+#   * fastrlock `>=0.5,<1` — floor mirrors cupy's own Requires-Dist
+#     (`fastrlock>=0.5`); the artifact is pinned at 0.8.3; `<1` guards
+#     against a hypothetical ABI-breaking major that does not exist yet.
+[products.acceleration]
+backend = "NVIDIA_CUDA"
+optional = true
+incompatibilities = []
+
+[[products.acceleration.requirements]]
+distribution = "cupy-cuda12x"
+specifier = ">=13.4.0,<14"
+
+[[products.acceleration.requirements]]
+distribution = "fastrlock"
+specifier = ">=0.5,<1"
+
 [[products.launch.entry_points]]
 group = "gui_scripts"
 name = "zemosaic"

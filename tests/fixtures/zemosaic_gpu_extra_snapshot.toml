@@ -1,0 +1,57 @@
+# =============================================================================
+# ZA-M1-2J 9A — ANTI-DRIFT SNAPSHOT of the ZeMosaic GPU extra
+# =============================================================================
+# Source: ZeMosaic `pyproject.toml` at commit
+#         f76f9ccaebbc6007b0965b061009871377a686fc
+#         ("Release ZeMosaic 4.6.0", branch main/beta)
+# Repo:   https://github.com/tinystork/zemosaic (local checkout:
+#         /home/tristan/.openclaw/workspace/projects/zemosaic)
+#
+# The `[project.optional-dependencies]` table and `requires-python`
+# below are a VERBATIM copy of the stable pyproject block.  This
+# snapshot pins the ZeMosaic-side GPU contract so ZeAlfie's catalog
+# contract (src/zealfie/manifests/products.toml, `[products.acceleration]`
+# for zemosaic) cannot silently drift away from what ZeMosaic actually
+# declares.
+#
+# REFRESH PROCEDURE (when ZeMosaic's stable GPU extra changes):
+#   1. cd /home/tristan/.openclaw/workspace/projects/zemosaic
+#   2. git log --oneline main -1   # note the NEW stable commit SHA
+#   3. git show <NEW_SHA>:pyproject.toml | sed -n '1,200p'
+#   4. Copy the `requires-python` value and the whole
+#      `[project.optional-dependencies]` table below VERBATIM.
+#   5. Update `zemosaic_commit` to the NEW stable SHA.
+#   6. Re-run:
+#        pytest -q tests/test_m1_2j_zemosaic_acceleration.py
+#      and fix any contract in products.toml /
+#      accelerated_artifacts.toml that the anti-drift test flags.
+# Do NOT hand-edit the `gpu` list without running the anti-drift test.
+# =============================================================================
+
+zemosaic_commit = "f76f9ccaebbc6007b0965b061009871377a686fc"
+
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+# GPU acceleration is strictly optional. CuPy must NEVER be a base dependency;
+# install the variant matching your CUDA toolkit (cupy-cuda12x, cupy-cuda11x, ...).
+gpu = [
+    "cupy-cuda12x",
+]
+# Online astrometry.net solving (catalog queries / API solve fallback).
+online = [
+    "astroquery",
+]
+# Standalone auxiliary tools (legacy PyQt5 FITS viewer, satellite trail detection).
+tools = [
+    "PyQt5",
+    "acstools",
+]
+# Development / build / test extras.
+dev = [
+    "pytest",
+    "build",
+]
+test = [
+    "pytest",
+]
