@@ -20,7 +20,13 @@ import pytest
 
 try:
     from PySide6.QtTest import QSignalSpy
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import (
+        QApplication,
+        QScrollArea,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
+    )
     HAS_PYSIDE6 = True
 except ImportError:
     HAS_PYSIDE6 = False
@@ -1001,4 +1007,276 @@ class TestAccelerationPanelInstall:
         finally:
             panel.close()
             panel.deleteLater()
+            qapp.processEvents()
+
+
+# ===========================================================================
+# 4) Panel sizing — the card must grow with its (word-wrapped) content
+# ===========================================================================
+
+
+def _long_preview_plan() -> AcceleratedDeploymentPlan:
+    """A PLAN_READY plan whose preview wraps several lines at ~500 px.
+
+    The closure-impact lines are deliberately long so the detail label
+    word-wraps inside a representative panel width — the exact condition
+    that used to truncate the text (the frame's vertical policy was
+    Fixed and its height did not track the wrapped content).
+    """
+    return _make_plan(
+        AcceleratedPlanStatus.PLAN_READY,
+        hardware=_hardware(
+            HardwareCompatibilityStatus.SUPPORTED,
+            "host acceleration is compatible",
+        ),
+        backend="NVIDIA_CUDA",
+        products_concerned=("zebench", "zefocus"),
+        keep_products=(
+            PlannedKeepProduct(
+                product_id="zebench",
+                version="2.0.0",
+                commit_sha=SHA_A,
+                wheel_sha256=WHEEL_A,
+            ),
+            PlannedKeepProduct(
+                product_id="zefocus",
+                version="1.4.1",
+                commit_sha="b" * 40,
+                wheel_sha256="c" * 64,
+            ),
+        ),
+        added_requirements=(),
+        target_runtime=(
+            "new shared runtime slot with accelerated NVIDIA_CUDA closure"
+        ),
+        closure_impact=(
+            "Add accelerated-lib (>=1.0) [variant 1.2.0] — declared by "
+            "zebench 2.0.0 to satisfy its accelerated NVIDIA_CUDA closure",
+            "Add accelerated-extras (>=0.9) [variant 0.9.3] — declared by "
+            "zefocus 1.4.1 for the shared runtime backend",
+            "Rebuild the shared runtime slot to host the accelerated "
+            "closure for both products",
+        ),
+    )
+
+
+def _embed_panel(panel, width: int = 520, height: int = 500) -> QWidget:
+    """Embed the panel in a container layout mirroring the main window
+    (panel above a widgetResizable scroll area with a bottom stretch)."""
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    layout.setContentsMargins(16, 12, 16, 12)
+    layout.setSpacing(10)
+    layout.addWidget(panel)
+    cards = QWidget()
+    cards_layout = QVBoxLayout(cards)
+    cards_layout.setContentsMargins(0, 0, 0, 0)
+    cards_layout.addStretch()
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(cards)
+    layout.addWidget(scroll)
+    host.resize(width, height)
+    return host
+
+
+def _assert_no_overlap_no_clip(panel: AccelerationPanel) -> None:
+    """The detail text must fully fit its label and never overlap the
+    action buttons; the buttons must be fully inside the panel frame."""
+    detail = panel._detail_label
+    assert detail.isHidden() is False
+    detail_rect = detail.geometry()
+    needed = detail.heightForWidth(detail_rect.width())
+    # The wrapped text must fit the label (no truncation/clipping).
+    assert detail_rect.height() >= needed, (
+        f"detail label {detail_rect.height()}px tall but its wrapped "
+        f"text needs {needed}px"
+    )
+    prev_bottom = detail_rect.bottom()
+    for button in (
+        panel._button,
+        panel._install_button,
+        panel._cancel_button,
+    ):
+        if button is None or button.isHidden():
+            continue
+        rect = button.geometry()
+        # Button starts below the previous item (small tolerance for the
+        # layout spacing / frame margins).
+        assert rect.top() >= prev_bottom - 2, (
+            f"{button.objectName()} overlaps the detail text: "
+            f"top={rect.top()} previous_bottom={prev_bottom}"
+        )
+        assert panel.rect().contains(rect), (
+            f"{button.objectName()} is clipped by the panel frame"
+        )
+        prev_bottom = rect.bottom()
+
+
+class TestAccelerationPanelSizing:
+    def test_vertical_policy_is_preferred_not_fixed(self, qapp):
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        panel = AccelerationPanel(service=_FakePanelService(plan=_ready_plan()))
+        try:
+            policy = panel.sizePolicy()
+            assert (
+                policy.verticalPolicy() is not QSizePolicy.Policy.Fixed
+            ), "the vertical policy must not pin the card height"
+            assert policy.verticalPolicy() in (
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Minimum,
+            )
+            assert policy.horizontalPolicy() is QSizePolicy.Policy.Expanding
+        finally:
+            panel.close()
+            panel.deleteLater()
+            qapp.processEvents()
+
+    def test_no_fixed_or_maximum_heights_anywhere(self, qapp):
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        panel = AccelerationPanel(service=_FakePanelService(plan=_ready_plan()))
+        try:
+            panel.set_recommendation(_rec())
+            panel._button.click()
+            widgets = (
+                panel,
+                panel._summary_label,
+                panel._detail_label,
+                panel._progress_label,
+                panel._button,
+                panel._install_button,
+                panel._cancel_button,
+            )
+            for widget in widgets:
+                assert widget is not None
+                assert widget.maximumHeight() == 16777215, (
+                    f"{widget} has a maximum height -> cannot grow"
+                )
+                assert widget.minimumHeight() == 0, (
+                    f"{widget} has a fixed minimum height -> "
+                    "layout cannot stay compact"
+                )
+        finally:
+            panel.close()
+            panel.deleteLater()
+            qapp.processEvents()
+
+    def test_compact_size_hint_stays_small_without_detail(self, qapp):
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        panel = AccelerationPanel(service=_FakePanelService(plan=_ready_plan()))
+        try:
+            panel.set_recommendation(_rec())
+            panel.show()
+            qapp.processEvents()
+            panel.layout().activate()
+            compact = panel.sizeHint().height()
+            assert compact < 250, f"compact card too tall: {compact}"
+        finally:
+            panel.close()
+            panel.deleteLater()
+            qapp.processEvents()
+
+    def test_showing_multi_line_preview_grows_panel_size_hint(self, qapp):
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        service = _FakePanelService(plan=_long_preview_plan())
+        panel = AccelerationPanel(service=service)
+        try:
+            panel.set_recommendation(_rec())
+            panel.show()
+            qapp.processEvents()
+            panel.layout().activate()
+            compact = panel.sizeHint().height()
+
+            panel._button.click()  # real preview path (intent + plan lines)
+            qapp.processEvents()
+            panel.layout().activate()
+
+            detail_lines = panel._detail_label.text().splitlines()
+            assert len(detail_lines) >= 8
+            grown = panel.sizeHint().height()
+            assert grown >= compact + 50, (
+                f"size hint did not grow with the detail text: "
+                f"compact={compact} grown={grown}"
+            )
+        finally:
+            panel.close()
+            panel.deleteLater()
+            qapp.processEvents()
+
+    def test_detail_and_buttons_no_overlap_at_representative_width(self, qapp):
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        service = _FakePanelService(plan=_long_preview_plan())
+        panel = AccelerationPanel(service=service)
+        host = _embed_panel(panel, width=520, height=500)
+        try:
+            panel.set_recommendation(_rec())
+            host.show()
+            qapp.processEvents()
+            panel._button.click()
+            qapp.processEvents()
+            panel.layout().activate()
+            host.layout().activate()
+            qapp.processEvents()
+            _assert_no_overlap_no_clip(panel)
+            # Both the configure and the Installer button are offered
+            # (PLAN_READY preview) and must be inside the panel.
+            assert panel._install_button.isHidden() is False
+            assert panel._button.geometry().top() >= (
+                panel._detail_label.geometry().bottom() - 2
+            )
+        finally:
+            host.close()
+            host.deleteLater()
+            qapp.processEvents()
+
+    def test_font_scaling_grows_panel_and_preserves_no_overlap(self, qapp):
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        # Unscaled reference panel.
+        ref_panel = AccelerationPanel(
+            service=_FakePanelService(plan=_long_preview_plan())
+        )
+        ref_host = _embed_panel(ref_panel, width=520, height=500)
+        # Font-scaled panel (simulated HiDPI scaling).
+        scaled_panel = AccelerationPanel(
+            service=_FakePanelService(plan=_long_preview_plan())
+        )
+        font = scaled_panel.font()
+        font.setPointSize(font.pointSize() + 3)
+        scaled_panel.setFont(font)
+        scaled_host = _embed_panel(scaled_panel, width=520, height=500)
+        try:
+            ref_panel.set_recommendation(_rec())
+            ref_host.show()
+            scaled_panel.set_recommendation(_rec())
+            scaled_host.show()
+            qapp.processEvents()
+
+            scaled_compact = scaled_panel.height()
+
+            ref_panel._button.click()
+            scaled_panel._button.click()
+            qapp.processEvents()
+            for p in (ref_panel, scaled_panel):
+                p.layout().activate()
+            ref_host.layout().activate()
+            scaled_host.layout().activate()
+            qapp.processEvents()
+
+            # The scaled card grows with its content...
+            assert scaled_panel.height() > scaled_compact
+            # ... and stays taller than the unscaled one (larger font).
+            assert scaled_panel.height() > ref_panel.height()
+            # No truncation/overlap under scaling.
+            _assert_no_overlap_no_clip(scaled_panel)
+            _assert_no_overlap_no_clip(ref_panel)
+        finally:
+            for host in (ref_host, scaled_host):
+                host.close()
+                host.deleteLater()
             qapp.processEvents()

@@ -25,7 +25,7 @@ a non-``PLAN_READY`` plan offers no Installer button at all.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
@@ -172,7 +172,9 @@ class AccelerationPanel(QFrame):
 
     def _build_ui(self) -> None:
         self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -220,6 +222,33 @@ class AccelerationPanel(QFrame):
         self._cancel_button.clicked.connect(self._on_cancel_clicked)
         self._cancel_button.setVisible(False)
         layout.addWidget(self._cancel_button)
+
+    def minimumSizeHint(self) -> QSize:
+        """Report the wrapped-content height so parent layouts never
+        squeeze the frame below what its (word-wrapped) content needs.
+
+        The box layout used by the parent distributes heights from
+        size hints, not from height-for-width, and a word-wrapped
+        QLabel's own size hint assumes the widest unwrapped line.
+        At the frame's actual width the text can wrap one or more
+        extra lines; totalHeightForWidth accounts for that.
+        """
+        mh = super().minimumSizeHint()
+        layout = self.layout()
+        if layout is not None and layout.hasHeightForWidth():
+            width = self.width()
+            if width > 0:
+                mh.setHeight(max(mh.height(), layout.totalHeightForWidth(width)))
+        return mh
+
+    def sizeHint(self) -> QSize:
+        sh = super().sizeHint()
+        layout = self.layout()
+        if layout is not None and layout.hasHeightForWidth():
+            width = self.width()
+            if width > 0:
+                sh.setHeight(max(sh.height(), layout.totalHeightForWidth(width)))
+        return sh
 
     # ------------------------------------------------------------------
     # Public
