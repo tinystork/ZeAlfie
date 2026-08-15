@@ -1635,10 +1635,49 @@ human-gate message (no accelerated artifact source configured; a real GPU
 deployment requires explicit authorization and a configured artifact
 source) and exits non-zero without any acquisition, planning, or mutation.
 
-### GUI worker and the human gate
+### GUI worker, honest progress, cooperative cancellation (I3)
 
-The GUI install worker (phase-based QThread, cancellation before activation
-only) arrives in I3.  The first REAL accelerated deployment on physical
-hardware remains behind the human gate: a real artifact source and
-explicit authorization are required; no production default ever fabricates
-one.
+The panel install path is wired in I3, entirely behind the preview:
+
+* ``zealfie/gui/presentation.py`` — pure, Qt-free view logic.
+  ``accelerated_phase_label(phase)`` maps every
+  ``AcceleratedDeploymentPhase`` to a deterministic English label
+  (PREPARE → Preparation, ACQUIRE → Download, RESOLVE → Dependency
+  resolution, BUILD → Runtime build, VALIDATE/GATE → Validation,
+  PERSIST/ACTIVATE → Activation, COMPLETED → Completed).
+  ``accelerated_install_view(events)`` reduces the observed event stream
+  (backend ``InstallProgress`` events, raw phases, terminal results) to
+  ``(label, percent | None, done)``: the percent comes ONLY from the
+  canonical ``PHASE_PERCENT`` table per ``InstallPhase`` (never invented,
+  never read from the event), ``done`` is ``True`` only for COMPLETED,
+  ``percent=100`` is never returned unless ``done``, and a
+  failed/cancelled result clears the percent (no fake progress).
+* ``zealfie/gui/accelerated_install_worker.py`` — ``AcceleratedInstallWorker``
+  (QObject moved to a QThread, mirroring ``install_worker``) runs the one
+  synchronous ``install_accelerated_runtime(...)`` call off the GUI thread,
+  relays reduced ``progress(str label, int|None percent)`` pairs, and
+  emits ``finished`` with the ``AcceleratedDeploymentResult`` exactly once.
+  ``cancel()`` sets a ``threading.Event``; the injected ``cancel_check``
+  raises ``CooperativeCancellationError`` once set, so the service returns
+  a ``cancelled=True`` result at its next checkpoint — cooperative, never
+  a thread kill.
+* ``zealfie/gui/acceleration_panel.py`` — state machine
+  preview → [Installer] → progression → result.  The configure click
+  builds the plan ONCE (stored recommendation + capabilities, no second
+  observation); the Installer button appears ONLY for a freshly built
+  ``PLAN_READY`` plan — the honest default on any fail-closed plan is
+  no button at all.  Clicking Installer disables the actions, starts the
+  worker, shows the phase label + canonical percent, and shows Cancel
+  only while the worker runs AND activation has not been reached
+  (cancelling after the atomic activation point is a hidden no-op).
+  Terminal states are honest: success → "Accelerated runtime ready"
+  (100% only at the real COMPLETED), failure → the result's reason,
+  cancellation → an explicit cancelled message with the previous runtime
+  preserved.  All service methods are accessed via ``getattr`` (graceful
+  degrade, as elsewhere in the panel).
+
+All of it is tested hermetically with fake services (offscreen Qt, no
+GPU, no network, no real install).  The first REAL accelerated deployment
+on physical hardware remains behind the human gate: a real artifact
+source and explicit authorization are required; no production default
+ever fabricates one.

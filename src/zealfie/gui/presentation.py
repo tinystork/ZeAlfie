@@ -6,9 +6,15 @@ Never shows raw enum names to users.
 
 from __future__ import annotations
 
-from zealfie.acceleration import AcceleratedPlanStatus
+from zealfie.acceleration import (
+    AcceleratedDeploymentPhase,
+    AcceleratedDeploymentResult,
+    AcceleratedPlanStatus,
+)
 from zealfie.app import (
+    InstallPhase,
     ManagedStatus,
+    PHASE_PERCENT,
     ProductState,
     ProductStateReasonCode,
     ProductUpdateResult,
@@ -226,3 +232,132 @@ def gpu_plan_preview_lines(plan) -> tuple[str, ...]:
         lines.append("Planned actions: none recorded")
     lines.append("No changes have been made yet.")
     return tuple(lines)
+
+
+# ---------------------------------------------------------------------------
+# Accelerated deployment progress → UI view (M1-2I / I3)
+# ---------------------------------------------------------------------------
+
+#: Deterministic user-facing label per accelerated deployment phase.
+#: GATE renders like VALIDATE and PERSIST renders like ACTIVATE because
+#: they are sub-steps of the same user-visible moment (the honest check
+#: before activation, and the metadata write inside it).
+_ACCELERATED_PHASE_LABELS: dict[str, str] = {
+    AcceleratedDeploymentPhase.PREPARE.value: "Preparation",
+    AcceleratedDeploymentPhase.ACQUIRE.value: "Download",
+    AcceleratedDeploymentPhase.RESOLVE.value: "Dependency resolution",
+    AcceleratedDeploymentPhase.BUILD.value: "Runtime build",
+    AcceleratedDeploymentPhase.VALIDATE.value: "Validation",
+    AcceleratedDeploymentPhase.GATE.value: "Validation",
+    AcceleratedDeploymentPhase.PERSIST.value: "Activation",
+    AcceleratedDeploymentPhase.ACTIVATE.value: "Activation",
+    AcceleratedDeploymentPhase.COMPLETED.value: "Completed",
+}
+
+#: User-facing label per shared ``InstallPhase`` observation.  Covers all
+#: ten phases: the accelerated path emits PREPARING / ACQUIRING_DEPENDENCIES
+#: / PLANNING_RUNTIME / INSTALLING_RUNTIME / VALIDATING / ACTIVATING /
+#: COMPLETED; the remaining three (product-install phases) are mapped
+#: defensively so a mixed event stream still renders honestly.
+_INSTALL_PHASE_LABELS: dict[InstallPhase, str] = {
+    InstallPhase.PREPARING: "Preparation",
+    InstallPhase.RESOLVING_SOURCE: "Download",
+    InstallPhase.DOWNLOADING_SOURCE: "Download",
+    InstallPhase.BUILDING_PRODUCT: "Runtime build",
+    InstallPhase.ACQUIRING_DEPENDENCIES: "Download",
+    InstallPhase.PLANNING_RUNTIME: "Dependency resolution",
+    InstallPhase.INSTALLING_RUNTIME: "Runtime build",
+    InstallPhase.VALIDATING: "Validation",
+    InstallPhase.ACTIVATING: "Activation",
+    InstallPhase.COMPLETED: "Completed",
+}
+
+#: The view before any observation: the deployment starts at PREPARE.
+_DEFAULT_ACCELERATED_VIEW: tuple[str, int | None, bool] = (
+    "Preparation",
+    None,
+    False,
+)
+
+
+def accelerated_phase_label(phase) -> str:
+    """Return a deterministic user-facing English label for a phase.
+
+    Accepts an
+    :class:`~zealfie.acceleration.deployment.AcceleratedDeploymentPhase`
+    (or anything carrying a ``.value`` string, or a raw string).  Never
+    leaks raw enum values; unknown phases fall back to "In progress".
+    """
+    value = getattr(phase, "value", phase)
+    return _ACCELERATED_PHASE_LABELS.get(str(value), "In progress")
+
+
+def accelerated_install_view(events) -> tuple[str, int | None, bool]:
+    """Reduce a sequence of deployment observations to the current view.
+
+    Pure, Qt-free, deterministic.  *events* is any iterable of observed
+    events, in order:
+
+    * an ``InstallProgress`` (an object whose ``phase`` is an
+      :class:`~zealfie.app.progress.InstallPhase`) — updates the label
+      and the percent;
+    * an
+      :class:`~zealfie.acceleration.deployment.AcceleratedDeploymentPhase`
+      — updates the label only;
+    * a deployment result (an object carrying a boolean ``success``
+      attribute) — the terminal verdict;
+    * anything else is ignored.
+
+    Contract:
+
+    * ``label`` — the deterministic user-facing label of the LAST
+      observed phase;
+    * ``percent`` — ONLY real values: the canonical fixed
+      :data:`~zealfie.app.progress.PHASE_PERCENT` value for the last
+      observed ``InstallProgress`` phase (the event's own ``percent``
+      field is deliberately ignored — fixed table values only, never
+      invented), or ``100`` after a success result reached COMPLETED;
+      ``None`` when no progress was observed or after a
+      failed/cancelled result (no fake progress);
+    * ``done`` — ``True`` ONLY for COMPLETED (a COMPLETED
+      ``InstallProgress``, a COMPLETED raw phase, or a success result);
+      a failed/cancelled result forces ``done=False``.
+
+    Invariants: ``percent=100`` is never returned unless ``done``;
+    empty input yields ``("Preparation", None, False)``.
+    """
+    label, percent, done = _DEFAULT_ACCELERATED_VIEW
+    for event in events:
+        if isinstance(event, AcceleratedDeploymentResult) or (
+            hasattr(event, "success") and hasattr(event, "phase")
+        ):
+            # Terminal verdict (real or duck-typed result).
+            if bool(getattr(event, "success", False)):
+                done = True
+                label = accelerated_phase_label(event.phase)
+                if getattr(event, "phase", None) is (
+                    AcceleratedDeploymentPhase.COMPLETED
+                ):
+                    percent = 100
+            else:
+                # Failure / cancellation: never fabricate progress.
+                done = False
+                percent = None
+                label = accelerated_phase_label(event.phase)
+            continue
+
+        phase = getattr(event, "phase", None)
+        if isinstance(phase, InstallPhase):
+            label = _INSTALL_PHASE_LABELS.get(phase, "In progress")
+            percent = PHASE_PERCENT.get(phase)
+            done = phase is InstallPhase.COMPLETED
+            continue
+
+        if isinstance(event, AcceleratedDeploymentPhase):
+            label = accelerated_phase_label(event)
+            if event is AcceleratedDeploymentPhase.COMPLETED:
+                done = True
+            continue
+
+        # Unknown event type: ignored.
+    return label, percent, done
