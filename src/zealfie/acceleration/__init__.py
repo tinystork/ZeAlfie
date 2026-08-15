@@ -26,6 +26,22 @@ from zealfie.acceleration.models import (
     KNOWN_BACKENDS,
     ProductAccelerationRequirements,
 )
+from zealfie.acceleration.deployment import (
+    AcceleratedAcquisitionError,
+    AcceleratedAcquisitionUnavailable,
+    AcceleratedArtifactAcquirer,
+    AcceleratedDeploymentPhase,
+    AcceleratedDeploymentResult,
+    AcceleratedGate,
+    AcceleratedSlotMetadata,
+    AcceleratedSlotMetadataStore,
+    AcquiredAcceleratedVariant,
+    CooperativeCancellationError,
+    apply_accelerated_deployment,
+    default_accelerated_artifact_acquirer,
+    default_accelerated_gate,
+    extend_runtime_lock_with_acceleration,
+)
 from zealfie.acceleration.planning import (
     AcceleratedDeploymentPlan,
     AcceleratedPlanStatus,
@@ -42,13 +58,23 @@ from zealfie.acceleration.variants import (
 )
 
 __all__ = [
+    "AcceleratedAcquisitionError",
+    "AcceleratedAcquisitionUnavailable",
+    "AcceleratedArtifactAcquirer",
+    "AcceleratedDeploymentPhase",
     "AcceleratedDeploymentPlan",
+    "AcceleratedDeploymentResult",
+    "AcceleratedGate",
     "AcceleratedPlanStatus",
     "AcceleratedRequirement",
+    "AcceleratedSlotMetadata",
+    "AcceleratedSlotMetadataStore",
     "AcceleratedVariant",
     "AcceleratedVariantCatalog",
     "AccelerationIncompatibility",
+    "AcquiredAcceleratedVariant",
     "AmbiguousVariantError",
+    "CooperativeCancellationError",
     "HardwareCompatibility",
     "HardwareCompatibilityReasonCode",
     "HardwareCompatibilityStatus",
@@ -57,7 +83,11 @@ __all__ = [
     "PlannedKeepProduct",
     "ProductAccelerationRequirements",
     "VariantStatus",
+    "apply_accelerated_deployment",
     "build_accelerated_deployment_plan",
+    "default_accelerated_artifact_acquirer",
+    "default_accelerated_gate",
     "default_variant_catalog",
     "evaluate_acceleration_compatibility",
+    "extend_runtime_lock_with_acceleration",
 ]

@@ -10,7 +10,7 @@ M0-8B adds the transactional offline deployment engine.
 
 from __future__ import annotations
 
-from .deployment import apply_deployment_plan
+from .deployment import DeploymentCancelledError, apply_deployment_plan
 from .installed_lock import (
     INSTALLED_LOCK_SCHEMA_VERSION,
     InstalledDependency,
@@ -55,6 +55,7 @@ __all__ = [
     "ActiveRuntimeState",
     "CandidateState",
     "DeploymentAction",
+    "DeploymentCancelledError",
     "DeploymentPlan",
     "DeploymentReasonCode",
     "DeploymentResult",

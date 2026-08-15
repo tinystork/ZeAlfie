@@ -1,4 +1,4 @@
-"""Transactional offline deployment engine (M0-8B).
+"""Transactional offline deployment engine (M0-8B, M1-2I hooks).
 
 Applies a validated :class:`DeploymentPlan` to the shared runtime:
 preflight → dependency materialization → full-state component
@@ -7,6 +7,13 @@ revalidation → atomic activation.
 
 All installation is offline (``--no-index --no-deps``) and every
 artifact is TOCTOU-revalidated immediately before pip handoff.
+
+M1-2I adds two backward-compatible optional keyword hooks so the
+accelerated deployment engine can gate and cancel a base product
+deployment before activation: ``cancel_check`` (cooperative
+cancellation checkpoints) and ``pre_activate`` (a pre-activation gate
+that can fail the deployment with an error string).  Both default to
+``None`` and preserve the exact M0-8B behaviour when omitted.
 """
 
 from __future__ import annotations
@@ -42,12 +49,46 @@ from .transaction import RuntimeTransaction
 logger = logging.getLogger(__name__)
 
 
+class DeploymentCancelledError(RuntimeError):
+    """Signal raised by ``cancel_check`` to interrupt a deployment.
+
+    Cancellation is an interruption, not a failure: no
+    :class:`DeploymentResult` is produced, and the active pointer is
+    never touched before activation.
+    """
+
+
+def _invoke_cancel_check(cancel_check) -> DeploymentResult | None:
+    """Run ``cancel_check`` once (M1-2I).
+
+    Returns ``None`` to continue, or a failure ``DeploymentResult`` when
+    ``cancel_check`` raises anything other than
+    :class:`DeploymentCancelledError`.  A
+    :class:`DeploymentCancelledError` is re-raised — cancellation is an
+    interruption, not a failure.
+    """
+    if cancel_check is None:
+        return None
+    try:
+        cancel_check()
+    except DeploymentCancelledError:
+        raise
+    except Exception as exc:
+        return DeploymentResult(
+            success=False,
+            reason=f"cancel check failed: {exc}",
+        )
+    return None
+
+
 def apply_deployment_plan(
     plan: DeploymentPlan,
     *,
     registry: ComponentRegistry,
     runtime: SharedRuntime | None = None,
     progress_callback=None,
+    cancel_check=None,
+    pre_activate=None,
 ) -> DeploymentResult:
     """Apply a complete deployment plan to the shared runtime.
 
@@ -70,6 +111,12 @@ def apply_deployment_plan(
        before pip handoff.
     6. **Candidate validation** — verify every component is installed
        correctly within the candidate.
+    6b. **Version-match checks** — verify every candidate component
+       version equals the desired state (M0-8B.2).
+    6c. **Pre-activation gate** — optional ``pre_activate`` hook (M1-2I):
+       runs after the version-match checks and before activation; a
+       non-``None`` return value (an error string) fails the deployment
+       with no activation.
     7. **Activation** — atomically switch the active pointer (M0-6),
        including M1-1D dependency distribution TOCTOU revalidation.
 
@@ -91,6 +138,23 @@ def apply_deployment_plan(
         per-package install, validation, and activation boundaries.
         Observational only; it never affects behaviour, results, or error
         propagation.
+    cancel_check:
+        Optional ``Callable[[], None]`` cooperative cancellation hook
+        (M1-2I).  Invoked before begin-transaction, before candidate
+        venv creation, before each dependency install, before each
+        component install, before validation, and before activation.
+        Raising :class:`DeploymentCancelledError` interrupts the
+        deployment (re-raised, no result object, active pointer
+        untouched).  Any other exception becomes a
+        ``DeploymentResult(success=False)`` failure.
+    pre_activate:
+        Optional ``Callable[[RuntimeTransaction], str | None]``
+        pre-activation gate hook (M1-2I).  Runs after the version-match
+        checks (step 6b) and before ``runtime.activate`` (step 7).
+        A non-``None`` return value is an error string that fails the
+        deployment with ``reason="pre-activation gate failed: <err>"``
+        and no activation.  Any exception raised by the hook is caught
+        and converted to the same failure result.
 
     Returns
     -------
@@ -199,6 +263,10 @@ def apply_deployment_plan(
             return DeploymentResult(success=False, reason=coh_err)
 
     # ---- 6. Candidate creation ----------------------------------------------
+    fail = _invoke_cancel_check(cancel_check)
+    if fail is not None:
+        return fail
+
     try:
         txn = runtime.begin_transaction()
     except Exception as exc:
@@ -219,6 +287,10 @@ def apply_deployment_plan(
             reason=f"candidate slot path already exists: {candidate_path}",
         )
 
+    fail = _invoke_cancel_check(cancel_check)
+    if fail is not None:
+        return fail
+
     try:
         candidate_path.parent.mkdir(parents=True, exist_ok=True)
         venv.create(candidate_path, with_pip=True, clear=False)
@@ -235,6 +307,7 @@ def apply_deployment_plan(
     if plan.dependency_lock is not None:
         dep_result = _install_locked_dependencies(
             plan, runtime, txn, emit_install=_emit_install,
+            cancel_check=cancel_check,
         )
         if dep_result is not None:
             return dep_result
@@ -269,6 +342,10 @@ def apply_deployment_plan(
                 ),
             )
 
+        fail = _invoke_cancel_check(cancel_check)
+        if fail is not None:
+            return fail
+
         # Install the component wheel into the candidate.
         _emit_install(desired.component_id)
         result = runtime.install_local_wheel(
@@ -290,6 +367,10 @@ def apply_deployment_plan(
         )
 
     # ---- 9. Candidate validation (multi-component) --------------------------
+    fail = _invoke_cancel_check(cancel_check)
+    if fail is not None:
+        return fail
+
     _emit(
         InstallPhase.VALIDATING,
         PHASE_PERCENT[InstallPhase.VALIDATING],
@@ -329,7 +410,26 @@ def apply_deployment_plan(
                 ),
             )
 
+    # ---- 9c. Optional pre-activation gate hook (M1-2I) ----------------------
+    # Runs after the version-match checks and before activation.  A non-None
+    # error string fails the deployment with no activation; exceptions are
+    # caught to preserve the no-throw contract.
+    if pre_activate is not None:
+        try:
+            gate_error = pre_activate(txn)
+        except Exception as exc:
+            gate_error = f"{type(exc).__name__}: {exc}"
+        if gate_error is not None:
+            return DeploymentResult(
+                success=False,
+                reason=f"pre-activation gate failed: {gate_error}",
+            )
+
     # ---- 10. Activation (includes pre-activation TOCTOU revalidation) -------
+    fail = _invoke_cancel_check(cancel_check)
+    if fail is not None:
+        return fail
+
     _emit(
         InstallPhase.ACTIVATING,
         PHASE_PERCENT[InstallPhase.ACTIVATING],
@@ -480,6 +580,7 @@ def _install_locked_dependencies(
     runtime: SharedRuntime,
     txn: "RuntimeTransaction",
     emit_install=None,
+    cancel_check=None,
 ) -> DeploymentResult | None:
     """Install locked non-component dependencies into the candidate slot.
 
@@ -498,6 +599,10 @@ def _install_locked_dependencies(
     # ---- Phase A: TOCTOU + install each non-component dependency ------------
     for dep in _iter_locked_dependencies(lock):
         dep_name = dep.name
+
+        fail = _invoke_cancel_check(cancel_check)
+        if fail is not None:
+            return fail
 
         if emit_install is not None:
             emit_install(dep_name)
