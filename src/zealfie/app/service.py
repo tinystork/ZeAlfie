@@ -128,6 +128,14 @@ from zealfie.runtime.planning import (
     build_deployment_plan,
 )
 from zealfie.runtime.probe import probe_runtime_distribution
+from zealfie.host import (
+    AccelerationRecommendation,
+    GpuSetupIntent,
+    HostCapabilities,
+    HostProber,
+    build_gpu_setup_intent,
+    recommend,
+)
 from zealfie.sources import (
     RemoteSource,
     ResolvedSource,
@@ -457,6 +465,8 @@ class ZeAlfieService:
         provenance_store: ProductProvenanceStore | None = None,
         installed_lock_store: InstalledLockStore | None = None,
         policy_store: ProductPolicyStore | None = None,
+        capability_collector: object | None = None,
+        recommender: object | None = None,
     ) -> None:
         self._registry = registry or default_registry()
         self._runtime = runtime or SharedRuntime()
@@ -496,6 +506,62 @@ class ZeAlfieService:
         self._policy_store = (
             policy_store if policy_store is not None else ProductPolicyStore()
         )
+        # M1-2G: host acceleration discovery.  The capability collector and
+        # recommender are injectable for hermetic tests; production defaults
+        # to the read-only HostProber and the pure recommend() function.
+        self._capability_collector = capability_collector or HostProber().collect
+        self._recommender = recommender or recommend
+
+    # ------------------------------------------------------------------
+    # M1-2G: Host acceleration discovery (read-only)
+    # ------------------------------------------------------------------
+
+    def collect_host_capabilities(self) -> HostCapabilities:
+        """Return a read-only observation of the host platform and GPUs.
+
+        Delegates to the injected capability collector (default:
+        :class:`~zealfie.host.HostProber`).  Never mutates the system.
+        """
+        return self._capability_collector()
+
+    def get_acceleration_recommendation(
+        self,
+        capabilities: HostCapabilities | None = None,
+    ) -> AccelerationRecommendation:
+        """Interpret host capabilities into an acceleration recommendation.
+
+        Observation -> interpretation, via the injected recommender
+        (default: :func:`~zealfie.host.recommend`).  Read-only.
+
+        When *capabilities* is ``None``, a fresh observation is collected
+        (preserving the original convenience behavior for callers such as
+        the GUI).  Callers that already hold an observation — such as the
+        CLI, which prints both the capabilities and the recommendation —
+        should pass it in so the recommendation is derived from the exact
+        same observation that is displayed and host probes run only once.
+        """
+        if capabilities is None:
+            capabilities = self.collect_host_capabilities()
+        return self._recommender(capabilities)
+
+    def prepare_gpu_setup_intent(
+        self,
+        recommendation: AccelerationRecommendation | None = None,
+    ) -> GpuSetupIntent:
+        """Return a preparatory, no-mutation GPU setup intent for the GUI.
+
+        When *recommendation* is supplied (the GUI already rendered it), the
+        intent is derived from that exact recommendation with no fresh
+        hardware observation.  When omitted, a recommendation is recomputed
+        for backwards compatibility with callers that hold no recommendation
+        yet.
+
+        This prepares intent only: it never installs a CUDA toolkit, driver,
+        or accelerated runtime, and never mutates the system.
+        """
+        if recommendation is None:
+            recommendation = self.get_acceleration_recommendation()
+        return build_gpu_setup_intent(recommendation)
 
     # ------------------------------------------------------------------
     # Release directory convention

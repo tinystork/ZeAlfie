@@ -37,6 +37,7 @@ from .presentation import action_enabled, runtime_summary
 from .product_card import ProductCard
 from .install_worker import create_install_thread
 from .update_bridge import UpdateResultBridge
+from .acceleration_panel import AccelerationPanel
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class ZeAlfieMainWindow(QMainWindow):
         self._status_label: QLabel | None = None
         self._error_label: QLabel | None = None
         self._cards_container: QWidget | None = None
+        self._acceleration_panel: AccelerationPanel | None = None
 
         # M1-2D.5: global install coordination
         self._install_active: bool = False
@@ -137,6 +139,11 @@ class ZeAlfieMainWindow(QMainWindow):
         header_layout.addWidget(subtitle)
 
         central_layout.addLayout(header_layout)
+
+        # --- Hardware acceleration panel (M1-2G) ---
+        self._acceleration_panel = AccelerationPanel(self._service, self)
+        self._acceleration_panel.setObjectName("accelerationPanel")
+        central_layout.addWidget(self._acceleration_panel)
 
         # Error label (hidden by default, shown on startup failure)
         self._error_label = QLabel()
@@ -293,6 +300,31 @@ class ZeAlfieMainWindow(QMainWindow):
 
         # Update status bar
         self._update_status_bar(shell)
+
+        # Refresh the hardware acceleration panel from the service's
+        # recommendation (never probes the system from Qt).
+        self._refresh_acceleration()
+
+    def _refresh_acceleration(self) -> None:
+        """Update the acceleration panel from the service recommendation.
+
+        Tolerates services without the acceleration API and any probe
+        failure — the panel falls back to an honest unknown/error state and
+        the main window never crashes.
+        """
+        if self._acceleration_panel is None:
+            return
+        getter = getattr(self._service, "get_acceleration_recommendation", None)
+        if not callable(getter):
+            self._acceleration_panel.set_unknown()
+            return
+        try:
+            recommendation = getter()
+        except Exception as exc:
+            logger.error("acceleration recommendation failed: %s", exc)
+            self._acceleration_panel.set_error(str(exc))
+            return
+        self._acceleration_panel.set_recommendation(recommendation)
 
     # ------------------------------------------------------------------
     # M1-2E LOT E.4: Read-only update checks (informational only)

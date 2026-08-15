@@ -141,6 +141,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact 40-hex commit SHA to install "
              "(mutually exclusive with --channel)",
     )
+
+    # -- system subcommand (M1-2G) -----------------------------------------
+    system_parser = subparsers.add_parser(
+        "system", help="inspect host system capabilities",
+    )
+    system_subs = system_parser.add_subparsers(dest="system_command")
+    system_subs.add_parser(
+        "capabilities",
+        help="show host capabilities and acceleration recommendation "
+             "(read-only, no mutation)",
+    )
     return parser
 
 
@@ -179,6 +190,9 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
 
     if args.command == "install":
         return _handle_install(args, stdout=stdout)
+
+    if args.command == "system":
+        return _handle_system(args, stdout=stdout)
 
     print(startup_message(), file=stdout)
     return 0
@@ -506,6 +520,55 @@ def _handle_install(args, *, stdout: TextIO) -> int:
 
     print(_format_deployment_result(result), file=stdout)
     return 0 if result.success else 3
+
+
+# ---------------------------------------------------------------------------
+# M1-2G: system capabilities handler (read-only)
+# ---------------------------------------------------------------------------
+
+
+def _handle_system(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie system capabilities``."""
+    if args.system_command == "capabilities":
+        service = _make_service()
+        capabilities = service.collect_host_capabilities()
+        recommendation = service.get_acceleration_recommendation(capabilities)
+        print(
+            _format_host_capabilities(capabilities, recommendation),
+            file=stdout,
+        )
+        return 0
+
+    # No system subcommand given → show help.
+    return 0
+
+
+def _format_host_capabilities(capabilities, recommendation) -> str:
+    """Format host capabilities + acceleration recommendation for CLI output."""
+    lines = [
+        "Host capabilities:",
+        f" OS: {capabilities.os_name or 'unknown'}",
+        f" CPU architecture: {capabilities.cpu_arch or 'unknown'}",
+        f" Platform status: {capabilities.platform_status.value}",
+        f" GPUs: {capabilities.gpu_count}",
+    ]
+    for gpu in capabilities.gpus:
+        model = gpu.model or gpu.vendor
+        driver = f", driver {gpu.driver_version}" if gpu.driver_version else ""
+        lines.append(
+            f"  - {gpu.vendor} {model} ({gpu.kind.value.lower()}{driver})"
+        )
+    lines.append("")
+    lines.append(
+        f"Acceleration recommendation: {recommendation.status.value}"
+    )
+    lines.append(f" Backend: {recommendation.backend}")
+    lines.append(f" Reason: {recommendation.reason}")
+    if recommendation.reason_code is not None:
+        lines.append(f" Reason code: {recommendation.reason_code.value}")
+    return "\n".join(lines)
+
+
 # Helpers
 # ---------------------------------------------------------------------------
 

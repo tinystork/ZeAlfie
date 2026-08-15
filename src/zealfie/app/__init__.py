@@ -55,6 +55,22 @@ from zealfie.runtime.installed_lock import (
     InstalledRuntimeLock,
 )
 
+# M1-2G: Host capability / acceleration recommendation API re-exported from
+# the application layer so CLI and GUI consumers import from ``zealfie.app``
+# rather than from ``zealfie.host`` internals directly.
+from zealfie.host import (
+    AccelerationRecommendation,
+    CapabilityStatus,
+    GpuInfo,
+    GpuKind,
+    GpuSetupIntent,
+    HostCapabilities,
+    HostReasonCode,
+    RecommendationStatus,
+    build_gpu_setup_intent,
+    recommend,
+)
+
 # M1-2A: Product-shell API re-exported from the application layer so that
 # CLI and future GUI consumers import from the application layer, not from
 # zealfie.products internals directly.
@@ -110,13 +126,21 @@ from zealfie.products.policy import (
 from zealfie.launching import SpawnedLaunch
 
 __all__ = [
+    "AccelerationRecommendation",
     "bootstrap_selection_from_legacy_registry",
+    "build_gpu_setup_intent",
+    "CapabilityStatus",
     "ComponentNotInstalledError",
     "CorruptSelectionError",
     "CorruptProductPolicyError",
     "DEFAULT_CHANNEL_REFS",
     "DesiredProductSelection",
     "FULL_NAME",
+    "GpuInfo",
+    "GpuKind",
+    "GpuSetupIntent",
+    "HostCapabilities",
+    "HostReasonCode",
     "InstallPhase",
     "InstallProgress",
     "InstalledDependency",
@@ -151,6 +175,7 @@ __all__ = [
     "RemoteSourceUnavailableError",
     "ResolvedSource",
     "RuntimeStatus",
+    "RecommendationStatus",
     "SelectionStore",
     "SelectionStoreError",
     "SourceError",
@@ -173,6 +198,7 @@ __all__ = [
     "interpolate_percent",
     "materialize_desired_components",
     "resolve_source",
+    "recommend",
     "startup_message",
     "validate_selection_against_catalog",
 ]

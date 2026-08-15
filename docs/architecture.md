@@ -1369,3 +1369,68 @@ secondary **Mettre à jour** button.  Clicking it:
 
 ``ProductCard`` never calls ``service.update_product`` directly.  The backend
 service remains Qt-free and synchronous.
+
+## M1-2G — Host Acceleration Discovery & GPU Setup UX
+
+M1-2G adds read-only host/GPU capability discovery and an honest GPU setup
+surface.  It observes the host, derives an acceleration recommendation, and
+exposes it through the service, CLI, and GUI.  It performs **no** real GPU,
+CUDA toolkit, driver, or runtime installation and **no** system mutation.
+
+### Architectural invariant
+
+```text
+OBSERVATION HostCapabilities
+    -> INTERPRETATION AccelerationRecommendation
+    -> SERVICE (ZeAlfieService)
+    -> GUI / CLI
+```
+
+* Qt widgets never call subprocess, ``nvidia-smi``, ``/sys``, platform
+  probing, or CUDA compatibility decision logic.
+* System probes never know about Qt.
+* Tests never depend on the real GPU of the host (probes are injectable).
+
+### New package: ``zealfie/host/``
+
+* ``models.py`` — ``HostCapabilities`` (OS/arch + zero/one/many ``GpuInfo``),
+  tri-state ``CapabilityStatus`` (AVAILABLE/UNAVAILABLE/UNKNOWN), stable
+  ``HostReasonCode`` values, ``AccelerationRecommendation`` (OFFER_SETUP /
+  ALREADY_READY / NOT_APPLICABLE / BLOCKED / UNKNOWN), and the no-mutation
+  ``GpuSetupIntent``.
+* ``probes.py`` — ``HostProber``, a read-only, bounded collector using
+  ``platform``/``sysconfig``, Linux sysfs PCI, ``/proc/driver/nvidia/version``,
+  ``/dev/nvidiactl``, ``nvidia-smi --query-gpu``, and optional ``lspci``.
+  Every failure becomes an UNAVAILABLE/UNKNOWN state, never an exception.
+  Presence of NVIDIA hardware ≠ CUDA usability; presence of ``nvidia-smi`` ≠
+  Python runtime compatibility.
+* ``recommendation.py`` — pure ``recommend(HostCapabilities)`` and
+  ``build_gpu_setup_intent(recommendation)``.  NVIDIA_CUDA is the only
+  backend; no concrete PyTorch/CuPy/TensorFlow/Numba package is ever chosen.
+
+### Service API
+
+``ZeAlfieService`` adds ``collect_host_capabilities()``,
+``get_acceleration_recommendation()``, and ``prepare_gpu_setup_intent()``
+(which accepts an optional ``recommendation`` so the GUI can pass the exact
+recommendation it already rendered, avoiding a second hardware probe).
+The capability collector and recommender are injectable for hermetic tests.
+
+### CLI
+
+```bash
+zealfie system capabilities
+```
+
+Read-only diagnostic: OS/arch, GPU(s), driver status/version, acceleration
+recommendation, and reason.  Never installs or mutates anything.
+
+### GUI
+
+The main window shows an ``AccelerationPanel`` rendered from the service
+recommendation only: compatible → "Configurer le GPU" button (routes through
+``prepare_gpu_setup_intent`` and displays an honest intent, never claiming
+installation success); driver blocked → details, no configure button; no
+supported GPU → CPU-mode message; unknown → honest unknown message, no offer.
+A probe/service failure degrades to the unknown state and never crashes the
+window.
