@@ -1,4 +1,5 @@
-"""CLI tests for ``zealfie system capabilities`` (M1-2G).
+"""CLI tests for ``zealfie system capabilities`` (M1-2G) and the
+``zealfie system gpu-install`` fail-closed stub (M1-2I).
 
 Read-only diagnostic command; the fake service is injected via
 ``_make_service`` so no real host probing occurs.
@@ -152,3 +153,74 @@ def test_system_command_never_mutates(monkeypatch, tmp_path):
     assert service.collect_calls == 1
     after = sorted(p.name for p in tmp_path.iterdir())
     assert before == after
+
+
+def test_system_gpu_install_in_parser():
+    p = cli.build_parser()
+    args = p.parse_args(["system", "gpu-install"])
+    assert args.command == "system"
+    assert args.system_command == "gpu-install"
+
+
+def test_system_gpu_install_fail_closed_stub(monkeypatch):
+    """`zealfie system gpu-install` is a fail-closed stub: honest
+    human-gate message, non-zero exit, and NO service construction (so
+    no acquisition, no planning, no runtime mutation)."""
+    made: list[bool] = []
+
+    def _spy_make_service():
+        made.append(True)
+        raise AssertionError("gpu-install must not construct a service")
+
+    monkeypatch.setattr(cli, "_make_service", _spy_make_service)
+    code = cli.run(["system", "gpu-install"])
+    assert code != 0
+    assert made == []
+
+
+def test_system_gpu_install_message_is_honest(monkeypatch, capsys):
+    """The stub's message states the human gate honestly: no artifact
+    source configured, explicit authorization required."""
+    monkeypatch.setattr(
+        cli, "_make_service",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("gpu-install must not construct a service")
+        ),
+    )
+    code = cli.run(["system", "gpu-install"])
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "no accelerated artifact source" in captured.err
+    assert "explicit authorization" in captured.err
+
+
+def test_system_gpu_install_never_mutates_runtime(monkeypatch, tmp_path):
+    """Invoking the stub leaves an existing runtime state file
+    byte-identical and creates no files."""
+    import hashlib
+
+    monkeypatch.setattr(
+        cli, "_make_service",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("gpu-install must not construct a service")
+        ),
+    )
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_file = state_dir / "active.json"
+    payload = '{"active_slot_id": "rt-slot-before"}\n'
+    state_file.write_text(payload)
+    before_hash = hashlib.sha256(state_file.read_bytes()).hexdigest()
+    before_files = sorted(
+        str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")
+    )
+
+    code = cli.run(["system", "gpu-install"])
+    assert code != 0
+
+    after_hash = hashlib.sha256(state_file.read_bytes()).hexdigest()
+    after_files = sorted(
+        str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")
+    )
+    assert after_hash == before_hash
+    assert after_files == before_files

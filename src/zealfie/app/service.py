@@ -28,11 +28,18 @@ M1-2D.4.2C: Service integration — dependency acquisition before
 M1-2H: read-only accelerated GPU deployment plan preview
        (``build_accelerated_deployment_plan``) — no writes, no
        network, no runtime mutation.
+M1-2I: transactional accelerated deployment
+       (``install_accelerated_runtime``) — acquire -> resolve ->
+       build -> validate -> gate -> persist -> activate through the
+       M1-2I engine, extending the current full desired runtime
+       (KEEP semantics).  Fail-closed default acquirer; no provenance
+       or selection writes (products unchanged); the engine's
+       observational metadata record is the only new persistent state.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import hashlib
 import logging
 import tempfile
@@ -43,10 +50,20 @@ from pathlib import Path
 from packaging.utils import canonicalize_name
 
 from zealfie.acceleration import (
+    AcceleratedArtifactAcquirer,
     AcceleratedDeploymentPlan,
+    AcceleratedDeploymentPhase,
+    AcceleratedDeploymentResult,
+    AcceleratedGate,
+    AcceleratedPlanStatus,
+    AcceleratedSlotMetadataStore,
     AcceleratedVariantCatalog,
+    CooperativeCancellationError,
     PlannedKeepProduct,
+    apply_accelerated_deployment,
     build_accelerated_deployment_plan,
+    default_accelerated_artifact_acquirer,
+    default_accelerated_gate,
     default_variant_catalog,
 )
 from zealfie.app.progress import InstallPhase, InstallProgress, PHASE_PERCENT
@@ -465,6 +482,13 @@ class ZeAlfieService:
     accelerated GPU deployment plan preview wired to the CLI
     (``zealfie system gpu-plan``) and the GUI configure panel.
 
+    M1-2I adds ``install_accelerated_runtime`` — the transactional
+    accelerated deployment (acquire -> resolve -> build -> validate ->
+    gate -> persist -> activate).  The default production path stays
+    fail-closed: the default acquirer refuses (no real accelerated
+    artifact source is configured yet), and a non-``PLAN_READY`` plan
+    performs no acquisition and no runtime work.
+
     Dependencies (registry, runtime, catalog, host, selection_store)
     are injectable so tests can supply synthetic instances.
     """
@@ -703,6 +727,455 @@ class ZeAlfieService:
                     source="installed_lock",
                 )
         return keeps
+
+    # ------------------------------------------------------------------
+    # M1-2I: Transactional accelerated runtime installation
+    # ------------------------------------------------------------------
+
+    def install_accelerated_runtime(
+        self,
+        *,
+        plan: AcceleratedDeploymentPlan | None = None,
+        capabilities: HostCapabilities | None = None,
+        recommendation: AccelerationRecommendation | None = None,
+        acquirer: AcceleratedArtifactAcquirer | None = None,
+        gate: AcceleratedGate | None = None,
+        metadata_store: AcceleratedSlotMetadataStore | None = None,
+        cancel_check: Callable[[], None] | None = None,
+        progress_callback=None,
+        work_root: Path | None = None,
+        fetcher: ArchiveFetcher | None = None,
+        full_state_provider: Callable[
+            [], Sequence[PreparedProductArtifact]
+        ] | None = None,
+        dependency_wheelhouse: Path | None = None,
+    ) -> AcceleratedDeploymentResult:
+        """Execute an accelerated deployment transactionally (M1-2I).
+
+        Full pipeline: acquire -> resolve -> build -> validate -> gate
+        -> persist -> activate, extending the CURRENT full desired
+        runtime (KEEP semantics) with the accelerated closure declared
+        by products.  Products are re-prepared at their exact installed
+        identity through the same machinery used for KEEP in
+        :meth:`install_product` — never re-resolved from a mutable ref.
+
+        Contract (fail-closed at every step):
+
+        1. Read-only first: when *plan* is ``None`` it is built via
+           :meth:`build_accelerated_deployment_plan` from the provided
+           (or freshly collected) *capabilities* / *recommendation*.
+        2. A non-``PLAN_READY`` plan (``NO_ACCELERATED_REQUIREMENTS`` /
+           ``BLOCKED`` / ``UNKNOWN``) returns
+           ``success=False, phase=PREPARE`` with an honest reason and
+           performs NO acquisition and NO runtime work.  This is the
+           honest default on TINYDEBIAN today: no product declares GPU
+           requirements and the default variant catalog is empty.
+        3. The base deployment plan is produced for the current full
+           desired state: every managed product at its exact installed
+           version.  Base artifacts come from ``full_state_provider()``
+           when provided (synthetic/hermetic callers supply local
+           verified artifacts); otherwise from active provenance
+           re-acquired at the exact commit SHA via the M1-2F KEEP
+           machinery (:meth:`_prepare_keep_product_artifact`, which
+           requires *fetcher*).  The base plan must carry a
+           ``dependency_lock`` to extend; when no lock can be produced
+           the deployment fails before any candidate slot creation.
+        4. ACQUIRE uses *acquirer* or the fail-closed
+           :func:`~zealfie.acceleration.deployment.default_accelerated_artifact_acquirer`
+           (which always raises
+           :class:`~zealfie.acceleration.deployment.AcceleratedAcquisitionUnavailable`
+           until a real, human-gated artifact source is configured) and
+           honours cooperative cancellation.
+        5. :func:`~zealfie.acceleration.deployment.apply_accelerated_deployment`
+           runs the engine with the default gate / metadata store when
+           not provided, deriving ``declaring_distributions`` from the
+           product catalog (product id -> distribution name).
+        6. On success NO product provenance, selection, or
+           installed-lock writes occur: products are unchanged, and the
+           engine's observational ``accelerated-metadata.json`` record
+           is the only new persistent state.  On any failure the
+           previously active runtime is left intact and usable.
+        7. The method NEVER pip-installs into the active slot: every
+           install goes to the fresh candidate slot created by the
+           engine, and the active pointer is only switched at
+           activation.
+
+        Parameters
+        ----------
+        plan:
+            Optional pre-built accelerated plan.  ``None`` builds it via
+            the read-only M1-2H path.
+        capabilities / recommendation:
+            Passed to the plan build when *plan* is ``None``; omitted
+            values are collected/derived exactly once.
+        acquirer:
+            Accelerated artifact source.  Defaults to the fail-closed
+            default acquirer (no real source configured yet).
+        gate:
+            Pre-activation compatibility gate.  Defaults to the
+            stdlib-only distribution/version probe gate.
+        metadata_store:
+            Observational accelerated slot metadata store.  Defaults to
+            a store bound to the runtime layout (``None`` when the
+            runtime exposes no layout).
+        cancel_check:
+            Optional cooperative cancellation callable.  Raising
+            :class:`CooperativeCancellationError` aborts cleanly with
+            ``cancelled=True`` and the old runtime preserved.
+        progress_callback:
+            Optional ``Callable[[InstallProgress], None]`` observer.
+            Observational only.
+        work_root:
+            Staging root for base artifacts and acquired wheels.
+            ``None`` uses a private temporary directory that is removed
+            when the method returns.
+        fetcher:
+            Archive fetcher for KEEP re-acquisition (exact SHA).  Only
+            used when *full_state_provider* is ``None``.
+        full_state_provider:
+            Optional zero-arg callable returning the prepared
+            full-state artifacts.  Synthetic/hermetic tests supply
+            local ``VerifiedArtifact``-backed artifacts here; production
+            uses the provenance + *fetcher* KEEP path.
+        dependency_wheelhouse:
+            Optional dependency wheelhouse for base lock resolution.
+            ``None`` auto-acquires via the injected dependency acquirer
+            (mirroring :meth:`install_product`).
+
+        Returns
+        -------
+        AcceleratedDeploymentResult
+            Every expected failure is reported as a result (never
+            raised); the phase names where the deployment stopped.
+        """
+        # ---- 1. Read-only: obtain the accelerated plan -------------------
+        if plan is None:
+            try:
+                plan = self.build_accelerated_deployment_plan(
+                    capabilities=capabilities,
+                    recommendation=recommendation,
+                )
+            except Exception as exc:
+                return AcceleratedDeploymentResult(
+                    success=False,
+                    cancelled=False,
+                    phase=AcceleratedDeploymentPhase.PREPARE,
+                    reason=(
+                        "accelerated plan building failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+
+        # ---- 2. Fail-closed plan gate (no acquisition, no runtime work) --
+        if plan.status is not AcceleratedPlanStatus.PLAN_READY:
+            return AcceleratedDeploymentResult(
+                success=False,
+                cancelled=False,
+                phase=AcceleratedDeploymentPhase.PREPARE,
+                reason=(
+                    f"accelerated plan is not ready ({plan.status.value}): "
+                    f"{plan.blocked_reason or 'no accelerated deployment planned'}"
+                ),
+            )
+        if plan.backend is None:
+            return AcceleratedDeploymentResult(
+                success=False,
+                cancelled=False,
+                phase=AcceleratedDeploymentPhase.PREPARE,
+                reason="accelerated plan has no backend",
+            )
+
+        # ---- 3. Base full-state plan (KEEP semantics) + ACQUIRE + apply --
+        _emit_progress(
+            progress_callback,
+            InstallPhase.PREPARING,
+            PHASE_PERCENT[InstallPhase.PREPARING],
+            "Preparing accelerated runtime\u2026",
+        )
+
+        own_work_root = work_root is None
+        if own_work_root:
+            work_root = Path(
+                tempfile.mkdtemp(prefix="zealfie-accel-runtime-")
+            )
+        auto_staging: Path | None = None
+        try:
+            # ---- 3a. Base artifacts (exact KEEP identity) -----------------
+            try:
+                prepared = self._accelerated_base_prepared_artifacts(
+                    plan,
+                    fetcher=fetcher,
+                    full_state_provider=full_state_provider,
+                    work_root=work_root,
+                    progress_callback=progress_callback,
+                )
+                # ---- 3b. Dependency wheelhouse (mirror install_product) --
+                if dependency_wheelhouse is None:
+                    _emit_progress(
+                        progress_callback,
+                        InstallPhase.ACQUIRING_DEPENDENCIES,
+                        PHASE_PERCENT[InstallPhase.ACQUIRING_DEPENDENCIES],
+                        "Acquiring dependencies\u2026",
+                    )
+                    auto_staging = _private_acquisition_staging(work_root)
+                    for pa in prepared:
+                        desc = self._catalog.get(pa.product_id)
+                        req = build_acquisition_request(
+                            pa.wheel_path,
+                            active_extras=frozenset(desc.required_extras),
+                        )
+                        self._acquirer.acquire(
+                            req, staging_dir=auto_staging,
+                        )
+                    dependency_wheelhouse = auto_staging
+                _emit_progress(
+                    progress_callback,
+                    InstallPhase.PLANNING_RUNTIME,
+                    PHASE_PERCENT[InstallPhase.PLANNING_RUNTIME],
+                    "Planning accelerated runtime\u2026",
+                )
+                deployment_plan = self.plan_prepared_product_deployment(
+                    prepared,
+                    dependency_wheelhouse=dependency_wheelhouse,
+                )
+            except Exception as exc:
+                return AcceleratedDeploymentResult(
+                    success=False,
+                    cancelled=False,
+                    phase=AcceleratedDeploymentPhase.PREPARE,
+                    reason=(
+                        "base runtime preparation failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+
+            # ---- 3c. The base plan MUST carry a dependency lock -----------
+            if deployment_plan.dependency_lock is None:
+                return AcceleratedDeploymentResult(
+                    success=False,
+                    cancelled=False,
+                    phase=AcceleratedDeploymentPhase.PREPARE,
+                    reason=(
+                        "base deployment plan has no dependency lock; an "
+                        "accelerated deployment requires a base RuntimeLock "
+                        "to extend"
+                    ),
+                )
+
+            registry = self._registry_for_prepared_products(prepared)
+            declaring_distributions = {
+                desc.product_id: desc.distribution_name
+                for desc in self._catalog.list()
+            }
+
+            # ---- 4. ACQUIRE (fail-closed default) --------------------------
+            effective_acquirer = (
+                acquirer
+                if acquirer is not None
+                else default_accelerated_artifact_acquirer()
+            )
+            if cancel_check is not None:
+                try:
+                    cancel_check()
+                except CooperativeCancellationError as exc:
+                    return AcceleratedDeploymentResult(
+                        success=False,
+                        cancelled=True,
+                        phase=AcceleratedDeploymentPhase.ACQUIRE,
+                        reason=(
+                            str(exc) or "accelerated deployment cancelled"
+                        ),
+                    )
+                except Exception as exc:
+                    return AcceleratedDeploymentResult(
+                        success=False,
+                        cancelled=False,
+                        phase=AcceleratedDeploymentPhase.ACQUIRE,
+                        reason=f"cancel check failed: {exc}",
+                    )
+            work_root.mkdir(parents=True, exist_ok=True)
+            try:
+                acquired = effective_acquirer.acquire(
+                    plan, work_root, cancel_check=cancel_check,
+                )
+            except CooperativeCancellationError as exc:
+                return AcceleratedDeploymentResult(
+                    success=False,
+                    cancelled=True,
+                    phase=AcceleratedDeploymentPhase.ACQUIRE,
+                    reason=str(exc) or "accelerated deployment cancelled",
+                )
+            except Exception as exc:
+                return AcceleratedDeploymentResult(
+                    success=False,
+                    cancelled=False,
+                    phase=AcceleratedDeploymentPhase.ACQUIRE,
+                    reason=(
+                        "accelerated artifact acquisition failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+
+            # ---- 5. Engine: resolve -> build -> validate -> gate ->
+            #        persist -> activate ------------------------------------
+            if gate is None:
+                gate = default_accelerated_gate()
+            if metadata_store is None:
+                layout = getattr(self._runtime, "layout", None)
+                metadata_store = (
+                    AcceleratedSlotMetadataStore(layout)
+                    if layout is not None
+                    else None
+                )
+
+            result = apply_accelerated_deployment(
+                accelerated_plan=plan,
+                deployment_plan=deployment_plan,
+                registry=registry,
+                runtime=self._runtime,
+                acquired=acquired,
+                declaring_distributions=declaring_distributions,
+                accelerated_gate=gate,
+                metadata_store=metadata_store,
+                cancel_check=cancel_check,
+                progress_callback=progress_callback,
+            )
+
+            # ---- 6. Success: NO provenance/selection/installed-lock
+            #        writes — products are unchanged.  The engine's
+            #        metadata record is the only new persistent state. ----
+            if result.success:
+                _emit_progress(
+                    progress_callback,
+                    InstallPhase.COMPLETED,
+                    PHASE_PERCENT[InstallPhase.COMPLETED],
+                    "Accelerated runtime is ready",
+                )
+            return result
+        finally:
+            if auto_staging is not None:
+                _rmtree_best_effort(auto_staging)
+            if own_work_root:
+                _rmtree_best_effort(work_root)
+
+    def _accelerated_base_prepared_artifacts(
+        self,
+        plan: AcceleratedDeploymentPlan,
+        *,
+        fetcher: ArchiveFetcher | None,
+        full_state_provider: Callable[
+            [], Sequence[PreparedProductArtifact]
+        ] | None,
+        work_root: Path,
+        progress_callback=None,
+    ) -> list[PreparedProductArtifact]:
+        """Materialize the base full-state (KEEP) artifacts (M1-2I).
+
+        Two sources:
+
+        * ``full_state_provider()`` when provided — synthetic/hermetic
+          callers supply already-prepared local artifacts backed by
+          ``VerifiedArtifact`` (offline, exact identity);
+        * otherwise active provenance re-acquired at the exact commit
+          SHA through the M1-2F KEEP machinery
+          (:meth:`_prepare_keep_product_artifact`) — never re-resolved
+          from a mutable ref.  Empty active provenance, a selected
+          catalog-known product without provenance, or a missing
+          *fetcher* fails closed before any acquisition or runtime
+          mutation.
+
+        The prepared set is then validated against the plan's KEEP
+        documentation (fail-closed, deterministic): the prepared
+        product set must equal ``plan.keep_products`` (no silent drop,
+        no silent addition), every KEEP version must match, every
+        known KEEP commit SHA must match the prepared artifact's exact
+        commit, and every product declaring accelerated requirements
+        must be part of the base state.
+        """
+        if full_state_provider is not None:
+            prepared = list(full_state_provider())
+        else:
+            active = self.active_provenance()
+            if not active:
+                raise ProductInstallPreparationError(
+                    "no active product provenance: cannot materialize the "
+                    "base full-state runtime at exact installed identity"
+                )
+            selected = self._selection_store.current_selection()
+            missing = frozenset(
+                pid
+                for pid in selected.selected_product_ids
+                if pid in self._catalog and pid not in active
+            )
+            if missing:
+                raise ProductInstallPreparationError(
+                    "cannot materialize base full-state runtime: selected "
+                    f"product(s) {sorted(missing)!r} have no active "
+                    "provenance"
+                )
+            if fetcher is None:
+                raise ProductInstallPreparationError(
+                    "no artifact fetcher configured: cannot re-acquire "
+                    "KEEP products at exact commit SHA"
+                )
+            prepared = [
+                self._prepare_keep_product_artifact(
+                    pid,
+                    active[pid],
+                    fetcher=fetcher,
+                    work_root=work_root,
+                    progress_callback=progress_callback,
+                )
+                for pid in sorted(active)
+            ]
+
+        # ---- KEEP coherence (fail-closed, deterministic) ------------------
+        keep_by_id = {
+            keep.product_id: keep for keep in plan.keep_products
+        }
+        prepared_by_id = {pa.product_id: pa for pa in prepared}
+        if set(prepared_by_id) != set(keep_by_id):
+            only_prepared = sorted(set(prepared_by_id) - set(keep_by_id))
+            only_kept = sorted(set(keep_by_id) - set(prepared_by_id))
+            detail = ""
+            if only_prepared:
+                detail += f"; prepared but not kept: {only_prepared}"
+            if only_kept:
+                detail += f"; kept but not prepared: {only_kept}"
+            raise ProductInstallPreparationError(
+                "base full-state products do not match the accelerated "
+                "plan KEEP documentation" + detail
+            )
+        for pid in sorted(keep_by_id):
+            keep = keep_by_id[pid]
+            pa = prepared_by_id[pid]
+            if pa.verified_artifact.version != keep.version:
+                raise ProductInstallPreparationError(
+                    f"KEEP product {pid!r} version drift: accelerated "
+                    f"plan documents {keep.version!r}, prepared artifact "
+                    f"is {pa.verified_artifact.version!r}"
+                )
+            if (
+                keep.commit_sha is not None
+                and pa.resolved_source.commit_sha != keep.commit_sha
+            ):
+                raise ProductInstallPreparationError(
+                    f"KEEP product {pid!r} commit drift: accelerated plan "
+                    f"documents {keep.commit_sha!r}, prepared artifact is "
+                    f"{pa.resolved_source.commit_sha!r}"
+                )
+        missing_concerned = sorted(
+            pid
+            for pid in plan.products_concerned
+            if pid not in prepared_by_id
+        )
+        if missing_concerned:
+            raise ProductInstallPreparationError(
+                "product(s) declaring accelerated requirements are not "
+                "part of the base full-state runtime: "
+                + ", ".join(missing_concerned)
+            )
+        return prepared
 
     # ------------------------------------------------------------------
     # Release directory convention

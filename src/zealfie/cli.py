@@ -157,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="preview the accelerated GPU deployment plan "
              "(read-only, no mutation)",
     )
+    system_subs.add_parser(
+        "gpu-install",
+        help="install an accelerated GPU runtime "
+             "(fail-closed: no accelerated artifact source is configured; "
+             "a real deployment requires explicit authorization)",
+    )
     return parser
 
 
@@ -533,7 +539,7 @@ def _handle_install(args, *, stdout: TextIO) -> int:
 
 
 def _handle_system(args, *, stdout: TextIO) -> int:
-    """Handle ``zealfie system capabilities`` and ``zealfie system gpu-plan``."""
+    """Handle ``zealfie system capabilities``, ``gpu-plan``, ``gpu-install``."""
     if args.system_command == "capabilities":
         service = _make_service()
         capabilities = service.collect_host_capabilities()
@@ -553,6 +559,21 @@ def _handle_system(args, *, stdout: TextIO) -> int:
             return 4
         print(_format_accelerated_deployment_plan(plan), file=stdout)
         return 0
+
+    if args.system_command == "gpu-install":
+        # M1-2I: fail-closed stub.  No real accelerated artifact source is
+        # configured yet, and a real GPU deployment is human-gated.  This
+        # command performs NO acquisition, NO planning, NO service
+        # construction, and NO runtime mutation — it only reports the
+        # honest gate and exits non-zero.
+        print(
+            "accelerated GPU deployment is not available: no accelerated "
+            "artifact source is configured. A real GPU deployment "
+            "requires explicit authorization and a configured artifact "
+            "source.",
+            file=sys.stderr,
+        )
+        return 4
 
     # No system subcommand given → show help.
     return 0

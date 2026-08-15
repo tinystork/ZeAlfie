@@ -1547,9 +1547,98 @@ The plan is deterministic: equal inputs produce equal plans.
   planning failure degrades to an honest notice, never a crash.  The
   preview never claims an installation happened.
 
-### Deferred to M1-2I
+### Followed by M1-2I
 
-Artifact acquisition, candidate runtime build, compatibility gate, lock/
-provenance persistence, atomic activation, rollback, cancellation, and the
-GUI install path remain deferred to M1-2I.  The first real accelerated
-deployment on physical hardware requires explicit human authorization.
+Artifact acquisition, candidate runtime build, compatibility gate, atomic
+activation, rollback, cancellation, and the service/CLI wiring are
+implemented in M1-2I (next section).  The GUI install path arrives in I3.
+The first real accelerated deployment on physical hardware remains behind
+the human gate: a real artifact source and explicit authorization are
+required.
+
+## M1-2I — Transactional Accelerated Deployment
+
+M1-2I turns the read-only M1-2H plan into a real, transactional deployment:
+acquire concrete accelerated artifacts, extend the base ``RuntimeLock``,
+build a fresh candidate runtime, run the compatibility gate, record
+observational metadata, and atomically activate — without ever mutating the
+active runtime.
+
+### Engine: ``zealfie/acceleration/deployment.py``
+
+* ``AcceleratedArtifactAcquirer`` — injectable protocol
+  ``acquire(plan, work_root, cancel_check=...) -> tuple[AcquiredAcceleratedVariant, ...]``.
+  ``AcquiredAcceleratedVariant`` re-verifies size and SHA-256 against the
+  on-disk wheel at construction.  The production default
+  (``default_accelerated_artifact_acquirer()``) ALWAYS raises
+  ``AcceleratedAcquisitionUnavailable`` — fail-closed until a real,
+  human-gated artifact source is configured.
+* ``extend_runtime_lock_with_acceleration`` — pure lock extension: every
+  base entry preserved verbatim (same objects, same order) plus one
+  NON-PRIMARY entry per acquired variant, appended deterministically;
+  rejects specifier violations, duplicates, unknown declaring products,
+  and collisions with the base lock.
+* ``apply_accelerated_deployment`` — PREPARE preflight (``PLAN_READY``,
+  backend, source-slot coherence, base dependency lock present) →
+  cooperative-cancellation checkpoint → RESOLVE (rebind the
+  ``DeploymentPlan`` via ``dataclasses.replace`` with the extended lock) →
+  delegate to the M0-8B ``apply_deployment_plan`` using the two optional
+  hooks added in M1-2I: ``cancel_check`` (``DeploymentCancelledError``)
+  and ``pre_activate`` (error-string gate, run strictly after the
+  version-match checks and strictly before activation).  All installs go
+  to the fresh candidate slot; the active pointer is never touched before
+  activation; every failure preserves the old runtime;
+  ``CooperativeCancellationError`` → ``cancelled=True``.
+* ``AcceleratedGate`` — the default gate probes each planned accelerated
+  distribution at its planned version inside the candidate venv with a
+  stdlib-only script.  Backend importability is NOT tested (it cannot be
+  tested without real hardware) — the human gate covers the first real
+  deployment; the gate never fabricates a success.
+* ``AcceleratedSlotMetadataStore`` — observational, slot-keyed, atomic
+  record (``state_dir/accelerated-metadata.json``: backend + variant
+  ``(distribution, version, sha256)`` triples).  Written inside
+  ``pre_activate`` under the candidate slot id (slots are created at
+  their final path and never renamed).  Drives no install / rollback /
+  KEEP decision.
+
+### Service wiring
+
+``ZeAlfieService.install_accelerated_runtime(...)``:
+
+1. builds the read-only plan when not supplied (M1-2H preview path); a
+   non-``PLAN_READY`` plan returns ``success=False, phase=PREPARE`` with an
+   honest reason — no acquisition, no runtime work (the honest TINYDEBIAN
+   default today: no product declares GPU requirements and the variant
+   catalog is empty);
+2. materializes the base full-state plan with KEEP semantics — every
+   managed product re-prepared at its exact installed version/commit SHA
+   through the M1-2F KEEP machinery (``prepare_product_artifact_at_commit``,
+   never a mutable ref); synthetic/hermetic callers inject a
+   ``full_state_provider`` of local verified artifacts (offline);
+3. requires the base plan to carry a ``dependency_lock`` to extend —
+   otherwise it fails with a clear reason before any candidate slot
+   creation;
+4. acquires accelerated artifacts (fail-closed default acquirer,
+   cooperative cancellation honoured);
+5. delegates to ``apply_accelerated_deployment`` with
+   ``declaring_distributions`` derived from the product catalog, the
+   default gate, and a metadata store bound to the runtime layout;
+6. on success writes NO product provenance, selection, or installed-lock
+   records — products are unchanged; the engine's accelerated metadata
+   record is the only new persistent state.  The method never installs
+   into the active slot.
+
+### CLI
+
+``zealfie system gpu-install`` is a fail-closed stub: it prints the honest
+human-gate message (no accelerated artifact source configured; a real GPU
+deployment requires explicit authorization and a configured artifact
+source) and exits non-zero without any acquisition, planning, or mutation.
+
+### GUI worker and the human gate
+
+The GUI install worker (phase-based QThread, cancellation before activation
+only) arrives in I3.  The first REAL accelerated deployment on physical
+hardware remains behind the human gate: a real artifact source and
+explicit authorization are required; no production default ever fabricates
+one.
