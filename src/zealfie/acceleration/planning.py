@@ -27,7 +27,13 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 
 from zealfie.acceleration.compatibility import (
+    BACKEND_MANAGED_RUNTIME_COST,
+    HostPrerequisiteEntry,
+    HostPrerequisites,
+    HostPrerequisitesStatus,
+    HostPrerequisiteStatus,
     evaluate_acceleration_compatibility,
+    evaluate_host_prerequisites,
 )
 from zealfie.acceleration.models import (
     HardwareCompatibility,
@@ -231,6 +237,10 @@ class AcceleratedDeploymentPlan:
     ``blocked`` / ``blocked_reason`` carry the fail-closed verdict.
     ``closure_impact`` is the deterministic, human-readable list of what
     would change; it may be empty.
+    ``host_prerequisites`` carries the Phase F host prerequisites
+    classification (REQUIRED_HOST conditions + MANAGED_RUNTIME
+    distributions of the closure) when the plan reached backend
+    selection; ``None`` otherwise (soft migration default).
     """
 
     status: AcceleratedPlanStatus
@@ -246,6 +256,7 @@ class AcceleratedDeploymentPlan:
     blocked: bool
     blocked_reason: str | None
     closure_impact: tuple[str, ...]
+    host_prerequisites: HostPrerequisites | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, AcceleratedPlanStatus):
@@ -343,6 +354,15 @@ class AcceleratedDeploymentPlan:
             impact.append(line.strip())
         object.__setattr__(self, "closure_impact", tuple(impact))
 
+        host_prerequisites = self.host_prerequisites
+        if host_prerequisites is not None and not isinstance(
+            host_prerequisites, HostPrerequisites
+        ):
+            raise ValueError(
+                "host_prerequisites must be None or a HostPrerequisites, "
+                f"got {type(host_prerequisites).__qualname__}"
+            )
+
 
 def _runtime_state_string(state: RuntimeState | str) -> str:
     """Return the plain string value of a runtime state.
@@ -424,10 +444,18 @@ def build_accelerated_deployment_plan(
        variant must also satisfy the merged specifier (checked with
        prereleases allowed) — a variant that does not satisfy it is
        treated as unavailable;
+    5b. evaluate the host prerequisites for the derived backend
+    (:func:`~zealfie.acceleration.compatibility.evaluate_host_prerequisites`);
+    a checkable missing precondition (e.g. NVIDIA driver below the
+    curated 550.54.14 floor) → ``BLOCKED`` with the honest host reason,
+    no added requirements;
     6. any missing or unsatisfying variant → ``BLOCKED`` listing the
        missing distributions with deterministic details (no partial
        fallback); otherwise ``PLAN_READY`` with the deterministic
-       closure impact lines.
+       closure impact lines and the host prerequisites classification
+       (REQUIRED_HOST entries + MANAGED_RUNTIME = the selected closure
+       distributions with their exact pinned versions and the curated
+       download/install cost note).
 
     The planner never mutates its inputs and never performs I/O.
     ``keep_products`` values are documented verbatim — provenance is
@@ -506,6 +534,23 @@ def build_accelerated_deployment_plan(
             **base,
         )
     backend = declared_backends[0]
+
+    # ---- (5b) Host prerequisites classification (Phase F) --------------
+    prerequisites = evaluate_host_prerequisites(backend, capabilities)
+    if prerequisites.status is HostPrerequisitesStatus.BLOCKED:
+        return AcceleratedDeploymentPlan(
+            status=AcceleratedPlanStatus.BLOCKED,
+            backend=backend,
+            added_requirements=(),
+            target_runtime="no new runtime required",
+            blocked=True,
+            blocked_reason=(
+                prerequisites.reason
+                or "host prerequisites not satisfied for the accelerated backend"
+            ),
+            closure_impact=(),
+            **base,
+        )
 
     # Merge requirements across products into one entry per distribution.
     specifiers: dict[str, set[str]] = {}
@@ -596,6 +641,24 @@ def build_accelerated_deployment_plan(
             f"[variant {entry.variant.version}]"
         )
 
+    managed_runtime: list[HostPrerequisiteEntry] = [
+        HostPrerequisiteEntry(
+            entry=entry.distribution,
+            requirement=f"=={entry.variant.version}",
+            status=HostPrerequisiteStatus.MANAGED,
+        )
+        for entry in planned
+    ]
+    cost_note = BACKEND_MANAGED_RUNTIME_COST.get(backend)
+    if cost_note is not None:
+        managed_runtime.append(
+            HostPrerequisiteEntry(
+                entry="total",
+                requirement=cost_note,
+                status=HostPrerequisiteStatus.MANAGED,
+            )
+        )
+
     return AcceleratedDeploymentPlan(
         status=AcceleratedPlanStatus.PLAN_READY,
         backend=backend,
@@ -604,5 +667,11 @@ def build_accelerated_deployment_plan(
         blocked=False,
         blocked_reason=None,
         closure_impact=tuple(impact_lines),
+        host_prerequisites=HostPrerequisites(
+            status=prerequisites.status,
+            required_host=prerequisites.required_host,
+            managed_runtime=tuple(managed_runtime),
+            reason=None,
+        ),
         **base,
     )

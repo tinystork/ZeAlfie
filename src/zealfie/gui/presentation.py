@@ -10,6 +10,7 @@ from zealfie.acceleration import (
     AcceleratedDeploymentPhase,
     AcceleratedDeploymentResult,
     AcceleratedPlanStatus,
+    HostPrerequisiteStatus,
 )
 from zealfie.app import (
     InstallPhase,
@@ -230,6 +231,25 @@ def gpu_plan_preview_lines(plan) -> tuple[str, ...]:
         lines.extend(f" - {line}" for line in plan.closure_impact)
     else:
         lines.append("Planned actions: none recorded")
+    if plan.host_prerequisites is not None:
+        lines.append("Host prerequisites:")
+        for entry in plan.host_prerequisites.required_host:
+            observed = (
+                f" (observed {entry.observed})" if entry.observed else ""
+            )
+            status = (
+                ""
+                if entry.status is HostPrerequisiteStatus.OK
+                else f" [{entry.status.display}]"
+            )
+            lines.append(
+                f" - REQUIRED_HOST {entry.entry} "
+                f"{entry.requirement}{observed}{status}"
+            )
+        for entry in plan.host_prerequisites.managed_runtime:
+            lines.append(
+                f" - MANAGED_RUNTIME {entry.entry} {entry.requirement}"
+            )
     lines.append("No changes have been made yet.")
     return tuple(lines)
 

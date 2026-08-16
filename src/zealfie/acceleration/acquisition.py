@@ -623,7 +623,9 @@ class ManifestAcceleratedArtifactAcquirer:
     def _check_python_target(
         self, distribution: str, entry: AcceleratedArtifactEntry
     ) -> None:
-        if entry.python is not None and entry.python != self._python_tag:
+        if entry.python is not None and not _python_tag_compatible(
+            entry.python, self._python_tag
+        ):
             raise PlatformMismatch(
                 f"artifact for {distribution!r} targets python tag "
                 f"{entry.python!r} but this interpreter is "
@@ -742,6 +744,25 @@ def _file_size_and_sha256(path: Path) -> tuple[int, str]:
             size += len(chunk)
             sha.update(chunk)
     return size, sha.hexdigest()
+
+
+def _python_tag_compatible(entry_tag: str, interpreter_tag: str) -> bool:
+    """PEP 425 python-tag compatibility (conservative).
+
+    An exact match always works.  A ``py3`` component in the entry tag
+    matches any CPython 3 interpreter (``py3-none`` wheels are
+    version-independent); everything else must match exactly.  Used by
+    the acquirer so the Phase F closure's ``py3`` nvidia-*-cu12 wheels
+    are accepted on a ``cp313`` interpreter.
+    """
+    if not entry_tag or not interpreter_tag:
+        return False
+    if entry_tag == interpreter_tag:
+        return True
+    for component in entry_tag.split("."):
+        if component == "py3" and interpreter_tag.startswith("cp3"):
+            return True
+    return False
 
 
 def _remove_best_effort(path: Path) -> None:

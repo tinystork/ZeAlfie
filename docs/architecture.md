@@ -1591,9 +1591,14 @@ active runtime.
   ``CooperativeCancellationError`` → ``cancelled=True``.
 * ``AcceleratedGate`` — the default gate probes each planned accelerated
   distribution at its planned version inside the candidate venv with a
-  stdlib-only script.  Backend importability is NOT tested (it cannot be
-  tested without real hardware) — the human gate covers the first real
-  deployment; the gate never fabricates a success.
+  stdlib-only script and then, when the plan's backend declares a compute
+  probe in the ``zealfie.acceleration.backend_probe`` registry (Phase F),
+  executes that self-contained script with the candidate interpreter:
+  real import + device compute + JIT kernel compile (the M1-2J.1 lesson —
+  a green install is not a green compute path).  A probe failure or
+  timeout fails the gate BEFORE activation; a backend without a
+  registered probe keeps the distribution/version-only behaviour; the
+  gate never fabricates a success.
 * ``AcceleratedSlotMetadataStore`` — observational, slot-keyed, atomic
   record (``state_dir/accelerated-metadata.json``: backend + variant
   ``(distribution, version, sha256)`` triples).  Written inside

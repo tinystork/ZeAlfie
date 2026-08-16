@@ -13,9 +13,11 @@ requirement consistency.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
 
 from packaging.specifiers import SpecifierSet
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 
 from zealfie.acceleration.models import (
     HardwareCompatibility,
@@ -26,6 +28,7 @@ from zealfie.acceleration.models import (
 )
 from zealfie.host.models import (
     AccelerationRecommendation,
+    CapabilityStatus,
     HostCapabilities,
     RecommendationStatus,
 )
@@ -144,6 +147,304 @@ def evaluate_acceleration_compatibility(
             "requirements"
         ),
         products_concerned=(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Host prerequisites classification (ZA-M1-2J.2 Phase F)
+# ---------------------------------------------------------------------------
+
+
+class HostPrerequisitesStatus(str, Enum):
+    """Overall verdict of the host prerequisites evaluation."""
+
+    OK = "OK"
+    """Every checkable host prerequisite is satisfied (or none exists)."""
+
+    BLOCKED = "BLOCKED"
+    """A checkable host prerequisite is missing/insufficient."""
+
+
+class HostPrerequisiteStatus(str, Enum):
+    """Per-entry status inside a host prerequisites classification."""
+
+    OK = "OK"
+    """Observed and satisfied."""
+
+    BELOW_MINIMUM = "BELOW_MINIMUM"
+    """Observed and below the required minimum (blocks)."""
+
+    NOT_OBSERVED = "NOT_OBSERVED"
+    """Not observable by this ZeAlfie release — documented, never
+    fabricated into a verdict."""
+
+    MANAGED = "MANAGED"
+    """Managed by the runtime closure, not required from the host."""
+
+    @property
+    def display(self) -> str:
+        """User-facing label (never the raw enum name in UI output)."""
+        return {
+            HostPrerequisiteStatus.OK: "ok",
+            HostPrerequisiteStatus.BELOW_MINIMUM: "below minimum",
+            HostPrerequisiteStatus.NOT_OBSERVED: "not observed",
+            HostPrerequisiteStatus.MANAGED: "managed",
+        }[self]
+
+
+@dataclass(frozen=True, slots=True)
+class HostPrerequisiteEntry:
+    """One classified prerequisite line of a backend closure.
+
+    ``entry`` names the host-side condition (e.g. ``nvidia-driver``) or
+    a managed distribution; ``requirement`` is the exact requirement
+    text; ``status`` is the honest per-entry verdict; ``observed`` is
+    the observed value (``None`` when not observed).
+    """
+
+    entry: str
+    requirement: str
+    status: HostPrerequisiteStatus
+    observed: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entry, str) or not self.entry.strip():
+            raise ValueError("entry must be a non-empty string")
+        object.__setattr__(self, "entry", self.entry.strip())
+        if not isinstance(self.requirement, str) or not self.requirement.strip():
+            raise ValueError("requirement must be a non-empty string")
+        object.__setattr__(self, "requirement", self.requirement.strip())
+        if not isinstance(self.status, HostPrerequisiteStatus):
+            raise ValueError(
+                "status must be a HostPrerequisiteStatus, "
+                f"got {type(self.status).__qualname__}"
+            )
+        observed = self.observed
+        if observed is not None:
+            if not isinstance(observed, str) or not observed.strip():
+                raise ValueError(
+                    "observed must be None or a non-empty string"
+                )
+            object.__setattr__(self, "observed", observed.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class HostPrerequisites:
+    """Host prerequisites classification for one accelerator backend.
+
+    ``required_host`` lists the host-side conditions that must already
+    hold — ZeAlfie NEVER installs host drivers or toolkits.
+    ``managed_runtime`` lists what the runtime closure manages
+    (distribution name + exact pinned version), assembled by the
+    planner from the selected variants.  ``status`` is the honest
+    verdict of the checkable checks; ``reason`` explains a BLOCKED
+    verdict.
+    """
+
+    status: HostPrerequisitesStatus
+    required_host: tuple[HostPrerequisiteEntry, ...]
+    managed_runtime: tuple[HostPrerequisiteEntry, ...]
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, HostPrerequisitesStatus):
+            raise ValueError(
+                "status must be a HostPrerequisitesStatus, "
+                f"got {type(self.status).__qualname__}"
+            )
+        required = tuple(self.required_host)
+        for entry in required:
+            if not isinstance(entry, HostPrerequisiteEntry):
+                raise ValueError(
+                    "required_host must contain HostPrerequisiteEntry "
+                    f"values, got {type(entry).__qualname__}"
+                )
+        object.__setattr__(self, "required_host", required)
+        managed = tuple(self.managed_runtime)
+        for entry in managed:
+            if not isinstance(entry, HostPrerequisiteEntry):
+                raise ValueError(
+                    "managed_runtime must contain HostPrerequisiteEntry "
+                    f"values, got {type(entry).__qualname__}"
+                )
+        object.__setattr__(self, "managed_runtime", managed)
+        reason = self.reason
+        if reason is not None:
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError(
+                    "reason must be None or a non-empty string"
+                )
+            object.__setattr__(self, "reason", reason.strip())
+
+
+#: Curated per-backend REQUIRED_HOST knowledge (2026-08-16, Phase F).
+#: Source of truth: the machine-readable closure spec
+#: ``AGENT/tmp/m1_2j_2_cuda_closure/closure_nvidia_cuda_20260816.toml``
+#: and the Phase C/D sandbox reports.  Host-side conditions only —
+#: ZeAlfie never installs drivers or toolkits.
+BACKEND_REQUIRED_HOST: dict[str, tuple[tuple[str, str], ...]] = {
+    "NVIDIA_CUDA": (
+        (
+            "nvidia-driver",
+            ">= 550.54.14 (minimum officiel CUDA 12.4, Linux x86_64)",
+        ),
+        (
+            "nvidia-gpu-cc",
+            "NVIDIA GPU Compute Capability >= 6.0 (Pascal+)",
+        ),
+    ),
+}
+
+#: Checkable driver version floor per backend (parsed against the
+#: observed ``GpuInfo.driver_version``).
+BACKEND_DRIVER_FLOORS: dict[str, str] = {
+    "NVIDIA_CUDA": "550.54.14",
+}
+
+#: Managed-runtime cost note per backend (curated sandbox measurement,
+#: 2026-08-16).  Approximate on purpose — the exact bytes are enforced
+#: by the artifact manifest, not by this note.
+BACKEND_MANAGED_RUNTIME_COST: dict[str, str] = {
+    "NVIDIA_CUDA": "~1.16 Go download / ~1.7 Go installed",
+}
+
+
+def evaluate_host_prerequisites(
+    backend: str,
+    capabilities: HostCapabilities,
+) -> HostPrerequisites:
+    """Evaluate the checkable host prerequisites for *backend* (pure).
+
+    Only observable, checkable violations decide: an NVIDIA driver
+    version that parses and is below the curated floor BLOCKs the
+    evaluation; missing or unparseable observations are recorded as
+    ``NOT_OBSERVED`` and never fabricate a verdict (absence of usable
+    drivers is already gated upstream by the recommendation).  The
+    Compute Capability floor has no observation channel in this ZeAlfie
+    release — it is documented as REQUIRED_HOST ``NOT_OBSERVED`` at plan
+    time and verified for real at activation time by the backend
+    compute probe (NVRTC compile fails on unsupported architectures).
+
+    ``managed_runtime`` is assembled by the planner (this function
+    knows nothing about the variant catalog); a backend without curated
+    knowledge returns an empty ``OK`` classification — generic backends
+    keep the previous behaviour.
+    """
+    if not isinstance(backend, str) or not backend.strip():
+        raise ValueError("backend must be a non-empty string")
+    backend = backend.strip()
+
+    required = BACKEND_REQUIRED_HOST.get(backend)
+    if not required:
+        return HostPrerequisites(
+            status=HostPrerequisitesStatus.OK,
+            required_host=(),
+            managed_runtime=(),
+            reason=None,
+        )
+
+    driver_floor = BACKEND_DRIVER_FLOORS.get(backend)
+    entries: list[HostPrerequisiteEntry] = []
+    status = HostPrerequisitesStatus.OK
+    reason: str | None = None
+
+    for entry_name, requirement in required:
+        if entry_name == "nvidia-driver" and driver_floor is not None:
+            entry, below = _evaluate_driver_prerequisite(
+                entry_name, requirement, driver_floor, capabilities
+            )
+            entries.append(entry)
+            if below:
+                status = HostPrerequisitesStatus.BLOCKED
+                reason = (
+                    f"host prerequisite not satisfied for {backend}: "
+                    f"nvidia-driver {entry.observed} does not meet "
+                    f">= {driver_floor} (minimum officiel CUDA 12.4, "
+                    "Linux x86_64)"
+                )
+        else:
+            entries.append(
+                HostPrerequisiteEntry(
+                    entry=entry_name,
+                    requirement=requirement,
+                    status=HostPrerequisiteStatus.NOT_OBSERVED,
+                )
+            )
+
+    return HostPrerequisites(
+        status=status,
+        required_host=tuple(entries),
+        managed_runtime=(),
+        reason=reason,
+    )
+
+
+def _evaluate_driver_prerequisite(
+    entry: str,
+    requirement: str,
+    floor: str,
+    capabilities: HostCapabilities,
+) -> tuple[HostPrerequisiteEntry, bool]:
+    """Check observed NVIDIA driver versions against *floor*."""
+    try:
+        floor_version = Version(floor)
+    except InvalidVersion:
+        return (
+            HostPrerequisiteEntry(
+                entry=entry,
+                requirement=requirement,
+                status=HostPrerequisiteStatus.NOT_OBSERVED,
+            ),
+            False,
+        )
+
+    observed: list[tuple[str, Version]] = []
+    for gpu in capabilities.nvidia_gpus:
+        if gpu.driver_status is not CapabilityStatus.AVAILABLE:
+            continue
+        raw = gpu.driver_version
+        if not raw:
+            continue
+        try:
+            observed.append((raw, Version(raw)))
+        except InvalidVersion:
+            continue
+
+    if not observed:
+        return (
+            HostPrerequisiteEntry(
+                entry=entry,
+                requirement=requirement,
+                status=HostPrerequisiteStatus.NOT_OBSERVED,
+            ),
+            False,
+        )
+
+    below = sorted(
+        (raw, version) for raw, version in observed if version < floor_version
+    )
+    if below:
+        return (
+            HostPrerequisiteEntry(
+                entry=entry,
+                requirement=requirement,
+                status=HostPrerequisiteStatus.BELOW_MINIMUM,
+                observed=below[0][0],
+            ),
+            True,
+        )
+    _, best_version = max(observed, key=lambda pair: pair[1])
+    best_raw = next(
+        raw for raw, version in observed if version == best_version
+    )
+    return (
+        HostPrerequisiteEntry(
+            entry=entry,
+            requirement=requirement,
+            status=HostPrerequisiteStatus.OK,
+            observed=best_raw,
+        ),
+        False,
     )
 
 

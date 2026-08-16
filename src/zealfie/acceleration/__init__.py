@@ -15,7 +15,16 @@ the plan, it is never guessed.
 """
 
 from zealfie.acceleration.compatibility import (
+    HostPrerequisiteEntry,
+    HostPrerequisites,
+    HostPrerequisitesStatus,
+    HostPrerequisiteStatus,
     evaluate_acceleration_compatibility,
+    evaluate_host_prerequisites,
+)
+from zealfie.acceleration.backend_probe import (
+    BACKEND_COMPUTE_PROBES,
+    get_backend_compute_probe,
 )
 from zealfie.acceleration.acquisition import (
     AcceleratedArtifactEntry,
@@ -94,10 +103,15 @@ __all__ = [
     "InvalidArtifactManifestError",
     "AcquiredAcceleratedVariant",
     "AmbiguousVariantError",
+    "BACKEND_COMPUTE_PROBES",
     "CooperativeCancellationError",
     "HardwareCompatibility",
     "HardwareCompatibilityReasonCode",
     "HardwareCompatibilityStatus",
+    "HostPrerequisiteEntry",
+    "HostPrerequisites",
+    "HostPrerequisitesStatus",
+    "HostPrerequisiteStatus",
     "KNOWN_BACKENDS",
     "ManifestAcceleratedArtifactAcquirer",
     "MissingArtifact",
@@ -118,7 +132,9 @@ __all__ = [
     "default_manifest_variant_catalog",
     "default_variant_catalog",
     "evaluate_acceleration_compatibility",
+    "evaluate_host_prerequisites",
     "extend_runtime_lock_with_acceleration",
+    "get_backend_compute_probe",
     "load_accelerated_artifact_manifest",
     "load_accelerated_artifact_manifest_file",
     "variant_catalog_from_artifact_manifest",

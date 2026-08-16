@@ -588,8 +588,18 @@ def _slot_python(slot_dir: Path) -> Path:
 
 @pytest.mark.zealfie_slow
 def test_default_gate_passes_when_installed_at_planned_version(
-    tmp_path: Path, fake_accel_wheel: Path,
+    tmp_path: Path, fake_accel_wheel: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The plan backend is NVIDIA_CUDA, whose registered compute probe
+    # imports cupy — absent from this synthetic candidate.  The compute
+    # probe behaviour is covered by dedicated tests
+    # (tests/test_acceleration_backend_probe.py and the Phase F
+    # transaction tests); here we keep this slow test focused on the
+    # distribution/version gate.
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: None,
+    )
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
     rt.create()
@@ -631,8 +641,15 @@ def test_default_gate_fails_on_missing_distribution(
 
 @pytest.mark.zealfie_slow
 def test_default_gate_fails_on_version_mismatch(
-    tmp_path: Path, fake_accel_wheel: Path,
+    tmp_path: Path, fake_accel_wheel: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Keep this slow test focused on the distribution/version gate: the
+    # NVIDIA_CUDA compute probe (cupy) cannot run in this synthetic
+    # candidate (covered separately in the Phase F probe tests).
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: None,
+    )
     layout = RuntimeLayout(root=tmp_path / "rt")
     rt = SharedRuntime(layout=layout)
     rt.create()

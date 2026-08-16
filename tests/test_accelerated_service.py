@@ -1099,7 +1099,7 @@ class _ProgressCollector:
 
 @pytest.mark.zealfie_slow
 def test_service_accelerated_full_flow(
-    tmp_path, witness_v1, fake_accel_wheel,
+    tmp_path, witness_v1, fake_accel_wheel, monkeypatch,
 ):
     """Synthetic end-to-end witness through the SERVICE.
 
@@ -1107,6 +1107,15 @@ def test_service_accelerated_full_flow(
     active slot switched, fake-accel installed at the planned version,
     accelerated-metadata.json recorded, product provenance/installed
     lock/selection UNCHANGED, and KEEP exactness (no drift)."""
+    # The default gate's backend compute probe (NVIDIA_CUDA) imports
+    # cupy, which this synthetic candidate does not carry.  The compute
+    # probe behaviour is covered by dedicated Phase F tests
+    # (tests/test_acceleration_backend_probe.py and the transaction
+    # tests); this witness stays focused on the service orchestration.
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: None,
+    )
     service, runtime, layout, store, active_before = _make_ready_service(
         tmp_path, witness_v1
     )

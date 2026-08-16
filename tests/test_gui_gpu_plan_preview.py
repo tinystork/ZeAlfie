@@ -18,6 +18,10 @@ from zealfie.acceleration import (
     AcceleratedVariant,
     HardwareCompatibility,
     HardwareCompatibilityStatus,
+    HostPrerequisiteEntry,
+    HostPrerequisites,
+    HostPrerequisitesStatus,
+    HostPrerequisiteStatus,
     PlannedAcceleratedDependency,
     PlannedKeepProduct,
     VariantStatus,
@@ -211,6 +215,64 @@ def test_preview_plan_ready_without_keep_products():
     text = "\n".join(lines)
     assert "Products concerned: zebench" in text
     assert "Planned actions: none recorded" in text
+    assert "No changes have been made yet." in text
+
+
+def test_preview_plan_ready_shows_host_prerequisites():
+    """(d) The PLAN_READY preview shows the host prerequisites
+    classification (REQUIRED_HOST + MANAGED_RUNTIME) honestly."""
+    plan = _make_plan(
+        AcceleratedPlanStatus.PLAN_READY,
+        hardware=_hardware(
+            HardwareCompatibilityStatus.SUPPORTED, "compatible"
+        ),
+        backend="NVIDIA_CUDA",
+        products_concerned=("zemosaic",),
+        closure_impact=("Add cupy-cuda12x (>=14.1.1,<15) [variant 14.1.1]",),
+        host_prerequisites=HostPrerequisites(
+            status=HostPrerequisitesStatus.OK,
+            required_host=(
+                HostPrerequisiteEntry(
+                    entry="nvidia-driver",
+                    requirement=(
+                        ">= 550.54.14 (minimum officiel CUDA 12.4, "
+                        "Linux x86_64)"
+                    ),
+                    status=HostPrerequisiteStatus.OK,
+                    observed="550.163.01",
+                ),
+                HostPrerequisiteEntry(
+                    entry="nvidia-gpu-cc",
+                    requirement=(
+                        "NVIDIA GPU Compute Capability >= 6.0 (Pascal+)"
+                    ),
+                    status=HostPrerequisiteStatus.NOT_OBSERVED,
+                ),
+            ),
+            managed_runtime=(
+                HostPrerequisiteEntry(
+                    entry="cupy-cuda12x",
+                    requirement="==14.1.1",
+                    status=HostPrerequisiteStatus.MANAGED,
+                ),
+                HostPrerequisiteEntry(
+                    entry="total",
+                    requirement="~1.16 Go download / ~1.7 Go installed",
+                    status=HostPrerequisiteStatus.MANAGED,
+                ),
+            ),
+        ),
+    )
+    lines = gpu_plan_preview_lines(plan)
+    text = "\n".join(lines)
+    assert "Host prerequisites:" in text
+    assert (
+        "- REQUIRED_HOST nvidia-driver >= 550.54.14 (minimum officiel "
+        "CUDA 12.4, Linux x86_64) (observed 550.163.01)" in text
+    )
+    assert "[not observed]" in text
+    assert "- MANAGED_RUNTIME cupy-cuda12x ==14.1.1" in text
+    assert "- MANAGED_RUNTIME total ~1.16 Go download / ~1.7 Go installed" in text
     assert "No changes have been made yet." in text
 
 

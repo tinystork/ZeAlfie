@@ -22,8 +22,12 @@ from zealfie.acceleration import (
     AcceleratedPlanStatus,
     AcceleratedVariant,
     AcceleratedVariantCatalog,
+    HardwareCompatibility,
     HardwareCompatibilityReasonCode,
     HardwareCompatibilityStatus,
+    HostPrerequisiteEntry,
+    HostPrerequisitesStatus,
+    HostPrerequisiteStatus,
     PlannedAcceleratedDependency,
     PlannedKeepProduct,
     VariantStatus,
@@ -32,6 +36,8 @@ from zealfie.acceleration import (
 from zealfie.host.models import (
     AccelerationRecommendation,
     CapabilityStatus,
+    GpuInfo,
+    GpuKind,
     HostCapabilities,
     HostReasonCode,
     RecommendationStatus,
@@ -61,6 +67,32 @@ def make_capabilities(partial: bool = False) -> HostCapabilities:
         platform_reason="os detected",
         gpus=(),
         partial=partial,
+    )
+
+
+def make_nvidia_capabilities(driver_version: str | None) -> HostCapabilities:
+    """A confident host observation with one NVIDIA GPU (synthetic)."""
+    return HostCapabilities(
+        os_name="linux",
+        cpu_arch="x86_64",
+        platform_status=CapabilityStatus.AVAILABLE,
+        platform_reason_code=HostReasonCode.OS_DETECTED,
+        platform_reason="os detected",
+        gpus=(
+            GpuInfo(
+                vendor="NVIDIA",
+                model="GeForce MX150",
+                kind=GpuKind.DISCRETE,
+                hardware_present=True,
+                driver_status=CapabilityStatus.AVAILABLE,
+                driver_version=driver_version,
+                driver_reason_code=None,
+                driver_reason=None,
+                nvidia_smi_available=True,
+                cuda_driver_present=True,
+            ),
+        ),
+        partial=False,
     )
 
 
@@ -783,3 +815,176 @@ def test_plan_status_enum_values():
         "BLOCKED",
         "UNKNOWN",
     }
+
+
+# ===========================================================================
+# ZA-M1-2J.2 Phase F — host prerequisites classification in the plan
+# ===========================================================================
+
+
+def test_plan_ready_attaches_host_prerequisites():
+    """A PLAN_READY plan attaches the host prerequisites classification:
+    driver OK (observed version), CC NOT_OBSERVED (documentary), and
+    MANAGED_RUNTIME entries for each planned distribution + cost."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        capabilities=make_nvidia_capabilities("550.163.01"),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    prereqs = plan.host_prerequisites
+    assert prereqs is not None
+    assert prereqs.status is HostPrerequisitesStatus.OK
+    assert prereqs.reason is None
+
+    required = {entry.entry: entry for entry in prereqs.required_host}
+    driver = required["nvidia-driver"]
+    assert driver.status is HostPrerequisiteStatus.OK
+    assert driver.observed == "550.163.01"
+    assert "550.54.14" in driver.requirement
+    cc = required["nvidia-gpu-cc"]
+    assert cc.status is HostPrerequisiteStatus.NOT_OBSERVED
+
+    managed = {
+        entry.entry: entry
+        for entry in prereqs.managed_runtime
+        if entry.entry != "total"
+    }
+    assert managed == {
+        "accelerated-lib": HostPrerequisiteEntry(
+            entry="accelerated-lib",
+            requirement="==1.0.0",
+            status=HostPrerequisiteStatus.MANAGED,
+        ),
+    }
+    totals = [
+        entry for entry in prereqs.managed_runtime if entry.entry == "total"
+    ]
+    assert len(totals) == 1
+    assert "download" in totals[0].requirement
+
+
+def test_driver_below_floor_blocks_plan():
+    """A checkable missing host precondition (driver below floor) =>
+    BLOCKED with the honest reason, no added requirements, no partial
+    fallback."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        capabilities=make_nvidia_capabilities("550.54.13"),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked is True
+    assert plan.backend == "NVIDIA_CUDA"
+    assert plan.added_requirements == ()
+    assert plan.target_runtime == "no new runtime required"
+    reason = plan.blocked_reason or ""
+    assert "host prerequisite not satisfied" in reason
+    assert "nvidia-driver 550.54.13" in reason
+    assert ">= 550.54.14" in reason
+    assert plan.host_prerequisites is None
+
+
+def test_driver_at_exact_floor_is_accepted():
+    """The curated floor itself (550.54.14) satisfies the check."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        capabilities=make_nvidia_capabilities("550.54.14"),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    prereqs = plan.host_prerequisites
+    assert prereqs is not None
+    driver = {
+        entry.entry: entry for entry in prereqs.required_host
+    }["nvidia-driver"]
+    assert driver.status is HostPrerequisiteStatus.OK
+    assert driver.observed == "550.54.14"
+
+
+def test_no_gpus_observed_driver_entry_not_observed_non_blocking():
+    """Synthetic hosts without GPU observation (the recommendation gates
+    real absence) get a NOT_OBSERVED driver entry — never a fabricated
+    verdict, never a spurious BLOCKED."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(variant("accelerated-lib"),)
+        ),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    prereqs = plan.host_prerequisites
+    assert prereqs is not None
+    driver = {
+        entry.entry: entry for entry in prereqs.required_host
+    }["nvidia-driver"]
+    assert driver.status is HostPrerequisiteStatus.NOT_OBSERVED
+
+
+def test_driver_floor_violation_beats_variant_lookup():
+    """Host problems win over variant problems: a driver below floor
+    BLOCKs with the host reason even when the variant catalog is empty."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        capabilities=make_nvidia_capabilities("470.161.03"),
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.added_requirements == ()
+    assert "nvidia-driver 470.161.03" in (plan.blocked_reason or "")
+
+
+def test_plan_with_host_prerequisites_validation():
+    """The plan model validates its new optional field (soft migration:
+    default None stays valid)."""
+    assert _make_none_prereq_plan().host_prerequisites is None
+    with pytest.raises(ValueError, match="host_prerequisites"):
+        AcceleratedDeploymentPlan(
+            status=AcceleratedPlanStatus.BLOCKED,
+            hardware=HardwareCompatibility(
+                status=HardwareCompatibilityStatus.BLOCKED,
+                reason_code="ACCELERATION_BLOCKED",
+                reason="blocked",
+                products_concerned=(),
+            ),
+            backend=None,
+            products_concerned=(),
+            keep_products=(),
+            added_requirements=(),
+            source_runtime_state="READY",
+            source_active_slot_id=None,
+            source_previous_slot_id=None,
+            target_runtime="no new runtime required",
+            blocked=True,
+            blocked_reason="blocked",
+            closure_impact=(),
+            host_prerequisites="not-a-HostPrerequisites",  # type: ignore[arg-type]
+        )
+
+
+def _make_none_prereq_plan() -> AcceleratedDeploymentPlan:
+    return AcceleratedDeploymentPlan(
+        status=AcceleratedPlanStatus.BLOCKED,
+        hardware=HardwareCompatibility(
+            status=HardwareCompatibilityStatus.BLOCKED,
+            reason_code="ACCELERATION_BLOCKED",
+            reason="blocked",
+            products_concerned=(),
+        ),
+        backend=None,
+        products_concerned=(),
+        keep_products=(),
+        added_requirements=(),
+        source_runtime_state="READY",
+        source_active_slot_id=None,
+        source_previous_slot_id=None,
+        target_runtime="no new runtime required",
+        blocked=True,
+        blocked_reason="blocked",
+        closure_impact=(),
+    )

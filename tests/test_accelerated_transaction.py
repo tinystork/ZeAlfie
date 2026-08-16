@@ -478,6 +478,149 @@ def test_accelerated_deployment_full_flow(
 
 
 # =============================================================================
+# ZA-M1-2J.2 Phase F — backend compute probe inside the default gate
+# =============================================================================
+
+
+def test_compute_probe_failure_blocks_before_activation(
+    tmp_path: Path, witness_v1: Path, fake_accel_wheel: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(a) Distribution/version gate OK but the backend compute probe
+    FAILS (synthetic script exit 1): the candidate is rejected BEFORE
+    activation — phase GATE, the old runtime stays the active pointer
+    and remains usable."""
+    rt, layout, _, _, dep_plan, active_before = _prepare(tmp_path, witness_v1)
+    accel_plan = _accel_plan(active_before)
+
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    acquired = _SingleWheelAcquirer(fake_accel_wheel).acquire(
+        accel_plan, work_root
+    )
+
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: {
+            "label": "synthetic failing probe",
+            "script": (
+                'import sys\n'
+                'print("BACKEND_COMPUTE_PROBE_FAIL: '
+                'RuntimeError: synthetic compute boom")\n'
+                "sys.exit(1)\n"
+            ),
+        },
+    )
+
+    result = apply_accelerated_deployment(
+        accelerated_plan=accel_plan,
+        deployment_plan=dep_plan,
+        registry=_registry(),
+        runtime=rt,
+        acquired=acquired,
+        declaring_distributions={"zewitness": "zealfie-witness"},
+        # accelerated_gate defaults to the REAL default gate — the
+        # compute probe failure must be produced by it, not injected.
+    )
+
+    assert result.success is False
+    assert result.cancelled is False
+    assert result.phase is AcceleratedDeploymentPhase.GATE
+    reason = result.reason or ""
+    assert "pre-activation gate failed:" in reason
+    assert "backend compute probe failed for NVIDIA_CUDA" in reason
+    assert "synthetic compute boom" in reason
+    assert result.old_runtime_preserved is True
+
+    # The active pointer was never switched and the old runtime is
+    # still fully usable.
+    assert rt.status().active_slot_id == active_before
+    _assert_slot_usable(layout, active_before, "zealfie-witness")
+
+
+def test_compute_probe_ok_activation_succeeds(
+    tmp_path: Path, witness_v1: Path, fake_accel_wheel: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(b) Compute probe OK => the activation goes through the REAL
+    default gate and completes."""
+    rt, layout, _, _, dep_plan, active_before = _prepare(tmp_path, witness_v1)
+    accel_plan = _accel_plan(active_before)
+
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    acquired = _SingleWheelAcquirer(fake_accel_wheel).acquire(
+        accel_plan, work_root
+    )
+
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: {
+            "label": "synthetic passing probe",
+            "script": 'print("BACKEND_COMPUTE_PROBE_OK")\n',
+        },
+    )
+
+    result = apply_accelerated_deployment(
+        accelerated_plan=accel_plan,
+        deployment_plan=dep_plan,
+        registry=_registry(),
+        runtime=rt,
+        acquired=acquired,
+        declaring_distributions={"zewitness": "zealfie-witness"},
+    )
+
+    assert result.success is True, f"accelerated deployment failed: {result.reason}"
+    assert result.phase is AcceleratedDeploymentPhase.COMPLETED
+    final = rt.status()
+    assert final.active_slot_id is not None
+    assert final.active_slot_id != active_before
+    new_python = _slot_python(layout.slot_path(final.active_slot_id))
+    accel_probe = probe_runtime_distribution(str(new_python), "fake-accel")
+    assert accel_probe["installed"] is True
+    assert accel_probe["version"] == "1.0.0"
+    _assert_slot_usable(layout, active_before, "zealfie-witness")
+
+
+def test_backend_without_probe_keeps_previous_gate_behaviour(
+    tmp_path: Path, witness_v1: Path, fake_accel_wheel: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(c) A backend without a registered compute probe keeps the
+    distribution/version-only gate — genericity preserved, activation
+    completes."""
+    rt, layout, _, _, dep_plan, active_before = _prepare(tmp_path, witness_v1)
+    accel_plan = _accel_plan(active_before)
+
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    acquired = _SingleWheelAcquirer(fake_accel_wheel).acquire(
+        accel_plan, work_root
+    )
+
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: None,
+    )
+
+    result = apply_accelerated_deployment(
+        accelerated_plan=accel_plan,
+        deployment_plan=dep_plan,
+        registry=_registry(),
+        runtime=rt,
+        acquired=acquired,
+        declaring_distributions={"zewitness": "zealfie-witness"},
+    )
+
+    assert result.success is True, f"accelerated deployment failed: {result.reason}"
+    assert result.phase is AcceleratedDeploymentPhase.COMPLETED
+    final = rt.status()
+    assert final.active_slot_id is not None
+    assert final.active_slot_id != active_before
+    _assert_slot_usable(layout, active_before, "zealfie-witness")
+
+
+# =============================================================================
 # Failure injections — every one leaves the old active slot usable
 # =============================================================================
 
@@ -614,7 +757,16 @@ def test_gate_failure_blocks_before_activation(
 
 def test_metadata_write_failure_blocks_before_activation(
     tmp_path: Path, witness_v1: Path, fake_accel_wheel: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The default gate must PASS here (the failure under test is the
+    # metadata write): the NVIDIA_CUDA compute probe cannot run in this
+    # synthetic candidate (covered separately by the Phase F probe
+    # tests).
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: None,
+    )
     rt, layout, _, _, dep_plan, active_before = _prepare(tmp_path, witness_v1)
     accel_plan = _accel_plan(active_before)
 
@@ -896,10 +1048,17 @@ class _ActivationFailingRuntime:
 
 def test_activation_failure_preserves_active_runtime(
     tmp_path: Path, witness_v1: Path, fake_accel_wheel: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Activation failure (I.7 case 7): the orchestrator reports
     success=False at phase ACTIVATE and the previously active slot
     stays the active pointer — untouched and still usable."""
+    # Default gate must reach ACTIVATE: disable the NVIDIA_CUDA compute
+    # probe (covered separately by the Phase F probe tests).
+    monkeypatch.setattr(
+        "zealfie.acceleration.deployment.get_backend_compute_probe",
+        lambda backend: None,
+    )
     rt, layout, _, _, dep_plan, active_before = _prepare(tmp_path, witness_v1)
     accel_plan = _accel_plan(active_before)
 

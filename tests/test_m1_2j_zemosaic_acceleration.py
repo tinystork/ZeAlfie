@@ -1,10 +1,12 @@
-"""ZA-M1-2J Phases C+D+E — ZeMosaic real acceleration contract, real
-artifact source, and targeted tests (matrix A–R).
+"""ZA-M1-2J Phases C+D+E + ZA-M1-2J.2 Phase F — ZeMosaic real
+acceleration contract, real artifact source, and targeted tests
+(matrix A–R + closure coherence / host prerequisites).
 
 Covers:
 
-* the packaged catalog contract for ``zemosaic`` (NVIDIA_CUDA,
-  cupy-cuda12x + fastrlock, optional, anti-drift snapshot 9A);
+* the packaged catalog contract for ``zemosaic`` (NVIDIA_CUDA, the
+  10-distribution CUDA runtime closure — fastrlock deliberately absent,
+  optional, anti-drift snapshot 9A + closure table);
 * planning outcomes for every hardware/requirement combination
   (fail-closed, CPU closure preserved);
 * the manifest-backed variant catalog and artifact acquirer
@@ -43,6 +45,8 @@ from zealfie.acceleration import (
     HardwareCompatibility,
     HardwareCompatibilityReasonCode,
     HardwareCompatibilityStatus,
+    HostPrerequisitesStatus,
+    HostPrerequisiteStatus,
     ManifestAcceleratedArtifactAcquirer,
     MissingArtifact,
     PlatformMismatch,
@@ -54,6 +58,7 @@ from zealfie.acceleration import (
     VariantStatus,
     VersionMismatch,
     build_accelerated_deployment_plan,
+    default_accelerated_artifact_manifest,
     default_manifest_variant_catalog,
     load_accelerated_artifact_manifest,
 )
@@ -202,7 +207,8 @@ def _build_real_plan(
 
 def test_A_contract_parses_from_default_catalog():
     """A. The packaged catalog parses the zemosaic acceleration contract:
-    backend NVIDIA_CUDA, optional, exact requirements."""
+    backend NVIDIA_CUDA, optional, the full 10-distribution CUDA runtime
+    closure (Phase F) — fastrlock deliberately absent."""
     desc = default_catalog().get("zemosaic")
     acc = desc.acceleration
     assert acc is not None
@@ -211,9 +217,35 @@ def test_A_contract_parses_from_default_catalog():
     assert acc.optional is True
     assert acc.incompatibilities == ()
     requirements = {r.distribution: r for r in acc.requirements}
-    assert set(requirements) == {"cupy-cuda12x", "fastrlock"}
-    assert requirements["cupy-cuda12x"].specifier == ">=13.4.0,<14"
-    assert requirements["fastrlock"].specifier == ">=0.5,<1"
+    assert set(requirements) == {
+        "cupy-cuda12x",
+        "cuda-pathfinder",
+        "nvidia-cuda-runtime-cu12",
+        "nvidia-cuda-nvrtc-cu12",
+        "nvidia-cublas-cu12",
+        "nvidia-cufft-cu12",
+        "nvidia-cusparse-cu12",
+        "nvidia-curand-cu12",
+        "nvidia-cusolver-cu12",
+        "nvidia-nvjitlink-cu12",
+    }
+    assert requirements["cupy-cuda12x"].specifier == ">=14.1.1,<15"
+    assert requirements["cuda-pathfinder"].specifier == ">=1.3.4,<2"
+    assert (
+        requirements["nvidia-cuda-runtime-cu12"].specifier == "==12.4.127"
+    )
+    assert (
+        requirements["nvidia-cuda-nvrtc-cu12"].specifier == "==12.4.127"
+    )
+    assert requirements["nvidia-cublas-cu12"].specifier == "==12.4.5.8"
+    assert requirements["nvidia-cufft-cu12"].specifier == "==11.2.1.3"
+    assert requirements["nvidia-cusparse-cu12"].specifier == "==12.3.1.170"
+    assert requirements["nvidia-curand-cu12"].specifier == "==10.3.5.147"
+    assert requirements["nvidia-cusolver-cu12"].specifier == "==11.6.1.9"
+    assert (
+        requirements["nvidia-nvjitlink-cu12"].specifier == "==12.4.127"
+    )
+    assert "fastrlock" not in requirements
 
 
 def test_B_catalog_without_contract_plan_no_accelerated_requirements():
@@ -256,13 +288,47 @@ def test_E_plan_specifiers_exact():
     """E. Merged specifiers are exactly the declared contract values."""
     plan = _build_real_plan()
     by_distribution = {e.distribution: e for e in plan.added_requirements}
-    assert set(by_distribution) == {"cupy-cuda12x", "fastrlock"}
-    assert by_distribution["cupy-cuda12x"].specifier == ">=13.4.0,<14"
-    assert by_distribution["fastrlock"].specifier == ">=0.5,<1"
+    assert set(by_distribution) == {
+        "cupy-cuda12x",
+        "cuda-pathfinder",
+        "nvidia-cuda-runtime-cu12",
+        "nvidia-cuda-nvrtc-cu12",
+        "nvidia-cublas-cu12",
+        "nvidia-cufft-cu12",
+        "nvidia-cusparse-cu12",
+        "nvidia-curand-cu12",
+        "nvidia-cusolver-cu12",
+        "nvidia-nvjitlink-cu12",
+    }
+    assert by_distribution["cupy-cuda12x"].specifier == ">=14.1.1,<15"
     assert by_distribution["cupy-cuda12x"].variant is not None
-    assert by_distribution["cupy-cuda12x"].variant.version == "13.6.0"
-    assert by_distribution["fastrlock"].variant is not None
-    assert by_distribution["fastrlock"].variant.version == "0.8.3"
+    assert by_distribution["cupy-cuda12x"].variant.version == "14.1.1"
+    assert by_distribution["cuda-pathfinder"].variant is not None
+    assert by_distribution["cuda-pathfinder"].variant.version == "1.6.0"
+    assert (
+        by_distribution["nvidia-cuda-runtime-cu12"].variant.version
+        == "12.4.127"
+    )
+    assert (
+        by_distribution["nvidia-cuda-nvrtc-cu12"].variant.version
+        == "12.4.127"
+    )
+    assert by_distribution["nvidia-cublas-cu12"].variant.version == "12.4.5.8"
+    assert by_distribution["nvidia-cufft-cu12"].variant.version == "11.2.1.3"
+    assert (
+        by_distribution["nvidia-cusparse-cu12"].variant.version
+        == "12.3.1.170"
+    )
+    assert (
+        by_distribution["nvidia-curand-cu12"].variant.version == "10.3.5.147"
+    )
+    assert (
+        by_distribution["nvidia-cusolver-cu12"].variant.version == "11.6.1.9"
+    )
+    assert (
+        by_distribution["nvidia-nvjitlink-cu12"].variant.version
+        == "12.4.127"
+    )
     assert all(
         entry.variant_status is VariantStatus.SELECTED
         for entry in plan.added_requirements
@@ -526,6 +592,17 @@ def test_L_python_tag_mismatch_rejected(tmp_path):
     acquirer = _acquirer(manifest, python_tag="cp313")
     with pytest.raises(PlatformMismatch):
         acquirer.acquire(_plan(), tmp_path / "work")
+
+
+def test_L_python_tag_py3_accepted_on_cp313(tmp_path):
+    """L (python coherence, Phase F). A ``py3``-tagged artifact (the
+    closure's nvidia-*-cu12 wheels) is accepted on a ``cp313``
+    interpreter — ``py3-none`` wheels are version-independent."""
+    manifest = _manifest(_file_url(FAKE_WHEEL_PATH), python="py3")
+    acquirer = _acquirer(manifest, python_tag="cp313")
+    acquired = acquirer.acquire(_plan(), tmp_path / "work")
+    assert len(acquired) == 1
+    assert acquired[0].distribution == "fake-accel"
 
 
 def test_O_acquisition_writes_only_under_work_root(tmp_path):
@@ -855,7 +932,7 @@ def test_R_second_product_merges_by_distribution():
             optional=True,
             requirements=(
                 AcceleratedRequirement(
-                    distribution="cupy-cuda12x", specifier=">=13.4"
+                    distribution="cupy-cuda12x", specifier=">=14.1"
                 ),
             ),
         ),
@@ -865,13 +942,11 @@ def test_R_second_product_merges_by_distribution():
     assert plan.status is AcceleratedPlanStatus.PLAN_READY
     by_distribution = {e.distribution: e for e in plan.added_requirements}
     assert "cupy-cuda12x" in by_distribution
-    assert "fastrlock" in by_distribution
     cupy = by_distribution["cupy-cuda12x"]
     assert cupy.declaring_products == ("zefake2", "zemosaic")
-    assert cupy.specifier == ">=13.4, >=13.4.0,<14"
+    assert cupy.specifier == ">=14.1, >=14.1.1,<15"
     assert cupy.variant is not None
-    assert cupy.variant.version == "13.6.0"
-    assert by_distribution["fastrlock"].declaring_products == ("zemosaic",)
+    assert cupy.variant.version == "14.1.1"
 
 
 # =============================================================================
@@ -911,13 +986,215 @@ def test_variant_catalog_from_manifest_matches_packaged_manifest():
     catalog = default_manifest_variant_catalog()
     cupy = catalog.find_variant("cupy-cuda12x", "NVIDIA_CUDA", "linux_x86_64")
     assert cupy is not None
-    assert cupy.version == "13.6.0"
+    assert cupy.version == "14.1.1"
     assert cupy.sha256 == (
-        "52d9e7f83d920da7d81ec2e791c2c2c747fdaa1d7b811971b34865ce6371e98a"
+        "76ea35469e2aa0a8332b88f72505ea2f7871a0bc8f9b0c87184f57e47c9aa3bf"
     )
-    lock = catalog.find_variant("fastrlock", "NVIDIA_CUDA", "linux_x86_64")
-    assert lock is not None
-    assert lock.version == "0.8.3"
-    assert lock.sha256 == (
-        "dbdea6deeccea1917c6017d353987231c4e46c93d5338ca3e66d6cd88fbce259"
+    pathfinder = catalog.find_variant(
+        "cuda-pathfinder", "NVIDIA_CUDA", "linux_x86_64"
     )
+    assert pathfinder is not None
+    assert pathfinder.version == "1.6.0"
+    assert pathfinder.sha256 == (
+        "1503af579d8379c24bdd65528379bc57039b0455be9f5f9686cf8e473a1fce51"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-cuda-nvrtc-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "12.4.127"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-cuda-runtime-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "12.4.127"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-cublas-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "12.4.5.8"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-cufft-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "11.2.1.3"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-cusparse-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "12.3.1.170"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-curand-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "10.3.5.147"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-cusolver-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "11.6.1.9"
+    )
+    assert (
+        catalog.find_variant(
+            "nvidia-nvjitlink-cu12", "NVIDIA_CUDA", "linux_x86_64"
+        ).version
+        == "12.4.127"
+    )
+    assert (
+        catalog.find_variant("fastrlock", "NVIDIA_CUDA", "linux_x86_64")
+        is None
+    )
+
+
+# =============================================================================
+# ZA-M1-2J.2 Phase F — closure coherence, host prerequisites, honest BLOCKED
+# =============================================================================
+
+CLOSURE = {
+    "cupy-cuda12x": "14.1.1",
+    "cuda-pathfinder": "1.6.0",
+    "nvidia-cuda-runtime-cu12": "12.4.127",
+    "nvidia-cuda-nvrtc-cu12": "12.4.127",
+    "nvidia-cublas-cu12": "12.4.5.8",
+    "nvidia-cufft-cu12": "11.2.1.3",
+    "nvidia-cusparse-cu12": "12.3.1.170",
+    "nvidia-curand-cu12": "10.3.5.147",
+    "nvidia-cusolver-cu12": "11.6.1.9",
+    "nvidia-nvjitlink-cu12": "12.4.127",
+}
+
+
+def test_manifest_parses_full_closure_ten_artifacts():
+    """(e) The packaged manifest parses the new closure: exactly 10
+    artifacts, each sha256 exactly 64 hex, python tags coherent
+    (cp313 for cupy-cuda12x, py3 for the rest)."""
+    manifest = default_accelerated_artifact_manifest()
+    assert len(manifest.entries) == 10
+    by_distribution = {e.distribution: e for e in manifest.entries}
+    assert set(by_distribution) == set(CLOSURE)
+    for distribution, version in CLOSURE.items():
+        entry = by_distribution[distribution]
+        assert entry.version == version
+        assert len(entry.sha256) == 64
+    assert by_distribution["cupy-cuda12x"].python == "cp313"
+    for distribution in CLOSURE:
+        if distribution != "cupy-cuda12x":
+            assert by_distribution[distribution].python == "py3"
+    assert "fastrlock" not in by_distribution
+
+
+def test_manifest_variant_catalog_has_ten_variants():
+    """(e) The variant catalog derived from the manifest resolves all 10
+    closure distributions (and nothing for fastrlock)."""
+    catalog = default_manifest_variant_catalog()
+    assert len(catalog.variants) == 10
+    for distribution, version in CLOSURE.items():
+        variant = catalog.find_variant(
+            distribution, "NVIDIA_CUDA", "linux_x86_64"
+        )
+        assert variant is not None, distribution
+        assert variant.version == version
+
+
+def test_anti_drift_closure_snapshot_matches_manifest():
+    """(e) The Phase F closure table in the anti-drift snapshot matches
+    the packaged manifest exactly (distributions, versions, and the
+    total download bytes = the sum of the manifest sizes)."""
+    import tomllib
+
+    snapshot = tomllib.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    closure = snapshot["accelerated_closure"]
+    snapshot_distributions = {}
+    for line in closure["distributions"]:
+        distribution, _, version = line.partition("==")
+        distribution = distribution.strip()
+        version = version.strip()
+        snapshot_distributions[distribution] = version
+    assert snapshot_distributions == CLOSURE
+
+    manifest = default_accelerated_artifact_manifest()
+    assert sum(entry.size for entry in manifest.entries) == (
+        closure["total_download_bytes"]
+    )
+
+
+def test_plan_ready_carries_host_prerequisites_classification():
+    """(d) A PLAN_READY plan for the real contract carries the host
+    prerequisites classification: REQUIRED_HOST (driver OK observed,
+    CC documented NOT_OBSERVED) + MANAGED_RUNTIME listing the whole
+    10-distribution closure with exact pins and the cost note."""
+    plan = _build_real_plan()
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    prereqs = plan.host_prerequisites
+    assert prereqs is not None
+    assert prereqs.status is HostPrerequisitesStatus.OK
+
+    required = {entry.entry: entry for entry in prereqs.required_host}
+    driver = required["nvidia-driver"]
+    assert driver.status is HostPrerequisiteStatus.OK
+    assert driver.observed == "550.163.01"
+    assert "550.54.14" in driver.requirement
+    cc = required["nvidia-gpu-cc"]
+    assert cc.status is HostPrerequisiteStatus.NOT_OBSERVED
+    assert "6.0" in cc.requirement
+
+    managed = {
+        entry.entry: entry
+        for entry in prereqs.managed_runtime
+        if entry.entry != "total"
+    }
+    assert set(managed) == set(CLOSURE)
+    for distribution, version in CLOSURE.items():
+        assert managed[distribution].requirement == f"=={version}"
+        assert managed[distribution].status is HostPrerequisiteStatus.MANAGED
+    totals = [
+        entry for entry in prereqs.managed_runtime if entry.entry == "total"
+    ]
+    assert len(totals) == 1
+    assert "download" in totals[0].requirement
+
+
+def test_driver_below_floor_blocks_plan_honestly():
+    """(d) A missing host precondition (observed driver below the
+    550.54.14 floor) => BLOCKED — never PLAN_READY — with the honest
+    reason naming the observed version."""
+    old_driver = _nvidia_gpu()
+    import dataclasses
+
+    old_driver = dataclasses.replace(old_driver, driver_version="550.54.13")
+    caps = _caps(gpus=(old_driver,))
+    plan = _build_real_plan(caps=caps)
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked is True
+    assert plan.added_requirements == ()
+    assert plan.target_runtime == "no new runtime required"
+    reason = plan.blocked_reason or ""
+    assert "host prerequisite" in reason
+    assert "nvidia-driver 550.54.13" in reason
+    assert "550.54.14" in reason
+
+
+def test_driver_version_absent_never_fabricates_verdict():
+    """A driver whose version was not observed is documented NOT_OBSERVED
+    and never fabricates a BLOCKED verdict (absence of a usable driver
+    is gated upstream by the recommendation)."""
+    no_version = _nvidia_gpu()
+    import dataclasses
+
+    no_version = dataclasses.replace(no_version, driver_version=None)
+    caps = _caps(gpus=(no_version,))
+    plan = _build_real_plan(caps=caps)
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    prereqs = plan.host_prerequisites
+    assert prereqs is not None
+    driver = {
+        entry.entry: entry for entry in prereqs.required_host
+    }["nvidia-driver"]
+    assert driver.status is HostPrerequisiteStatus.NOT_OBSERVED
+    assert driver.observed is None

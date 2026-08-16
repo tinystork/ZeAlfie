@@ -19,6 +19,10 @@ from zealfie.acceleration import (
     AcceleratedVariant,
     HardwareCompatibility,
     HardwareCompatibilityStatus,
+    HostPrerequisiteEntry,
+    HostPrerequisites,
+    HostPrerequisitesStatus,
+    HostPrerequisiteStatus,
     PlannedAcceleratedDependency,
     PlannedKeepProduct,
     VariantStatus,
@@ -245,6 +249,104 @@ def test_gpu_plan_blocked_exits_zero_with_reason(monkeypatch):
     assert "Status: BLOCKED" in output
     assert "Blocked: nvidia driver too old" in output
     assert "Hardware status: BLOCKED" in output
+
+
+# ===========================================================================
+# Phase F: host prerequisites + closure visible in the preview
+# ===========================================================================
+
+
+def _prereq_ready_plan() -> AcceleratedDeploymentPlan:
+    """A PLAN_READY plan carrying the Phase F host prerequisites
+    classification (driver OK observed, CC NOT_OBSERVED, two managed
+    closure distributions + cost note)."""
+    return _make_plan(
+        AcceleratedPlanStatus.PLAN_READY,
+        hardware=_hardware_compatibility(
+            HardwareCompatibilityStatus.SUPPORTED,
+            "host acceleration is compatible with all declared product "
+            "requirements",
+        ),
+        backend="NVIDIA_CUDA",
+        products_concerned=("zemosaic",),
+        added_requirements=(
+            PlannedAcceleratedDependency(
+                distribution="cupy-cuda12x",
+                specifier=">=14.1.1,<15",
+                extras=(),
+                declaring_products=("zemosaic",),
+                variant=AcceleratedVariant(
+                    distribution="cupy-cuda12x",
+                    version="14.1.1",
+                    backend="NVIDIA_CUDA",
+                    platform="linux_x86_64",
+                ),
+                variant_status=VariantStatus.SELECTED,
+            ),
+        ),
+        target_runtime="new shared runtime slot with accelerated "
+        "NVIDIA_CUDA closure",
+        closure_impact=("Add cupy-cuda12x (>=14.1.1,<15) [variant 14.1.1]",),
+        host_prerequisites=HostPrerequisites(
+            status=HostPrerequisitesStatus.OK,
+            required_host=(
+                HostPrerequisiteEntry(
+                    entry="nvidia-driver",
+                    requirement=(
+                        ">= 550.54.14 (minimum officiel CUDA 12.4, "
+                        "Linux x86_64)"
+                    ),
+                    status=HostPrerequisiteStatus.OK,
+                    observed="550.163.01",
+                ),
+                HostPrerequisiteEntry(
+                    entry="nvidia-gpu-cc",
+                    requirement=(
+                        "NVIDIA GPU Compute Capability >= 6.0 (Pascal+)"
+                    ),
+                    status=HostPrerequisiteStatus.NOT_OBSERVED,
+                ),
+            ),
+            managed_runtime=(
+                HostPrerequisiteEntry(
+                    entry="cupy-cuda12x",
+                    requirement="==14.1.1",
+                    status=HostPrerequisiteStatus.MANAGED,
+                ),
+                HostPrerequisiteEntry(
+                    entry="total",
+                    requirement="~1.16 Go download / ~1.7 Go installed",
+                    status=HostPrerequisiteStatus.MANAGED,
+                ),
+            ),
+        ),
+    )
+
+
+def test_gpu_plan_ready_shows_host_prerequisites(monkeypatch):
+    """(d) The PLAN_READY preview shows the host prerequisites
+    classification: REQUIRED_HOST entries with observed driver and the
+    honest NOT_OBSERVED marker, plus MANAGED_RUNTIME closure entries."""
+    service = _FakePlanService(plan=_prereq_ready_plan())
+    monkeypatch.setattr(cli, "_make_service", lambda: service)
+    stdout = StringIO()
+    code = cli.run(["system", "gpu-plan"], stdout=stdout)
+    assert code == 0
+    output = stdout.getvalue()
+    assert "Host prerequisites:" in output
+    assert (
+        "- REQUIRED_HOST nvidia-driver >= 550.54.14 (minimum officiel "
+        "CUDA 12.4, Linux x86_64) (observed 550.163.01)" in output
+    )
+    assert (
+        "- REQUIRED_HOST nvidia-gpu-cc NVIDIA GPU Compute Capability "
+        ">= 6.0 (Pascal+) [not observed]" in output
+    )
+    assert "- MANAGED_RUNTIME cupy-cuda12x ==14.1.1" in output
+    assert (
+        "- MANAGED_RUNTIME total ~1.16 Go download / ~1.7 Go installed"
+        in output
+    )
 
 
 # ===========================================================================

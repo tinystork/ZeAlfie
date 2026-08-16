@@ -38,7 +38,7 @@ from .app import (
     format_status,
     startup_message,
 )
-from .acceleration import AcceleratedPlanStatus
+from .acceleration import AcceleratedPlanStatus, HostPrerequisiteStatus
 from .app.install_defaults import default_install_work_root
 from .components import UnknownComponentError, default_registry
 from .launching import LaunchError, LaunchResult
@@ -726,6 +726,25 @@ def _format_accelerated_deployment_plan(plan) -> str:
             )
     else:
         lines.append(" Accelerated dependencies: none")
+    if plan.host_prerequisites is not None:
+        lines.append(" Host prerequisites:")
+        for entry in plan.host_prerequisites.required_host:
+            observed = (
+                f" (observed {entry.observed})" if entry.observed else ""
+            )
+            status = (
+                ""
+                if entry.status is HostPrerequisiteStatus.OK
+                else f" [{entry.status.display}]"
+            )
+            lines.append(
+                f"  - REQUIRED_HOST {entry.entry} "
+                f"{entry.requirement}{observed}{status}"
+            )
+        for entry in plan.host_prerequisites.managed_runtime:
+            lines.append(
+                f"  - MANAGED_RUNTIME {entry.entry} {entry.requirement}"
+            )
     if plan.blocked:
         lines.append(f" Blocked: {plan.blocked_reason or 'yes'}")
     if plan.closure_impact:

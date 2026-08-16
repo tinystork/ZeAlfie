@@ -29,9 +29,14 @@ produced by M1-2H into a real new shared runtime, transactionally:
 
 Architectural invariant — ZeAlfie NEVER selects a concrete accelerated
 framework.  The gate performs stdlib-only distribution/version probes
-inside the candidate venv; backend importability is NOT tested by the
-default gate (it cannot be tested without real hardware — the human
-gate covers it).
+inside the candidate venv and, when the plan's backend declares a
+compute probe in the :mod:`zealfie.acceleration.backend_probe` registry,
+runs that self-contained probe with the candidate interpreter as a
+final pre-activation check (real import + device compute + JIT kernel —
+the M1-2J.1 lesson: a green install is not a green compute path).  A
+backend without a registered probe keeps the distribution/version-only
+behaviour.  The probe scripts live in the registry only — this module
+stays generic and never names a concrete framework.
 
 Metadata note: the observational record is written under
 ``txn.candidate_slot_id`` inside ``pre_activate``.  That IS the final
@@ -45,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -59,6 +65,7 @@ from zealfie.acceleration.planning import (
     AcceleratedDeploymentPlan,
     AcceleratedPlanStatus,
 )
+from zealfie.acceleration.backend_probe import get_backend_compute_probe
 from zealfie.common import normalise_distribution_name
 from zealfie.dependencies.models import LockedDependency, RuntimeLock
 from zealfie.runtime.deployment import (
@@ -423,7 +430,7 @@ class AcceleratedGate(Protocol):
 
 
 class _DefaultGate:
-    """Default gate: stdlib-only distribution/version probes.
+    """Default gate: distribution/version probes + backend compute probe.
 
     Runs entirely through the candidate's own Python interpreter with a
     standard-library-only probe script (no third-party imports),
@@ -431,8 +438,17 @@ class _DefaultGate:
     semantics, and verifies each planned accelerated distribution is
     installed at the planned (variant) version.
 
-    Backend importability is NOT tested here — it cannot be tested
-    without real hardware; the human gate covers it.
+    After the distribution/version checks pass, when the plan's backend
+    has a registered compute probe
+    (:func:`~zealfie.acceleration.backend_probe.get_backend_compute_probe`),
+    the gate executes that self-contained script with the candidate
+    interpreter (stdin, bounded timeout, truncated output): the probe
+    imports the accelerated framework, performs real device compute and
+    compiles + launches a JIT kernel, printing ``BACKEND_COMPUTE_PROBE_OK``
+    on success.  A non-zero exit, a timeout, or a missing OK marker
+    fails the gate BEFORE activation (the M1-2J.1 lesson: a green
+    install is not a green compute path).  A backend without a probe
+    keeps the distribution/version-only behaviour.
     """
 
     def check(
@@ -468,6 +484,14 @@ class _DefaultGate:
                     f"version mismatch: expected {variant.version!r}, "
                     f"got {installed_version!r}"
                 )
+        if plan.backend is not None:
+            probe = get_backend_compute_probe(plan.backend)
+            if probe is not None:
+                error = _run_backend_compute_probe(
+                    candidate_python, plan.backend, probe
+                )
+                if error is not None:
+                    return error
         return None
 
     def __call__(
@@ -480,6 +504,75 @@ def default_accelerated_gate() -> AcceleratedGate:
     """Return the default accelerated compatibility gate."""
     return _DefaultGate()
 
+
+# ---------------------------------------------------------------------------
+# Backend compute probe execution (generic — no framework knowledge here)
+# ---------------------------------------------------------------------------
+
+#: Upper bound for one compute probe run inside the candidate venv.
+#: The real CUDA probe finishes in seconds on supported hardware; the
+#: bound only guards against pathological hangs (JIT compiler stalls,
+#: deadlocked drivers) — a timeout fails the gate, never hangs the
+#: deployment.
+COMPUTE_PROBE_TIMEOUT_SECONDS: float = 300.0
+
+#: Characters of combined stdout/stderr kept in gate error messages.
+_COMPUTE_PROBE_OUTPUT_TAIL = 500
+
+
+def _run_backend_compute_probe(
+    candidate_python: str,
+    backend: str,
+    probe: Mapping[str, str],
+    *,
+    timeout: float = COMPUTE_PROBE_TIMEOUT_SECONDS,
+) -> str | None:
+    """Run a registered compute probe with the candidate interpreter.
+
+    The script is fed through stdin (``<candidate_python> -``); nothing
+    is written to disk and no ZeAlfie code is imported.  Returns
+    ``None`` when the probe succeeded (exit 0 AND the
+    ``BACKEND_COMPUTE_PROBE_OK`` marker present — an empty silent
+    success is never trusted), or an honest error string otherwise.
+    """
+    label = str(probe.get("label") or "unnamed compute probe").strip()
+    script = probe.get("script")
+    if not isinstance(script, str) or not script.strip():
+        return f"backend compute probe for {backend} ({label}) has no script"
+
+    try:
+        completed = subprocess.run(
+            [candidate_python, "-"],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            f"backend compute probe timed out for {backend} ({label}) "
+            f"after {timeout:g}s"
+        )
+    except OSError as exc:
+        return (
+            f"backend compute probe could not start for {backend} "
+            f"({label}): {exc}"
+        )
+
+    combined = ((completed.stdout or "") + (completed.stderr or "")).strip()
+    if completed.returncode == 0 and "BACKEND_COMPUTE_PROBE_OK" in combined:
+        return None
+    return (
+        f"backend compute probe failed for {backend} ({label}) "
+        f"(exit {completed.returncode}): {_tail(combined)}"
+    )
+
+
+def _tail(text: str, limit: int = _COMPUTE_PROBE_OUTPUT_TAIL) -> str:
+    """Keep the last *limit* characters of *text* (truncation marker)."""
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:]
 
 # ---------------------------------------------------------------------------
 # Observational slot metadata
