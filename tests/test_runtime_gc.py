@@ -348,8 +348,13 @@ def test_case11_absent_slot_with_stale_metadata_blocks(tmp_path):
 def test_case12_stale_plan_rejected(tmp_path):
     root = _ready_fixture(tmp_path)
     plan = build_gc_plan(root)
-    # Mutate the state after planning (adds a file → slot dir mtime changes).
-    (root / "slots" / ORPHAN / "late.bin").write_bytes(b"x")
+    # Mutate the state after planning by adding a NEW entry to slots/.
+    # A new entry NAME is seen immediately by listdir on every filesystem.
+    # Mutating INSIDE an existing slot (e.g. adding a file) only bumps
+    # that slot dir's mtime_ns, which some filesystems (ext4) expose with
+    # a delay (~50 ms or more) — the fresh plan could miss the mutation
+    # and the stale check would not fire (flaky, multi-FS dependent).
+    (root / "slots" / "rt-abcdef012345").mkdir()
     result = apply_gc_plan(root, plan)
     assert result.stale is True
     assert result.deleted_slots == ()
@@ -699,7 +704,11 @@ def test_fingerprint_deterministic(tmp_path):
     plan2 = build_gc_plan(root)
     assert plan1.state_fingerprint == plan2.state_fingerprint
     assert len(plan1.state_fingerprint) == 64  # sha256 hex
-    (root / "slots" / ORPHAN / "new.bin").write_bytes(b"x")
+    # Mutate the slots/ ENTRY SET: entry names are seen immediately by
+    # listdir on every filesystem (an inner-slot mutation only bumps the
+    # slot dir's mtime_ns, which is delayed on some filesystems — see
+    # test_case12_stale_plan_rejected).
+    (root / "slots" / "rt-abcdef012345").mkdir()
     plan3 = build_gc_plan(root)
     assert plan3.state_fingerprint != plan1.state_fingerprint
 
@@ -831,7 +840,12 @@ def test_cli_gc_stale_exits_2(tmp_path, monkeypatch):
     root = _ready_fixture(tmp_path)
     monkeypatch.setenv("ZEALFIE_RUNTIME_ROOT", str(root))
     stale_plan = build_gc_plan(root)
-    (root / "slots" / ORPHAN / "late.bin").write_bytes(b"x")  # mutate
+    # Mutate the slots/ ENTRY SET (new slot dir), not the inside of an
+    # existing slot: entry names are visible to listdir immediately on
+    # every filesystem, whereas an inner mutation only bumps the slot
+    # dir's mtime_ns, which is delayed on some filesystems (ext4) — see
+    # test_case12_stale_plan_rejected for the rationale.
+    (root / "slots" / "rt-abcdef012345").mkdir()
     monkeypatch.setattr(cli, "build_gc_plan", lambda _root: stale_plan)
     stdout = StringIO()
     code = cli.run(["runtime", "gc"], stdout=stdout)

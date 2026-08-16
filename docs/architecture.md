@@ -1758,3 +1758,32 @@ for slot pruning, designed from the Phase A lifecycle audit.
 `reclaimed_bytes` is documented as an **estimate** (sum of `lstat`
 `st_size` over a `followlinks=False` walk; symlinks counted by link size,
 never traversed).
+
+### GC state fingerprint — scope and limits
+
+The `state_fingerprint` (sha256) hashes the 4 state records **by
+content** (reliable: any byte change in `active.json`,
+`installed-lock.json`, `product-provenance.json`, or
+`accelerated-metadata.json` changes the fingerprint) and the `slots/`
+entries by their `(name, mtime_ns, size)` triple.  The slot-entry part is
+**best-effort**: it detects new/removed/renamed slot entries and any
+change to a slot directory's own `mtime_ns`/size, but a mutation
+**inside** an existing slot is only seen through that slot dir's
+`mtime_ns`, whose update granularity is filesystem-dependent (e.g. ext4
+can expose directory `mtime_ns` updates with a ~50 ms delay, while tmpfs
+updates immediately).  A stale-check running immediately after such an
+inner mutation can therefore, in the worst case, miss it.
+
+This limit has **no security impact**:
+
+* slot classification never reads slot *contents* (only the 4 records
+  and the `slots/` entry set — `_estimate_slot_bytes` walks metadata
+  only); the fingerprint cannot be bypassed to delete something the
+  records still protect, because the fresh plan's categories and the
+  per-deletion active/previous guards are recomputed from disk;
+* new/removed slot entry **names** are seen by `listdir` immediately on
+  all filesystems, so entry-set mutations are always detected;
+* no production code writes into an existing slot — slots are immutable
+  after build: the deployment engine refuses to reuse an existing
+  candidate path (`src/zealfie/runtime/deployment.py:284-288`), so the
+  undetectable inner-mutation window has no legitimate producer.
