@@ -470,6 +470,16 @@ Install outcomes are structured: ``INSTALLED``, ``ALREADY_INSTALLED``,
 inside the runtime's Python and returns structured JSON.  No application
 code is imported during probing.
 
+**Mutation lease (M1-2L)** — ``runtime/mutation_lock.py`` introduces the
+per-runtime-root mutation lease: among cooperating writers that acquire
+it, at most **one mutating ZeAlfie operation** (runtime create/apply/
+rollback/discard/gc, product install/update, gpu-install) may own the
+runtime at a time.  The primitive is ``fcntl.flock`` on a sibling lock
+file (POSIX-only, fail-closed on unsupported platforms), crash-safe,
+advisory, and orthogonal to the existing stale checks and atomic
+persistence; read-only commands are unaffected.  See
+``docs/mutation-lock.md`` for the full contract.
+
 The persistent runtime is distinct from both the development ``.venv`` and
 the test-only ``TemporaryVenv``.  Temporary test environments and scratch
 virtual environments are operational artefacts, not product runtime state.
