@@ -12,7 +12,9 @@ from zealfie.building import build_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.runtime import (
     InstallOutcome,
+    OPERATION_RUNTIME_APPLY,
     RuntimeLayout,
+    RuntimeMutationLock,
     RuntimeReasonCode,
     RuntimeState,
     SharedRuntime,
@@ -251,7 +253,10 @@ def test_rollback_target_missing(tmp_path, witness_wheel):
     venv.create(layout.slot_path(slot_b), with_pip=True, clear=True)
     rt.install_local_wheel(witness_wheel, slot_id=slot_b, component_definition=WITNESS_DEF)
     rt.validate_candidate(txn, component_definition=WITNESS_DEF)
-    rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        rt.activate(txn)
 
     # Delete previous slot.
     import shutil
@@ -277,7 +282,10 @@ def test_rollback_target_broken(tmp_path, witness_wheel):
     venv.create(layout.slot_path(slot_b), with_pip=True, clear=True)
     rt.install_local_wheel(witness_wheel, slot_id=slot_b, component_definition=WITNESS_DEF)
     rt.validate_candidate(txn, component_definition=WITNESS_DEF)
-    rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        rt.activate(txn)
 
     # Corrupt previous slot's Python.
     a_python = layout.slot_path(slot_a) / "bin" / "python"
@@ -311,7 +319,10 @@ def test_broken_state_blocks_activation(tmp_path, witness_wheel):
     # Corrupt active.json
     layout.active_pointer.write_text("not json")
 
-    result = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        result = rt.activate(txn)
     assert result.state == RuntimeState.BROKEN
     # Pointer must still be corrupted (not overwritten).
     assert layout.active_pointer.read_text() == "not json"
@@ -335,7 +346,10 @@ def test_corrupt_state_during_transaction_rejected(tmp_path, witness_wheel):
     pointer_before = layout.active_pointer.read_bytes()
     # Corrupt
     layout.active_pointer.write_text("garbage")
-    result = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        result = rt.activate(txn)
     assert result.state == RuntimeState.BROKEN
     assert layout.active_pointer.read_text() == "garbage"  # unchanged
 
@@ -403,7 +417,10 @@ def test_bad_candidate_preserves_active(tmp_path, witness_wheel):
     st = rt.validate_candidate(txn, component_definition=WITNESS_DEF)
     assert st.state == RuntimeState.BROKEN
 
-    result = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        result = rt.activate(txn)
     assert result.reason_code == RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED
     assert rt.status().active_slot_id == active_before
     assert layout.active_pointer.read_bytes() == pointer_before

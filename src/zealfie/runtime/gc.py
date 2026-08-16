@@ -63,6 +63,7 @@ from typing import Sequence
 
 from .layout import validate_slot_id
 from .model import RuntimeState
+from .mutation_lock import OPERATION_RUNTIME_GC, RuntimeMutationLock
 from .state import load_active_state
 
 # ---------------------------------------------------------------------------
@@ -778,6 +779,43 @@ def _purge_accelerated_metadata_entries(
 
 
 def apply_gc_plan(runtime_root: Path, plan: GcPlan) -> GcResult:
+    """Apply a :class:`GcPlan` — deletions + metadata hygiene.
+
+    Mandatory sequence:
+
+    1. rebuild a **fresh** plan from disk;
+    2. fresh ``BLOCKED`` → refuse (errors, ``stale=False``);
+    3. fresh fingerprint != plan fingerprint → refuse ``STALE_PLAN``
+       (``stale=True``), **no deletion**;
+    4. supplied plan not ``READY`` → refuse;
+    5. delete only slots categorised ``PRUNABLE`` /
+       ``PRUNABLE_CLEAN_METADATA`` **in both** fresh and supplied plan,
+       sorted by slot id, each re-validated path-safely immediately
+       before ``rmtree``; active/previous of the fresh plan are
+       re-checked per slot (defence in depth — a forged plan cannot
+       delete them); per-slot errors are recorded and the remaining
+       slots are still processed;
+    6. after successful deletions of ``PRUNABLE_CLEAN_METADATA`` slots,
+       purge their entries from ``accelerated-metadata.json`` (read-
+       modify-write, atomic).  If that file changed since the plan
+       (purge refused for the file), the disk deletions remain valid
+       (the global stale-check already passed) — documented choice.
+
+    Never touches ``active.json``, ``installed-lock.json`` or
+    ``product-provenance.json``.
+
+    ZA-M1-2L (D1): the whole apply window — the fresh re-plan and state
+    fingerprint revalidation, every slot deletion, and the accelerated-
+    metadata purge — runs under the ``runtime-gc`` mutation lease,
+    acquired at entry and released on every exit path including
+    exceptions.  The M1-2K stale-check machinery is unchanged; it simply
+    executes under the lease (mission §15 revalidation).
+    """
+    with RuntimeMutationLock(runtime_root).acquire(OPERATION_RUNTIME_GC):
+        return _apply_gc_plan_locked(runtime_root, plan)
+
+
+def _apply_gc_plan_locked(runtime_root: Path, plan: GcPlan) -> GcResult:
     """Apply a :class:`GcPlan` — deletions + metadata hygiene.
 
     Mandatory sequence:

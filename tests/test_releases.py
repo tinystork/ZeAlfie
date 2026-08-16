@@ -30,6 +30,8 @@ from zealfie.releases import (
 )
 from zealfie.runtime import (
     InstallOutcome,
+    OPERATION_RUNTIME_APPLY,
+    RuntimeMutationLock,
     RuntimeLayout,
     RuntimeState,
     SharedRuntime,
@@ -1100,7 +1102,10 @@ def test_release_to_transaction_with_candidate_slot(tmp_path, witness_wheel, wit
 
     # Validate and activate.
     rt.validate_candidate(txn, component_definition=WITNESS_DEF)
-    act = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        act = rt.activate(txn)
     assert act.active_slot_id == slot_b
     assert act.previous_slot_id is not None
 

@@ -9,7 +9,8 @@ import pytest
 
 
 from zealfie.runtime import (
-    RuntimeLayout,
+    RuntimeLayout,OPERATION_RUNTIME_APPLY,
+    RuntimeLayout,RuntimeMutationLock,
     RuntimeReasonCode,
     RuntimeState,
     SharedRuntime,
@@ -124,7 +125,10 @@ def test_discard_previous_refused(tmp_path: Path) -> None:
     layout.slot_path(slot_b).parent.mkdir(parents=True, exist_ok=True)
     venv.create(layout.slot_path(slot_b), with_pip=True, clear=True)
     txn._mark_valid()
-    rt.activate(txn)  # B now active, A is previous
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        rt.activate(txn)  # B now active, A is previous
 
     # Discard previous (A) must be refused.
     result = rt.discard_slot(active_id)

@@ -148,6 +148,12 @@ from zealfie.releases.resolver import ReleaseResolutionError, resolve_local_rele
 from zealfie.releases.verifier import verify_artifact
 from zealfie.runtime.deployment import apply_deployment_plan
 from zealfie.runtime.manager import SharedRuntime
+from zealfie.runtime.mutation_lock import (
+    OPERATION_GPU_INSTALL,
+    OPERATION_PRODUCT_INSTALL,
+    OPERATION_PRODUCT_UPDATE,
+    RuntimeMutationLock,
+)
 from zealfie.runtime.model import (
     DeploymentResult,
     RuntimeState,
@@ -562,6 +568,25 @@ class ZeAlfieService:
         self._recommender = recommender or recommend
 
     # ------------------------------------------------------------------
+    # ZA-M1-2L: runtime mutation lease helper
+    # ------------------------------------------------------------------
+
+    def _runtime_mutation_lock(self) -> RuntimeMutationLock | None:
+        """Derive the mutation lock from the runtime layout (D1).
+
+        Production services always hold a real :class:`SharedRuntime` with a
+        layout; the lock is scoped to that runtime root.  Returns ``None``
+        only when the injected runtime exposes no layout (test doubles) —
+        such a service cannot reach a real runtime mutation, and the
+        low-level D2 contract (:func:`RuntimeMutationLock.require_lease`)
+        still fails closed inside the engine.
+        """
+        layout = getattr(self._runtime, "layout", None)
+        if layout is None:
+            return None
+        return RuntimeMutationLock(layout.root)
+
+    # ------------------------------------------------------------------
     # M1-2G: Host acceleration discovery (read-only)
     # ------------------------------------------------------------------
 
@@ -745,6 +770,178 @@ class ZeAlfieService:
     # ------------------------------------------------------------------
 
     def install_accelerated_runtime(
+        self,
+        *,
+        plan: AcceleratedDeploymentPlan | None = None,
+        capabilities: HostCapabilities | None = None,
+        recommendation: AccelerationRecommendation | None = None,
+        acquirer: AcceleratedArtifactAcquirer | None = None,
+        gate: AcceleratedGate | None = None,
+        metadata_store: AcceleratedSlotMetadataStore | None = None,
+        cancel_check: Callable[[], None] | None = None,
+        progress_callback=None,
+        work_root: Path | None = None,
+        fetcher: ArchiveFetcher | None = None,
+        full_state_provider: Callable[
+            [], Sequence[PreparedProductArtifact]
+        ] | None = None,
+        dependency_wheelhouse: Path | None = None,
+    ) -> AcceleratedDeploymentResult:
+        """Execute an accelerated deployment transactionally (M1-2I).
+
+        Full pipeline: acquire -> resolve -> build -> validate -> gate
+        -> persist -> activate, extending the CURRENT full desired
+        runtime (KEEP semantics) with the accelerated closure declared
+        by products.  Products are re-prepared at their exact installed
+        identity through the same machinery used for KEEP in
+        :meth:`install_product` — never re-resolved from a mutable ref.
+
+        Contract (fail-closed at every step):
+
+        1. Read-only first: when *plan* is ``None`` it is built via
+           :meth:`build_accelerated_deployment_plan` from the provided
+           (or freshly collected) *capabilities* / *recommendation*.
+        2. A non-``PLAN_READY`` plan (``NO_ACCELERATED_REQUIREMENTS`` /
+           ``BLOCKED`` / ``UNKNOWN``) returns
+           ``success=False, phase=PREPARE`` with an honest reason and
+           performs NO acquisition and NO runtime work.  This is the
+           honest default on TINYDEBIAN today: no product declares GPU
+           requirements and the default variant catalog is empty.
+        2b. Deploy-time hardware re-verification (TOCTOU, fail-closed):
+            strictly after the plan-status gate and strictly BEFORE any
+            base preparation or acquisition, the catalog's acceleration
+            requirements for ``plan.products_concerned`` are
+            re-evaluated against a fresh host observation
+            (:func:`~zealfie.acceleration.compatibility.evaluate_acceleration_compatibility`).
+            This closes the planning->deployment observation window
+            (driver removed, GPU disabled, partial evidence, or a
+            catalog requirement vanished after planning): a fresh
+            non-``SUPPORTED`` verdict — or a recommendation backend that
+            no longer matches ``plan.backend`` — fails closed at
+            ``phase=PREPARE`` with an honest "late GPU compatibility
+            conflict" reason and zero mutation.  Provided
+            *capabilities* / *recommendation* are reused verbatim (no
+            second probe); omitted values are collected/derived exactly
+            once at this check.
+        3. The base deployment plan is produced for the current full
+           desired state: every managed product at its exact installed
+           version.  Base artifacts come from ``full_state_provider()``
+           when provided (synthetic/hermetic callers supply local
+           verified artifacts); otherwise from active provenance
+           re-acquired at the exact commit SHA via the M1-2F KEEP
+           machinery (:meth:`_prepare_keep_product_artifact`, which
+           requires *fetcher*).  The base plan must carry a
+           ``dependency_lock`` to extend; when no lock can be produced
+           the deployment fails before any candidate slot creation.
+        4. ACQUIRE uses *acquirer* or the manifest-backed default
+           :func:`~zealfie.acceleration.acquisition.default_manifest_artifact_acquirer`
+           (real, human-gated artifact source from the packaged
+           accelerated artifact manifest; downloads are sha256-verified,
+           fail-closed) and honours cooperative cancellation.  The
+           explicit fail-closed
+           :func:`~zealfie.acceleration.deployment.default_accelerated_artifact_acquirer`
+           remains available for callers that must refuse unconditionally.
+        5. :func:`~zealfie.acceleration.deployment.apply_accelerated_deployment`
+           runs the engine with the default gate / metadata store when
+           not provided, deriving ``declaring_distributions`` from the
+           product catalog (product id -> distribution name).
+        6. On success NO product provenance, selection, or
+           installed-lock writes occur: products are unchanged, and the
+           engine's observational ``accelerated-metadata.json`` record
+           is the only new persistent state.  On any failure the
+           previously active runtime is left intact and usable.
+        7. The method NEVER pip-installs into the active slot: every
+           install goes to the fresh candidate slot created by the
+           engine, and the active pointer is only switched at
+           activation.
+
+        Parameters
+        ----------
+        plan:
+            Optional pre-built accelerated plan.  ``None`` builds it via
+            the read-only M1-2H path.
+        capabilities / recommendation:
+            Reused verbatim wherever supplied — by the read-only plan
+            build when *plan* is ``None`` and by the deploy-time
+            hardware re-verification (no probe when provided).  When
+            omitted, each consumer that needs them collects/derives its
+            own observation exactly once.
+        acquirer:
+            Accelerated artifact source.  Defaults to the manifest-backed
+            acquirer (real source, sha256-verified, fail-closed).
+        gate:
+            Pre-activation compatibility gate.  Defaults to the
+            stdlib-only distribution/version probe gate.
+        metadata_store:
+            Observational accelerated slot metadata store.  Defaults to
+            a store bound to the runtime layout (``None`` when the
+            runtime exposes no layout).
+        cancel_check:
+            Optional cooperative cancellation callable.  Raising
+            :class:`CooperativeCancellationError` aborts cleanly with
+            ``cancelled=True`` and the old runtime preserved.
+        progress_callback:
+            Optional ``Callable[[InstallProgress], None]`` observer.
+            Observational only.
+        work_root:
+            Staging root for base artifacts and acquired wheels.
+            ``None`` uses a private temporary directory that is removed
+            when the method returns.
+        fetcher:
+            Archive fetcher for KEEP re-acquisition (exact SHA).  Only
+            used when *full_state_provider* is ``None``.
+        full_state_provider:
+            Optional zero-arg callable returning the prepared
+            full-state artifacts.  Synthetic/hermetic tests supply
+            local ``VerifiedArtifact``-backed artifacts here; production
+            uses the provenance + *fetcher* KEEP path.
+        dependency_wheelhouse:
+            Optional dependency wheelhouse for base lock resolution.
+            ``None`` auto-acquires via the injected dependency acquirer
+            (mirroring :meth:`install_product`).
+
+        Returns
+        -------
+        AcceleratedDeploymentResult
+            Every expected failure is reported as a result (never
+            raised); the phase names where the deployment stopped.
+
+        ZA-M1-2L (D1): the whole accelerated install window (plan build, hardware re-check, base preparation, artifact acquisition, the compute gate, activation and the accelerated-metadata record) runs under the ``gpu-install`` mutation lease, acquired at entry and released on every exit path including exceptions.
+        """
+        lock = self._runtime_mutation_lock()
+        if lock is None:
+            return self._install_accelerated_runtime(
+                plan=plan,
+                capabilities=capabilities,
+                recommendation=recommendation,
+                acquirer=acquirer,
+                gate=gate,
+                metadata_store=metadata_store,
+                cancel_check=cancel_check,
+                progress_callback=progress_callback,
+                work_root=work_root,
+                fetcher=fetcher,
+                full_state_provider=full_state_provider,
+                dependency_wheelhouse=dependency_wheelhouse,
+            )
+        with lock.acquire(OPERATION_GPU_INSTALL):
+            return self._install_accelerated_runtime(
+                plan=plan,
+                capabilities=capabilities,
+                recommendation=recommendation,
+                acquirer=acquirer,
+                gate=gate,
+                metadata_store=metadata_store,
+                cancel_check=cancel_check,
+                progress_callback=progress_callback,
+                work_root=work_root,
+                fetcher=fetcher,
+                full_state_provider=full_state_provider,
+                dependency_wheelhouse=dependency_wheelhouse,
+            )
+
+
+    def _install_accelerated_runtime(
         self,
         *,
         plan: AcceleratedDeploymentPlan | None = None,
@@ -2296,6 +2493,126 @@ class ZeAlfieService:
             The original cause is preserved via ``__cause__``.
         CorruptSelectionError
             If the selection store file is present but unreadable.
+
+        ZA-M1-2L (D1): the whole product install window (artifact preparation, dependency wheelhouse acquisition, the deployment engine, and the post-activation selection/provenance/installed-lock persistence) runs under the ``product-install`` mutation lease, acquired at entry and released on every exit path including exceptions.
+        """
+        lock = self._runtime_mutation_lock()
+        if lock is None:
+            return self._install_product(
+                product_id,
+                resolver=resolver,
+                fetcher=fetcher,
+                work_root=work_root,
+                dependency_wheelhouse=dependency_wheelhouse,
+                probe_distribution=probe_distribution,
+                progress_callback=progress_callback,
+            )
+        with lock.acquire(OPERATION_PRODUCT_INSTALL):
+            return self._install_product(
+                product_id,
+                resolver=resolver,
+                fetcher=fetcher,
+                work_root=work_root,
+                dependency_wheelhouse=dependency_wheelhouse,
+                probe_distribution=probe_distribution,
+                progress_callback=progress_callback,
+            )
+
+
+    def _install_product(
+        self,
+        product_id: str,
+        *,
+        resolver: SourceRefResolver,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        dependency_wheelhouse: Path | None = None,
+        probe_distribution=None,
+        progress_callback=None,
+    ) -> DeploymentResult:
+        """Install (or update) a product within the full desired product set.
+
+        Full-state orchestration:
+
+        1. Reconstruct the complete desired set as ``KEEP ∪ {product_id}``
+           where KEEP products come from active provenance (exact commit
+           SHA, never re-resolved) and the target is resolved from its
+           source ref.
+        2. Prepare a verified wheel artifact for every product in the set.
+        3. Acquire ONE combined dependency wheelhouse covering all products
+           (auto-acquired only when the caller does not supply
+           ``dependency_wheelhouse``).
+        4. Plan and apply a single transaction via
+           :meth:`install_prepared_product_deployment`, which resolves ONE
+           combined dependency lock, builds ONE candidate runtime, validates
+           every expected product, and atomically activates it.
+
+        Delegates to:
+
+        * :meth:`prepare_product_artifact` (D.4.1B): remote source
+          resolution, fetch, build, and verification — used for the target.
+        * :meth:`prepare_product_artifact_at_commit`: exact-SHA
+          reacquisition for KEEP products (no ref resolution).
+        * :meth:`install_prepared_product_deployment` (D.4.1D):
+          planning, transactional apply, and post-success selection
+          persistence.
+        * :class:`PipWheelhouseAcquirer` (D.4.2B → D.4.2C):
+          auto-acquires a combined transitive dependency wheelhouse when
+          the caller does not supply ``dependency_wheelhouse``.
+
+        This is service-layer orchestration only.  It must not duplicate
+        source resolution, fetch, build, verify, planning, apply, or
+        selection persistence logic.
+
+        **Exception propagation:** errors from the preparation and
+        prepared-install layers propagate without wrapping.  Callers
+        receive the exact exception from the first failing step.
+        Dependency acquisition failures, including product wheel disappearance,
+        Metadata errors, ExtraNotFound, and transport failures, are
+        wrapped in :class:`ProductDependencyAcquisitionError`.
+
+        Parameters
+        ----------
+        product_id:
+            The product to install.  Must exist in the product catalog
+            with a ``remote_source``.
+        resolver:
+            Injectable ``(owner, repo, ref) → 40-char-hex-SHA`` callable.
+        fetcher:
+            Injectable ``(owner, repo, commit_sha) → bytes`` callable.
+        work_root:
+            Base directory for staging and wheel output.
+        dependency_wheelhouse:
+            Optional wheelhouse directory for dependency resolution.
+        probe_distribution:
+            Injectable probe callable for READY runtime planning.
+        progress_callback:
+            Optional ``Callable[[InstallProgress], None]`` observing the
+            prepare / acquire / plan / install / validate / activate /
+            complete boundaries.  Observational only; it never affects
+            behaviour, results, or error propagation.
+
+        Returns
+        -------
+        DeploymentResult
+            The exact result from the transactional deployment engine.
+
+        Raises
+        ------
+        UnknownProductError
+            If *product_id* is not in the product catalog.
+        RemoteSourceUnavailableError
+            If the product descriptor has no ``remote_source``.
+        SourceResolutionError
+            If the resolver cannot resolve the ref to a commit SHA.
+        ArtifactRejectionError
+            If the built wheel fails verification.
+        ProductDependencyAcquisitionError
+            If auto-acquisition fails (product wheel disappeared,
+            Metadata unreadable, extra unknown, transport failure).
+            The original cause is preserved via ``__cause__``.
+        CorruptSelectionError
+            If the selection store file is present but unreadable.
         """
         # --- 0. Reconstruct the complete desired product set -------------
         active_provenance, desired_ids = (
@@ -3285,6 +3602,101 @@ class ZeAlfieService:
     # ------------------------------------------------------------------
 
     def update_product(
+        self,
+        product_id: str,
+        *,
+        resolver: SourceRefResolver,
+        fetcher: ArchiveFetcher,
+        work_root: Path,
+        dependency_wheelhouse: Path | None = None,
+        probe_distribution=None,
+        progress_callback=None,
+    ) -> DeploymentResult:
+        """Update an already-managed installed product, transactionally.
+
+        This is a **narrow service-layer convenience/preflight** around the
+        existing read-only :meth:`check_product_update` and the existing
+        transactional :meth:`install_product` pipeline.  It is not a second
+        deployment engine and performs no source resolution, fetch, build,
+        planning, apply, or selection/provenance persistence of its own.
+
+        Behaviour
+        ---------
+
+        1. **Preflight (read-only):** read the product's active provenance
+           via :meth:`check_product_update` using the injected *resolver*.
+           This never mutates runtime, provenance, ``active.json``, or the
+           selection store.
+        2. If the status is :attr:`UpdateStatus.UPDATE_AVAILABLE`, delegate
+           to :meth:`install_product` with the exact same injected
+           ``resolver``/``fetcher``/``work_root``/``dependency_wheelhouse``/
+           ``probe_distribution``/``progress_callback`` arguments.  The
+           existing transactional install path performs prepare → dependency
+           acquire → plan → apply → selection → provenance exactly as for a
+           fresh install.
+        3. For any other status (``UP_TO_DATE``, ``PROVENANCE_UNKNOWN``,
+           ``CHECK_FAILED``, ``NOT_CHECKED``, or ``CHECKING``), raise
+           :class:`ProductUpdateNotApplicableError` **before** any fetch,
+           build, apply, or selection/provenance mutation.  Nothing is
+           installed or mutated on these paths.
+
+        Parameters
+        ----------
+        product_id:
+            The already-managed product to update.  Unknown ids yield
+            :attr:`UpdateStatus.PROVENANCE_UNKNOWN` (no active provenance)
+            and therefore :class:`ProductUpdateNotApplicableError` — no
+            provenance is ever invented.
+        resolver / fetcher / work_root / dependency_wheelhouse /
+        probe_distribution / progress_callback:
+            Identical semantics and injection points to
+            :meth:`install_product`; forwarded unchanged on the actual
+            update attempt.
+
+        Returns
+        -------
+        DeploymentResult
+            The exact result from the transactional deployment engine,
+            returned verbatim from :meth:`install_product`.
+
+        Raises
+        ------
+        ProductUpdateNotApplicableError
+            If the preflight status is anything other than
+            :attr:`UpdateStatus.UPDATE_AVAILABLE`.  Carries the preflight
+            :class:`ProductUpdateResult` and a human-readable reason.
+            Raised before any mutation.
+
+        Any exception raised by :meth:`install_product` during the actual
+        update attempt propagates unchanged — deployment/build/fetch
+        failures are not wrapped here.
+
+        ZA-M1-2L (D1): the update preflight and the delegated install run under the ``product-update`` mutation lease, acquired at entry and released on every exit path including exceptions; the nested ``product-install`` acquisition reuses this lease (same root, same context).
+        """
+        lock = self._runtime_mutation_lock()
+        if lock is None:
+            return self._update_product(
+                product_id,
+                resolver=resolver,
+                fetcher=fetcher,
+                work_root=work_root,
+                dependency_wheelhouse=dependency_wheelhouse,
+                probe_distribution=probe_distribution,
+                progress_callback=progress_callback,
+            )
+        with lock.acquire(OPERATION_PRODUCT_UPDATE):
+            return self._update_product(
+                product_id,
+                resolver=resolver,
+                fetcher=fetcher,
+                work_root=work_root,
+                dependency_wheelhouse=dependency_wheelhouse,
+                probe_distribution=probe_distribution,
+                progress_callback=progress_callback,
+            )
+
+
+    def _update_product(
         self,
         product_id: str,
         *,

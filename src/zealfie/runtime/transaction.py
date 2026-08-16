@@ -6,6 +6,11 @@ import uuid
 from typing import TYPE_CHECKING
 
 from .layout import RuntimeLayout, validate_slot_id
+from .mutation_lock import (
+    RuntimeMutationLease,
+    RuntimeMutationLeaseRequired,
+    RuntimeMutationLock,
+)
 from .model import (
     ActiveRuntimeState,
     CandidateState,
@@ -17,6 +22,26 @@ from .state import load_active_state, save_active_state
 
 if TYPE_CHECKING:
     from zealfie.dependencies.models import RuntimeLock
+
+
+def _require_runtime_lease(what: str, root: "pathlib.Path") -> RuntimeMutationLease:
+    """Prove a mutation lease is held for *root* in the current context (D2).
+
+    The low-level mutating primitives (:meth:`RuntimeTransaction.activate`,
+    :meth:`RuntimeTransaction.rollback`,
+    :meth:`RuntimeTransaction.discard_slot`) must fail closed — no write may
+    happen before this proof.  Raises :class:`RuntimeMutationLeaseRequired`
+    when no lease is held, or when the held lease covers a *different* runtime
+    root (a writer holding a lease for root A must never mutate root B).
+    """
+    lease = RuntimeMutationLock.require_lease(what)
+    resolved_root = root.resolve()
+    if lease.runtime_root != resolved_root:
+        raise RuntimeMutationLeaseRequired(
+            f"{what} on runtime root {resolved_root} (the held lease is for "
+            f"a different runtime root: {lease.runtime_root})"
+        )
+    return lease
 
 
 def generate_slot_id() -> str:
@@ -144,6 +169,12 @@ class RuntimeTransaction:
         the candidate becomes ``active_slot``.
         """
         from pathlib import Path
+
+        # D2 contract (ZA-M1-2L): prove a mutation lease is held for this
+        # runtime root in the current context BEFORE any write.  Fail closed.
+        _require_runtime_lease(
+            "RuntimeTransaction.activate", self._layout.root
+        )
 
         if self._candidate_state != CandidateState.VALID:
             return RuntimeStatus(
@@ -322,6 +353,10 @@ class RuntimeTransaction:
         Requires a valid ``previous_slot`` in the active pointer.
         The previous slot is validated (path must exist) before switching.
         """
+        # D2 contract (ZA-M1-2L): prove a mutation lease is held for this
+        # runtime root in the current context BEFORE any write.  Fail closed.
+        _require_runtime_lease("RuntimeTransaction.rollback", layout.root)
+
         current = load_active_state(
             layout.active_pointer, layout_root=layout.root
         )
@@ -410,6 +445,10 @@ class RuntimeTransaction:
     @staticmethod
     def discard_slot(layout: RuntimeLayout, slot_id: str) -> RuntimeStatus:
         """Remove a slot directory, but only if it is neither active nor previous."""
+        # D2 contract (ZA-M1-2L): prove a mutation lease is held for this
+        # runtime root in the current context BEFORE any write.  Fail closed.
+        _require_runtime_lease("RuntimeTransaction.discard_slot", layout.root)
+
         validate_slot_id(slot_id)
 
         current = load_active_state(

@@ -12,6 +12,8 @@ from zealfie.building import build_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.runtime import (
     InstallOutcome,
+    OPERATION_RUNTIME_APPLY,
+    RuntimeMutationLock,
     RuntimeLayout,
     RuntimeReasonCode,
     RuntimeState,
@@ -59,7 +61,10 @@ def test_candidate_python_removed_after_validation_blocks_activation(
     python.unlink()
 
     pointer_before = layout.active_pointer.read_bytes()
-    result = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        result = rt.activate(txn)
     assert result.state == RuntimeState.BROKEN
     assert layout.active_pointer.read_bytes() == pointer_before
 
@@ -89,7 +94,10 @@ def test_candidate_component_removed_after_validation_blocks_activation(
             shutil.rmtree(d)
 
     pointer_before = layout.active_pointer.read_bytes()
-    result = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        result = rt.activate(txn)
     assert result.state == RuntimeState.BROKEN
     assert layout.active_pointer.read_bytes() == pointer_before
 
@@ -243,5 +251,8 @@ def test_pointer_unchanged_on_toctou_python_removed(tmp_path, witness_wheel):
 
     (layout.slot_path(slot_b) / "bin" / "python").unlink()
     pointer_before = layout.active_pointer.read_bytes()
-    rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        rt.activate(txn)
     assert layout.active_pointer.read_bytes() == pointer_before

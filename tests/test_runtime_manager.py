@@ -12,6 +12,8 @@ from zealfie.building import build_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.runtime import (
     InstallOutcome,
+    OPERATION_RUNTIME_APPLY,
+    RuntimeMutationLock,
     RuntimeLayout,
     RuntimeReasonCode,
     RuntimeState,
@@ -172,7 +174,10 @@ def test_discard_orphan_slot(tmp_path: Path, witness_wheel: Path) -> None:
     venv.create(slot_path, with_pip=True, clear=True)
     rt.install_local_wheel(witness_wheel, slot_id=txn.candidate_slot_id)
     rt.validate_candidate(txn)
-    rt.activate(txn)
+    with RuntimeMutationLock(rt.layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        rt.activate(txn)
 
     # Now there's a previous slot.
     prev = rt.status().previous_slot_id

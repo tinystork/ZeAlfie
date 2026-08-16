@@ -26,6 +26,8 @@ from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.runtime import (
     CandidateState,
     InstallOutcome,
+    OPERATION_RUNTIME_APPLY,
+    RuntimeMutationLock,
     RuntimeLayout,
     RuntimeReasonCode,
     RuntimeState,
@@ -94,7 +96,10 @@ def test_full_upgrade_and_rollback(
     assert txn.state == CandidateState.VALID
 
     # 6. Activate B.
-    act = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        act = rt.activate(txn)
     assert act.active_slot_id == slot_b
     assert act.previous_slot_id == s.active_slot_id
 
@@ -141,7 +146,10 @@ def test_bad_candidate_does_not_affect_active(
     assert st.state == RuntimeState.BROKEN
 
     # Activation must refuse.
-    act = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        act = rt.activate(txn)
     assert act.reason_code == RuntimeReasonCode.CANDIDATE_VALIDATION_FAILED
 
     # Active must be unchanged.
@@ -177,10 +185,16 @@ def test_stale_transaction_rejected(tmp_path: Path, witness_v1: Path) -> None:
     rt.install_local_wheel(witness_v1, slot_id=txn2.candidate_slot_id,
                            component_definition=WITNESS_DEF)
     rt.validate_candidate(txn2, component_definition=WITNESS_DEF)
-    rt.activate(txn2)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        rt.activate(txn2)
 
     # Old transaction's activate must be refused.
-    result = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        result = rt.activate(txn)
     assert result.reason_code == RuntimeReasonCode.STALE_TRANSACTION
 
 

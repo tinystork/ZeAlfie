@@ -24,6 +24,12 @@ from .model import (
     RuntimeState,
     RuntimeStatus,
 )
+from .mutation_lock import (
+    OPERATION_RUNTIME_CREATE,
+    OPERATION_RUNTIME_DISCARD,
+    OPERATION_RUNTIME_ROLLBACK,
+    RuntimeMutationLock,
+)
 from .probe import probe_runtime_distribution, probe_runtime_python_version
 from .state import load_active_state
 from .transaction import (
@@ -140,33 +146,40 @@ class SharedRuntime:
         """Create the very first runtime via a slot transaction.
 
         If a pointer already exists and is READY, nothing is done.
+
+        ZA-M1-2L (D1): the whole creation window (status check, candidate
+        venv, activation) runs under the ``runtime-create`` mutation lease,
+        released on every exit path including exceptions (context manager).
         """
-        st = self.status()
-        if st.state == RuntimeState.READY:
-            return st
-        if st.state == RuntimeState.BROKEN:
-            raise SharedRuntimeError(
-                f"shared runtime is BROKEN ({st.reason}). "
-                f"It must be repaired or removed manually before re-creation."
-            )
+        with RuntimeMutationLock(self._layout.root).acquire(
+            OPERATION_RUNTIME_CREATE
+        ):
+            st = self.status()
+            if st.state == RuntimeState.READY:
+                return st
+            if st.state == RuntimeState.BROKEN:
+                raise SharedRuntimeError(
+                    f"shared runtime is BROKEN ({st.reason}). "
+                    f"It must be repaired or removed manually before re-creation."
+                )
 
-        txn = self.begin_transaction()
-        slot_id = txn.candidate_slot_id
+            txn = self.begin_transaction()
+            slot_id = txn.candidate_slot_id
 
-        # Create the slot venv.
-        slot_path = self._layout.slot_path(slot_id)
-        slot_path.parent.mkdir(parents=True, exist_ok=True)
-        venv.create(slot_path, with_pip=True, clear=True)
+            # Create the slot venv.
+            slot_path = self._layout.slot_path(slot_id)
+            slot_path.parent.mkdir(parents=True, exist_ok=True)
+            venv.create(slot_path, with_pip=True, clear=True)
 
-        # Validate base runtime health (no component expected yet).
-        st = self.validate_candidate(txn)
-        if st.state != RuntimeState.READY:
-            return st
+            # Validate base runtime health (no component expected yet).
+            st = self.validate_candidate(txn)
+            if st.state != RuntimeState.READY:
+                return st
 
-        result = txn.activate()
-        if result.state != RuntimeState.READY:
-            return result
-        return self.status()
+            result = txn.activate()
+            if result.state != RuntimeState.READY:
+                return result
+            return self.status()
 
     # -- transaction ----------------------------------------------------------
 
@@ -499,10 +512,18 @@ class SharedRuntime:
         return self.status()
 
     def rollback(self) -> RuntimeStatus:
-        return RuntimeTransaction.rollback(self._layout)
+        """Rollback via the low-level transaction under a mutation lease (D1)."""
+        with RuntimeMutationLock(self._layout.root).acquire(
+            OPERATION_RUNTIME_ROLLBACK
+        ):
+            return RuntimeTransaction.rollback(self._layout)
 
     def discard_slot(self, slot_id: str) -> RuntimeStatus:
-        return RuntimeTransaction.discard_slot(self._layout, slot_id)
+        """Discard a slot under a mutation lease (D1)."""
+        with RuntimeMutationLock(self._layout.root).acquire(
+            OPERATION_RUNTIME_DISCARD
+        ):
+            return RuntimeTransaction.discard_slot(self._layout, slot_id)
 
     def python(self) -> Path | None:
         st = self.status()

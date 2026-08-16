@@ -32,6 +32,7 @@ from zealfie.releases.model import VerifiedArtifact
 from zealfie.releases.verifier import ArtifactRejectionError, revalidate_verified_artifact
 
 from .manager import SharedRuntime
+from .mutation_lock import OPERATION_RUNTIME_APPLY, RuntimeMutationLock
 from .model import (
     DeploymentResult,
     InstallOutcome,
@@ -82,6 +83,125 @@ def _invoke_cancel_check(cancel_check) -> DeploymentResult | None:
 
 
 def apply_deployment_plan(
+    plan: DeploymentPlan,
+    *,
+    registry: ComponentRegistry,
+    runtime: SharedRuntime | None = None,
+    progress_callback=None,
+    cancel_check=None,
+    pre_activate=None,
+) -> DeploymentResult:
+    """Apply a complete deployment plan to the shared runtime.
+
+    This is the single transactional entry point for offline deployment.
+    It performs the full sequence:
+
+    1. **Preflight** — validate the plan against the current runtime state
+       and reject before any filesystem mutation.
+    2. **Dependency lock coherence** — validate every DesiredComponent
+       against the RuntimeLock (M1-1D: no component escapes coherence
+       because of ``required_by`` edges).  No mutation.
+    3. **Candidate creation** — begin an M0-6 transaction and create a
+       fresh venv directly at the final slot path.
+    4. **Dependency materialization** — install locked non-component
+       dependencies from the RuntimeLock into the candidate.  This is the
+       shared runtime foundation and MUST precede component installs.
+    5. **Full-state component materialization** — install every desired
+       component in deterministic component-id order, regardless of
+       KEEP/INSTALL.  Each artifact is TOCTOU-revalidated immediately
+       before pip handoff.
+    6. **Candidate validation** — verify every component is installed
+       correctly within the candidate.
+    6b. **Version-match checks** — verify every candidate component
+       version equals the desired state (M0-8B.2).
+    6c. **Pre-activation gate** — optional ``pre_activate`` hook (M1-2I):
+       runs after the version-match checks and before activation; a
+       non-``None`` return value (an error string) fails the deployment
+       with no activation.
+    7. **Activation** — atomically switch the active pointer (M0-6),
+       including M1-1D dependency distribution TOCTOU revalidation.
+
+    The active pointer is never modified before step 7.  On failure at
+    any stage, the partially-created candidate is left for diagnostics
+    and the active slot is unchanged.
+
+    Parameters
+    ----------
+    plan:
+        A complete, valid deployment plan from :func:`build_deployment_plan`.
+    registry:
+        The trusted local component registry.  Must contain definitions
+        matching every component in the plan's desired state.
+    runtime:
+        The shared runtime target.  Created with default layout if ``None``.
+    progress_callback:
+        Optional ``Callable[[InstallProgress], None]`` observing the
+        per-package install, validation, and activation boundaries.
+        Observational only; it never affects behaviour, results, or error
+        propagation.
+    cancel_check:
+        Optional ``Callable[[], None]`` cooperative cancellation hook
+        (M1-2I).  Invoked before begin-transaction, before candidate
+        venv creation, before each dependency install, before each
+        component install, before validation, and before activation.
+        Raising :class:`DeploymentCancelledError` interrupts the
+        deployment (re-raised, no result object, active pointer
+        untouched).  Any other exception becomes a
+        ``DeploymentResult(success=False)`` failure.
+    pre_activate:
+        Optional ``Callable[[RuntimeTransaction], str | None]``
+        pre-activation gate hook (M1-2I).  Runs after the version-match
+        checks (step 6b) and before ``runtime.activate`` (step 7).
+        A non-``None`` return value is an error string that fails the
+        deployment with ``reason="pre-activation gate failed: <err>"``
+        and no activation.  Any exception raised by the hook is caught
+        and converted to the same failure result.
+
+    Returns
+    -------
+    DeploymentResult
+        *success=True* with the new active slot id when activation succeeds.
+        *success=False* with a reason string on any failure.
+
+    ZA-M1-2L (D1): the whole deployment window runs under the
+    ``runtime-apply`` mutation lease, acquired at entry (early
+    acquisition) and released on every exit path including exceptions and
+    cancellation.  This is the outermost layer for the CLI ``runtime
+    apply`` offline flow; when a service-layer lease (``product-install``
+    / ``gpu-install``) is already held for the same runtime root in the
+    same context, the nested acquisition reuses it (the outer operation
+    name is preserved).
+    """
+    if runtime is None:
+        runtime = SharedRuntime()
+    layout = getattr(runtime, "layout", None)
+    if layout is None:
+        # Duck-typed runtime without a layout (test double only): it cannot
+        # reach the real mutation primitives, and the D2 lease contract
+        # still fails closed inside the real RuntimeTransaction.  Production
+        # always passes SharedRuntime (layout is always present).
+        return _apply_deployment_plan_locked(
+            plan,
+            registry=registry,
+            runtime=runtime,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            pre_activate=pre_activate,
+        )
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        return _apply_deployment_plan_locked(
+            plan,
+            registry=registry,
+            runtime=runtime,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            pre_activate=pre_activate,
+        )
+
+
+def _apply_deployment_plan_locked(
     plan: DeploymentPlan,
     *,
     registry: ComponentRegistry,

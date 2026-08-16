@@ -10,7 +10,8 @@ import pytest
 from zealfie.building import build_wheel
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 from zealfie.runtime import (
-    RuntimeLayout,
+    RuntimeLayout,OPERATION_RUNTIME_APPLY,
+    RuntimeLayout,RuntimeMutationLock,
     RuntimeReasonCode,
     RuntimeState,
     SharedRuntime,
@@ -89,7 +90,10 @@ def test_transaction_with_null_active_slot_rejected(tmp_path, witness_wheel):
     )
     corrupted = layout.active_pointer.read_bytes()
 
-    result = rt.activate(txn)
+    with RuntimeMutationLock(layout.root).acquire(
+        OPERATION_RUNTIME_APPLY
+    ):
+        result = rt.activate(txn)
     assert result.state == RuntimeState.BROKEN
     assert layout.active_pointer.read_bytes() == corrupted
 
