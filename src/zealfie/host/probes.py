@@ -6,11 +6,18 @@ installs anything, and never selects a framework package.
 Signals used (all read-only and bounded):
 
 * ``platform`` module / ``sysconfig``  -> OS name + CPU architecture.
-* Linux sysfs PCI (``/sys/bus/pci/devices``) -> NVIDIA hardware presence.
-* ``/proc/driver/nvidia/version``      -> NVIDIA driver presence/version.
-* ``/dev/nvidiactl``                   -> NVIDIA driver node presence.
 * ``nvidia-smi --query-gpu``           -> model names + driver version.
-* ``lspci`` (optional)                 -> vendor/kind names.
+* Linux sysfs PCI (``/sys/bus/pci/devices``) -> NVIDIA hardware presence.
+  (POSIX-only)
+* ``/proc/driver/nvidia/version``      -> NVIDIA driver presence/version.
+  (POSIX-only)
+* ``/dev/nvidiactl``                   -> NVIDIA driver node presence.
+  (POSIX-only)
+* ``lspci`` (optional)                 -> vendor/kind names.  (POSIX-only)
+
+On Windows only ``nvidia-smi`` (plus the platform probe) is consulted: the
+POSIX-only probes are skipped and their absence is never treated as negative
+evidence — insufficient evidence reports ``UNKNOWN`` instead.
 
 Every failure becomes an ``UNAVAILABLE`` / ``UNKNOWN`` state object, never an
 exception that escapes to the GUI or CLI.
@@ -310,14 +317,29 @@ class HostProber:
         if platform_code is not None:
             reason_codes.append(platform_code)
 
+        windows = bool(os_name) and os_name.strip().lower().startswith("windows")
+
         smi = self._probe_nvidia_smi()
-        proc_status, proc_version = self._probe_proc_driver()
-        dev_present = self._probe_dev_nvidiactl()
-        sysfs_present, sysfs_error = self._probe_sysfs_nvidia()
-        lspci = self._probe_lspci_gpus()
+        if windows:
+            # Only nvidia-smi is evidence on Windows.  The POSIX-only probes
+            # are meaningless there and must not be consulted: their absence
+            # is not negative evidence.
+            proc_status = None
+            proc_version = None
+            dev_present = None
+            sysfs_present = None
+            sysfs_error = False
+            lspci = _LspciResult(gpus=[], unavailable=False, error=False)
+        else:
+            proc_status, proc_version = self._probe_proc_driver()
+            dev_present = self._probe_dev_nvidiactl()
+            sysfs_present, sysfs_error = self._probe_sysfs_nvidia()
+            lspci = self._probe_lspci_gpus()
 
         driver_status, driver_version, driver_code, driver_reason = (
-            _determine_nvidia_driver(proc_status, proc_version, dev_present, smi)
+            _determine_nvidia_driver(
+                proc_status, proc_version, dev_present, smi, windows=windows
+            )
         )
         if driver_code is not None:
             reason_codes.append(driver_code)
@@ -331,6 +353,7 @@ class HostProber:
             lspci_unavailable=lspci.unavailable,
             smi_ran=smi.ran or bool(smi.entries),
             driver_seen=driver_seen,
+            windows=windows,
         )
         hardware_unknown = nvidia_hw_present is None
 
@@ -462,6 +485,7 @@ def _determine_nvidia_hardware(
     lspci_unavailable: bool,
     smi_ran: bool,
     driver_seen: bool,
+    windows: bool = False,
 ) -> bool | None:
     """Return ``True``/``False``/``None`` (unknown) for NVIDIA hardware.
 
@@ -470,9 +494,14 @@ def _determine_nvidia_hardware(
     errors or is not installed (and there is no driver/smi signal), we have no
     positive or negative hardware observation, so hardware presence is
     unknown.  Otherwise a positive signal wins.
+
+    On Windows there are no sysfs/lspci channels: without an ``smi``
+    observation the hardware presence is simply unknown.
     """
     if smi_ran or driver_seen:
         return True
+    if windows:
+        return None
     if sysfs_error and (lspci_error or lspci_unavailable):
         return None
     positive = (sysfs_present is True) or any(
@@ -482,10 +511,11 @@ def _determine_nvidia_hardware(
 
 
 def _determine_nvidia_driver(
-    proc_status: CapabilityStatus,
+    proc_status: CapabilityStatus | None,
     proc_version: str | None,
     dev_present: bool | None,
     smi: _SmiResult,
+    windows: bool = False,
 ) -> tuple[CapabilityStatus, str | None, HostReasonCode | None, str | None]:
     """Determine the NVIDIA driver tri-state from all driver signals."""
     if smi.ran and smi.entries and not smi.malformed:
@@ -509,6 +539,14 @@ def _determine_nvidia_driver(
             proc_version,
             HostReasonCode.NVIDIA_DRIVER_UNKNOWN,
             "nvidia-smi probe failed",
+        )
+    if windows:
+        return (
+            CapabilityStatus.UNKNOWN,
+            None,
+            HostReasonCode.NVIDIA_DRIVER_UNKNOWN,
+            "no NVIDIA driver evidence on Windows (nvidia-smi unavailable); "
+            "driver status unknown",
         )
     if proc_status is CapabilityStatus.AVAILABLE:
         return (

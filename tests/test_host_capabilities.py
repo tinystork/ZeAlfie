@@ -19,6 +19,7 @@ from zealfie.host.models import (
     RecommendationStatus,
 )
 from zealfie.host.probes import (
+    CommandFailedError,
     CommandUnavailableError,
     LspciGpu,
     _determine_nvidia_hardware,
@@ -402,6 +403,147 @@ def test_sysfs_error_lspci_nvidia_driver_available_offer_setup():
 
     rec = recommend(caps)
     assert rec.status is RecommendationStatus.OFFER_SETUP
+
+
+# ===========================================================================
+# Platform-aware probing: Windows relies on nvidia-smi only
+# ===========================================================================
+
+
+def make_windows_prober(
+    *,
+    smi_stdout=None,
+    smi_raises=None,
+    smi_unavailable=False,
+) -> HostProber:
+    """Build a HostProber whose POSIX-only probes must never be called.
+
+    On Windows only the platform probe and ``nvidia-smi`` are evidence.  The
+    file_reader / path_exists / dir_lister injectables and any command other
+    than ``nvidia-smi`` raise :class:`AssertionError`, proving they are not
+    consulted.
+    """
+
+    def platform_provider():
+        return ("Windows", "AMD64")
+
+    def command_runner(argv):
+        if argv[0] == "nvidia-smi":
+            if smi_unavailable:
+                raise CommandUnavailableError("nvidia-smi not installed")
+            if smi_raises is not None:
+                raise smi_raises
+            return smi_stdout or ""
+        raise AssertionError(f"unexpected command on Windows: {argv}")
+
+    def file_reader(path):
+        raise AssertionError(f"file_reader must not be consulted on Windows: {path}")
+
+    def path_exists(path):
+        raise AssertionError(f"path_exists must not be consulted on Windows: {path}")
+
+    def dir_lister(path):
+        raise AssertionError(f"dir_lister must not be consulted on Windows: {path}")
+
+    return HostProber(
+        platform_provider=platform_provider,
+        command_runner=command_runner,
+        file_reader=file_reader,
+        path_exists=path_exists,
+        dir_lister=dir_lister,
+    )
+
+
+def test_windows_smi_success_single_gpu_detected():
+    prober = make_windows_prober(
+        smi_stdout="NVIDIA GeForce RTX 4090, 560.35.03\n",
+    )
+    caps = prober.collect()
+    assert caps.os_name == "Windows"
+    assert caps.gpu_count == 1
+    gpu = caps.gpus[0]
+    assert gpu.vendor == "NVIDIA"
+    assert gpu.model == "NVIDIA GeForce RTX 4090"
+    assert gpu.driver_status is CapabilityStatus.AVAILABLE
+    assert gpu.driver_version == "560.35.03"
+    assert gpu.nvidia_smi_available is True
+    assert HostReasonCode.GPU_HARDWARE_DETECTED in caps.reason_codes
+    assert HostReasonCode.NVIDIA_DRIVER_AVAILABLE in caps.reason_codes
+    assert caps.partial is False
+    assert HostReasonCode.NO_ACCELERATOR_HARDWARE not in caps.reason_codes
+
+    rec = recommend(caps)
+    assert rec.status is RecommendationStatus.OFFER_SETUP
+
+
+def test_windows_smi_success_two_gpus_both_represented():
+    prober = make_windows_prober(
+        smi_stdout=(
+            "NVIDIA GeForce RTX 4090, 560.35.03\n"
+            "NVIDIA GeForce RTX 4080, 560.35.03\n"
+        ),
+    )
+    caps = prober.collect()
+    assert caps.gpu_count == 2
+    assert [g.model for g in caps.gpus] == [
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA GeForce RTX 4080",
+    ]
+    assert all(g.vendor == "NVIDIA" for g in caps.gpus)
+    assert caps.partial is False
+
+
+def test_windows_smi_malformed_honest_unknown_never_unavailable():
+    # Garbage output must yield an honest UNKNOWN — never a fabricated
+    # "driver absent" or "no hardware" conclusion, and never an exception.
+    prober = make_windows_prober(smi_stdout="this is not a csv line\n")
+    caps = prober.collect()
+    assert HostReasonCode.NVIDIA_SMI_MALFORMED in caps.reason_codes
+    assert HostReasonCode.NVIDIA_DRIVER_UNAVAILABLE not in caps.reason_codes
+    assert HostReasonCode.NO_ACCELERATOR_HARDWARE not in caps.reason_codes
+    assert all(g.driver_status is not CapabilityStatus.AVAILABLE for g in caps.gpus)
+    assert all(
+        g.driver_status is not CapabilityStatus.UNAVAILABLE for g in caps.gpus
+    )
+    for gpu in caps.gpus:
+        assert gpu.driver_status is CapabilityStatus.UNKNOWN
+
+    rec = recommend(caps)
+    assert rec.status is RecommendationStatus.UNKNOWN
+
+
+def test_windows_smi_command_error_driver_and_hardware_unknown():
+    # nvidia-smi ran but failed (e.g. exit code / no devices): on Windows
+    # that is still *no* evidence — never a negative conclusion.
+    prober = make_windows_prober(
+        smi_raises=CommandFailedError("nvidia-smi exited with code 6"),
+    )
+    caps = prober.collect()
+    assert caps.gpus == ()
+    assert HostReasonCode.NVIDIA_DRIVER_UNKNOWN in caps.reason_codes
+    assert HostReasonCode.GPU_HARDWARE_UNKNOWN in caps.reason_codes
+    assert caps.partial is True
+    assert HostReasonCode.NVIDIA_DRIVER_UNAVAILABLE not in caps.reason_codes
+    assert HostReasonCode.NO_ACCELERATOR_HARDWARE not in caps.reason_codes
+
+
+def test_windows_no_nvidia_evidence_honest_unknown_not_blocked():
+    # nvidia-smi not installed: absence of POSIX probe results must not be
+    # mistaken for "driver absent" or "no accelerator hardware".
+    prober = make_windows_prober(smi_unavailable=True)
+    caps = prober.collect()
+    assert caps.gpus == ()
+    assert HostReasonCode.NVIDIA_DRIVER_UNKNOWN in caps.reason_codes
+    assert HostReasonCode.GPU_HARDWARE_UNKNOWN in caps.reason_codes
+    assert HostReasonCode.PARTIAL_EVIDENCE in caps.reason_codes
+    assert HostReasonCode.NVIDIA_DRIVER_UNAVAILABLE not in caps.reason_codes
+    assert HostReasonCode.NO_ACCELERATOR_HARDWARE not in caps.reason_codes
+    assert caps.partial is True
+
+    rec = recommend(caps)
+    assert rec.status is RecommendationStatus.UNKNOWN
+    assert rec.status is not RecommendationStatus.BLOCKED
+    assert rec.status is not RecommendationStatus.NOT_APPLICABLE
 
 
 # ===========================================================================
