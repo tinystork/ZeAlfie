@@ -576,10 +576,14 @@ class ZeAlfieService:
 
         Production services always hold a real :class:`SharedRuntime` with a
         layout; the lock is scoped to that runtime root.  Returns ``None``
-        only when the injected runtime exposes no layout (test doubles) —
-        such a service cannot reach a real runtime mutation, and the
+        only when the injected runtime exposes no layout (test doubles).
+        The structural fail-closed guard lives in
+        :func:`~zealfie.runtime.deployment.apply_deployment_plan` (and the
+        other lock-owning entry points): a layout-less runtime raises
+        :class:`RuntimeMutationLockError` there instead of mutating, so a
+        fake without a layout can no longer reach a real mutation, and the
         low-level D2 contract (:func:`RuntimeMutationLock.require_lease`)
-        still fails closed inside the engine.
+        still fails closed inside the engine as a second line of defence.
         """
         layout = getattr(self._runtime, "layout", None)
         if layout is None:

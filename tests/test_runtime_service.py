@@ -837,8 +837,12 @@ def test_apply_blocked_plan_returns_failure(
         reason="simulated broken for test",
     )
 
-    # Fake runtime with BROKEN status and no-op rollback.
+    # Fake runtime with BROKEN status and no-op rollback.  It exposes a
+    # real layout so apply_deployment_plan can scope its mutation lease
+    # (ZA-M1-2L: the engine now refuses to mutate without one).
     class _BrokenFakeRuntime:
+        layout = RuntimeLayout(root=tmp_path / "rt")
+
         def status(self):
             return broken_status
 

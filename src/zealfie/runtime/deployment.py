@@ -32,7 +32,11 @@ from zealfie.releases.model import VerifiedArtifact
 from zealfie.releases.verifier import ArtifactRejectionError, revalidate_verified_artifact
 
 from .manager import SharedRuntime
-from .mutation_lock import OPERATION_RUNTIME_APPLY, RuntimeMutationLock
+from .mutation_lock import (
+    OPERATION_RUNTIME_APPLY,
+    RuntimeMutationLock,
+    RuntimeMutationLockError,
+)
 from .model import (
     DeploymentResult,
     InstallOutcome,
@@ -171,22 +175,20 @@ def apply_deployment_plan(
     / ``gpu-install``) is already held for the same runtime root in the
     same context, the nested acquisition reuses it (the outer operation
     name is preserved).
+
+    A runtime that exposes no layout (``getattr(runtime, "layout",
+    None)`` is ``None``) is rejected with
+    :class:`RuntimeMutationLockError` before any mutation: there is no
+    lease to scope the mutation to, and the engine refuses to mutate
+    without one (fail closed).
     """
     if runtime is None:
         runtime = SharedRuntime()
     layout = getattr(runtime, "layout", None)
     if layout is None:
-        # Duck-typed runtime without a layout (test double only): it cannot
-        # reach the real mutation primitives, and the D2 lease contract
-        # still fails closed inside the real RuntimeTransaction.  Production
-        # always passes SharedRuntime (layout is always present).
-        return _apply_deployment_plan_locked(
-            plan,
-            registry=registry,
-            runtime=runtime,
-            progress_callback=progress_callback,
-            cancel_check=cancel_check,
-            pre_activate=pre_activate,
+        raise RuntimeMutationLockError(
+            "apply_deployment_plan requires a runtime exposing a layout "
+            "for mutation-lease scoping; refusing to mutate without a lock"
         )
     with RuntimeMutationLock(layout.root).acquire(
         OPERATION_RUNTIME_APPLY

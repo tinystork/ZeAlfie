@@ -91,6 +91,12 @@ while a mutation is in progress.  `runtime gc-plan` may call
 `probe_busy()` (try-acquire + immediate release, strictly read-only,
 never raises) to add a warning line when a writer is active (D9).
 
+`probe_busy()` takes a real exclusive `flock` for a micro-window (it
+must try-acquire to observe contention).  A mutation starting exactly
+while the probe holds it may receive one spurious BUSY without owner
+diagnostics.  That is a safe failure — no invariant is ever violated —
+and the user simply retries.
+
 ## BUSY semantics (D6)
 
 Acquisition is strictly **non-blocking and fail-fast**, with zero retry.

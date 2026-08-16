@@ -481,6 +481,12 @@ class RuntimeMutationLock:
         lease (the caller is the owner, not a third party), or when the
         probe cannot be performed (unsupported platform, IO error) — the
         probe is strictly read-only and never raises.
+
+        The try-acquire is a real exclusive flock held for a micro-window:
+        a mutation starting exactly while the probe holds it may observe
+        one spurious BUSY without owner diagnostics.  That is a safe
+        failure — no invariant is ever violated — and the user simply
+        retries.
         """
         lock_path = self.lock_path()
         for lease in _lease_stack.get():
