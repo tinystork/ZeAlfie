@@ -11,6 +11,15 @@ M0-8B adds the transactional offline deployment engine.
 from __future__ import annotations
 
 from .deployment import DeploymentCancelledError, apply_deployment_plan
+from .gc import (
+    GcPlan,
+    GcResult,
+    GcSlotEntry,
+    GcStatus,
+    SlotCategory,
+    apply_gc_plan,
+    build_gc_plan,
+)
 from .installed_lock import (
     INSTALLED_LOCK_SCHEMA_VERSION,
     InstalledDependency,
@@ -62,6 +71,10 @@ __all__ = [
     "DeploymentStep",
     "DesiredComponent",
     "DesiredRuntimeState",
+    "GcPlan",
+    "GcResult",
+    "GcSlotEntry",
+    "GcStatus",
     "InstallOutcome",
     "InstallResult",
     "INSTALLED_LOCK_SCHEMA_VERSION",
@@ -77,11 +90,14 @@ __all__ = [
     "RuntimeSlot",
     "RuntimeState",
     "RuntimeStatus",
+    "SlotCategory",
     "validate_slot_id",
     "RuntimeTransaction",
     "SharedRuntime",
     "SharedRuntimeError",
     "apply_deployment_plan",
+    "apply_gc_plan",
+    "build_gc_plan",
     "check_desired_state_conflicts",
     "build_deployment_plan",
     "default_runtime_layout",

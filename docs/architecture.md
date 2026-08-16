@@ -1701,3 +1701,60 @@ GPU, no network, no real install).  The first REAL accelerated deployment
 on physical hardware remains behind the human gate: a real artifact
 source and explicit authorization are required; no production default
 ever fabricates one.
+
+## M1-2K — Safe Runtime GC
+
+### GC Lifecycle
+
+`src/zealfie/runtime/gc.py` adds a **pure, read-only planner**
+(`build_gc_plan`) and a **stale-checked apply engine** (`apply_gc_plan`)
+for slot pruning, designed from the Phase A lifecycle audit.
+
+* **Protection set** — `active.json` active + previous are HARD-protected;
+  `product-provenance.json` slot keys are protected (AUTHORITY);
+  `installed-lock.json` slot keys are protected (OBSERVATIONAL, fail-closed
+  KEEP); a slot referenced **only** by `accelerated-metadata.json`
+  (write-only observational record) is `PRUNABLE_CLEAN_METADATA` — pruned
+  with its metadata entry purged atomically.  A slot referenced nowhere is
+  `PRUNABLE`.
+* **Fail-closed** — absent/corrupt `active.json`, corrupt stores (invalid
+  JSON, unexpected `schema_version`, malformed `slots`, invalid slot-id
+  keys), missing active/previous dirs, record references to absent slot
+  dirs (`REPAIR_REQUIRED` — never auto-repaired), and invalid `slots/`
+  entries (bad name, symlink, non-directory) all produce `BLOCKED` with
+  **no** destructive proposal.
+* **Concurrency discipline** — no mutation lock exists (audit Q9); the
+  plan carries a `state_fingerprint` (sha256 over the 4 record bytes +
+  sorted `(name, mtime_ns, size)` slot entries).  `apply_gc_plan` rebuilds
+  a fresh plan, refuses `BLOCKED`/`STALE_PLAN`/non-READY, and deletes only
+  slots that are destructive in **both** fresh and supplied plan, sorted
+  by slot id, each re-validated path-safely immediately before `rmtree`
+  (`_validate_slot_entry`: strict `^rt-[0-9a-f]{12}$`, real-directory
+  `lstat`, no symlink component, strict descendant of `slots/`;
+  `_safe_delete_slot`: re-validate + `rmtree` with an `onerror` collector).
+  Active/previous are re-checked per deletion (defence in depth).  Never
+  touches `active.json` / `installed-lock.json` /
+  `product-provenance.json`.
+* **Metadata purge** — after successful deletions, entries of
+  `PRUNABLE_CLEAN_METADATA` slots are removed from
+  `accelerated-metadata.json` via read-modify-write + atomic write
+  (`mkstemp` + `fsync` + `os.replace`).  If that file changed since the
+  plan (slot reintroduced / entry missing / corrupt), the purge of that
+  file is refused while disk deletions remain valid (documented choice).
+* **CLI** — `zealfie runtime gc-plan` (strictly read-only preview; exit 0
+  READY / 1 BLOCKED) and `zealfie runtime gc` (fresh plan + apply, no
+  interactive prompt; exit 0 / 1 BLOCKED / 2 stale / 3 apply errors).
+
+### Metadata hygiene semantics (A–E)
+
+| Case | Situation | GC semantics |
+|---|---|---|
+| A | slot dir + accelerated-metadata entry (proven record) | `PRUNABLE_CLEAN_METADATA`: dir deleted, entry purged atomically |
+| B | metadata references a slot with no directory | `BLOCKED` `REPAIR_REQUIRED` (fail-closed; no automatic repair) |
+| C | slot dir without expected metadata | normal — `PRUNABLE` if unreferenced anywhere else |
+| D | corrupt metadata record (JSON/schema/malformed) | `BLOCKED` (fail-closed) |
+| E | installed-lock references a failed candidate | impossible in v1: any installed-lock reference protects the slot (OBSERVATIONAL → KEEP) |
+
+`reclaimed_bytes` is documented as an **estimate** (sum of `lstat`
+`st_size` over a `followlinks=False` walk; symlinks counted by link size,
+never traversed).

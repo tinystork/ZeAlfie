@@ -49,12 +49,18 @@ from .runtime import (
     DeploymentPlan,
     DeploymentResult,
     DeploymentStep,
+    GcPlan,
+    GcResult,
+    GcStatus,
+    SlotCategory,
     PlanningError,
     RuntimeReasonCode,
     RuntimeState,
     RuntimeStatus,
     SharedRuntime,
     SharedRuntimeError,
+    apply_gc_plan,
+    build_gc_plan,
     default_runtime_layout,
 )
 
@@ -115,6 +121,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to the offline release directory",
     )
     runtime_subs.add_parser("rollback", help="rollback the shared runtime")
+    runtime_subs.add_parser(
+        "gc-plan",
+        help="preview safe runtime garbage collection (read-only)",
+    )
+    runtime_subs.add_parser(
+        "gc",
+        help="apply safe runtime garbage collection",
+    )
 
     # -- products subcommand (M1-2A) -----------------------------------------
     products_parser = subparsers.add_parser("products", help="show product catalog state")
@@ -308,10 +322,56 @@ def _handle_runtime(args, *, stdout: TextIO) -> int:
             return 0
         return 3
 
+    if args.runtime_command == "gc-plan":
+        return _handle_runtime_gc_plan(args, stdout=stdout)
+
+    if args.runtime_command == "gc":
+        return _handle_runtime_gc(args, stdout=stdout)
+
     # No runtime subcommand given → show help.
     return 0
 
 
+# ---------------------------------------------------------------------------
+# ZA-M1-2K: safe runtime GC handlers
+# ---------------------------------------------------------------------------
+
+
+def _handle_runtime_gc_plan(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie runtime gc-plan`` — STRICTLY read-only preview.
+
+    Prints the plan (status, active/previous, one paragraph per slot,
+    recoverable total, blocking reasons, stale-metadata warnings).
+    Exit code 0 when the plan is READY, 1 when BLOCKED (same convention
+    as ``runtime plan`` for blocked previews).  Never mutates anything.
+    """
+    layout = default_runtime_layout()
+    plan = build_gc_plan(layout.root)
+    print(_format_gc_plan(plan), file=stdout)
+    return 0 if plan.status == GcStatus.READY else 1
+
+
+def _handle_runtime_gc(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie runtime gc``.
+
+    Builds a fresh plan, refuses to apply when BLOCKED, then hands the
+    plan to :func:`apply_gc_plan` (which re-plans and stale-checks
+    itself).  No interactive prompt — the human gate is the validation.
+    Exit codes: 0 success, 1 fresh plan BLOCKED, 2 stale plan refused,
+    3 apply completed with per-slot/metadata errors.
+    """
+    layout = default_runtime_layout()
+    plan = build_gc_plan(layout.root)
+    if plan.status == GcStatus.BLOCKED:
+        print(_format_gc_plan(plan), file=stdout)
+        return 1
+    result = apply_gc_plan(layout.root, plan)
+    print(_format_gc_result(result), file=stdout)
+    if result.stale:
+        return 2
+    if result.errors:
+        return 3
+    return 0
 # ---------------------------------------------------------------------------
 # M1-2A: products handler
 # ---------------------------------------------------------------------------
@@ -831,6 +891,91 @@ def _format_deployment_result(result: DeploymentResult) -> str:
         lines.append(" Success: no")
         if result.reason:
             lines.append(f" Reason: {result.reason}")
+    return "\n".join(lines)
+
+
+def _format_gc_plan(plan: GcPlan) -> str:
+    """Format a GcPlan for CLI output (pure, deterministic)."""
+    lines = [
+        "Safe runtime GC plan:",
+        f" Status: {plan.status.value}",
+        f" Runtime root: {plan.runtime_root}",
+    ]
+    if plan.active_slot_id:
+        lines.append(f" Active slot: {plan.active_slot_id}")
+    if plan.previous_slot_id:
+        lines.append(f" Previous slot: {plan.previous_slot_id}")
+    lines.append("")
+    if plan.slots:
+        lines.append("Slots:")
+        for entry in plan.slots:
+            if entry.category in (
+                SlotCategory.PRUNABLE,
+                SlotCategory.PRUNABLE_CLEAN_METADATA,
+            ):
+                action = "PRUNE"
+            elif entry.category in (
+                SlotCategory.ACTIVE,
+                SlotCategory.PREVIOUS,
+                SlotCategory.REFERENCED,
+            ):
+                action = "KEEP"
+            else:
+                action = "BLOCKED"
+            refs = ", ".join(entry.references) or "none"
+            lines.append(f" - {entry.slot_id}:")
+            lines.append(f"    Action: {action}")
+            lines.append(f"    Category: {entry.category.value}")
+            lines.append(f"    Reason: {entry.reason}")
+            lines.append(f"    References: {refs}")
+            lines.append(f"    Estimated bytes: {entry.estimated_bytes}")
+            if entry.metadata_action:
+                lines.append(f"    Metadata action: {entry.metadata_action}")
+    else:
+        lines.append("Slots: none")
+    lines.append("")
+    lines.append(
+        f" Total recoverable bytes (estimated): {plan.total_recoverable_bytes}"
+    )
+    if plan.blocking_reasons:
+        lines.append(" Blocking reasons:")
+        for reason in plan.blocking_reasons:
+            lines.append(f"  - {reason}")
+    else:
+        lines.append(" Blocking reasons: none")
+    if plan.stale_metadata:
+        lines.append(" Stale metadata warnings:")
+        for warning in plan.stale_metadata:
+            lines.append(f"  - {warning}")
+    lines.append("No changes have been applied (read-only preview).")
+    return "\n".join(lines)
+
+
+def _format_gc_result(result: GcResult) -> str:
+    """Format a GcResult for CLI output."""
+    lines = [
+        "Safe runtime GC result:",
+        f" Stale plan: {'yes' if result.stale else 'no'}",
+    ]
+    if result.deleted_slots:
+        lines.append(f" Deleted slots: {', '.join(result.deleted_slots)}")
+    else:
+        lines.append(" Deleted slots: none")
+    lines.append(
+        f" Reclaimed bytes (estimated): {result.reclaimed_bytes}"
+    )
+    if result.preserved_slots:
+        lines.append(
+            f" Preserved slots: {', '.join(result.preserved_slots)}"
+        )
+    else:
+        lines.append(" Preserved slots: none")
+    if result.errors:
+        lines.append(" Errors:")
+        for error in result.errors:
+            lines.append(f"  - {error}")
+    else:
+        lines.append(" Errors: none")
     return "\n".join(lines)
 
 
