@@ -30,6 +30,7 @@ from zealfie.acceleration import (
     CooperativeCancellationError,
 )
 from zealfie.app import InstallPhase
+from zealfie.runtime import RuntimeMutationBusyError, RuntimeMutationLockError
 from zealfie.gui.presentation import accelerated_install_view
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,33 @@ class AcceleratedInstallWorker(QObject):
                 progress_callback=self._on_progress,
                 fetcher=self._fetcher,
                 work_root=self._work_root,
+            )
+        except RuntimeMutationBusyError:
+            # ZA-M1-2L (D6): another ZeAlfie writer owns the runtime mutation
+            # lease — clean user message, no crash, worker finishes normally
+            # (no second silent mutation is attempted).
+            logger.warning(
+                "AcceleratedInstallWorker: runtime mutation BUSY"
+            )
+            result = AcceleratedDeploymentResult(
+                success=False,
+                cancelled=False,
+                phase=self._last_phase,
+                reason="another ZeAlfie runtime operation is in progress",
+            )
+        except RuntimeMutationLockError as exc:
+            logger.error(
+                "AcceleratedInstallWorker: runtime mutation lock "
+                "unavailable: %s", exc,
+            )
+            result = AcceleratedDeploymentResult(
+                success=False,
+                cancelled=False,
+                phase=self._last_phase,
+                reason=(
+                    "the ZeAlfie runtime mutation lock is unavailable: "
+                    f"{exc}"
+                )[:200],
             )
         except Exception as exc:
             # Defensive: the service contract returns results, never raises.

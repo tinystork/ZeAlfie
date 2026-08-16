@@ -18,6 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal
 
 from zealfie.app import ZeAlfieService
+from zealfie.runtime import RuntimeMutationBusyError, RuntimeMutationLockError
 from zealfie.sources.acquisition import ArchiveFetcher
 from zealfie.sources import SourceRefResolver
 
@@ -114,6 +115,26 @@ class InstallWorker(QObject):
                     "Worker: %s failed for %r: %s", self._operation, pid, reason
                 )
                 self.install_failed.emit(pid, reason)
+        except RuntimeMutationBusyError:
+            # ZA-M1-2L (D6): another ZeAlfie writer owns the runtime mutation
+            # lease — clean user message, no traceback, worker finishes
+            # normally (button re-enabled by the finished signal; no second
+            # silent mutation is attempted).
+            msg = "another ZeAlfie runtime operation is in progress"
+            logger.warning(
+                "Worker: %s BUSY for %r (runtime mutation lock held)",
+                self._operation, pid,
+            )
+            self.install_failed.emit(pid, msg)
+        except RuntimeMutationLockError as exc:
+            msg = f"the ZeAlfie runtime mutation lock is unavailable: {exc}"
+            if len(msg) > 200:
+                msg = msg[:197] + "\u2026"
+            logger.error(
+                "Worker: %s lock unavailable for %r: %s",
+                self._operation, pid, exc,
+            )
+            self.install_failed.emit(pid, msg)
         except Exception as exc:
             msg = str(exc)
             if len(msg) > 200:

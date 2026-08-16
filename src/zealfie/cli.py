@@ -57,6 +57,9 @@ from .runtime import (
     RuntimeReasonCode,
     RuntimeState,
     RuntimeStatus,
+    RuntimeMutationBusyError,
+    RuntimeMutationLock,
+    RuntimeMutationLockError,
     SharedRuntime,
     SharedRuntimeError,
     apply_gc_plan,
@@ -81,6 +84,50 @@ def _positive_finite_float(value: str) -> float:
             f"timeout must be a positive finite number, got {value!r}"
         )
     return f
+
+
+# ---------------------------------------------------------------------------
+# ZA-M1-2L: mutation-lock exit codes and refusal formatting
+# ---------------------------------------------------------------------------
+
+#: Exit code for a refused mutation because another ZeAlfie writer holds
+#: the runtime mutation lease (D8).  Used by every mutating handler where
+#: exit code 4 is free: ``runtime create`` (0/3), ``runtime rollback``
+#: (0/3), ``runtime gc`` (0/1/2/3), ``install`` (2/3/7/8/9/11).
+BUSY_EXIT = 4
+
+#: BUSY exit code for the handlers where 4 is already taken by another
+#: meaning (D8): ``runtime apply`` (4 = OfflineReleaseError) and
+#: ``system gpu-install`` (4 = plan failure).
+BUSY_EXIT_ALT = 5
+
+#: Exit code when the mutation lock primitive itself fails (D6, fail
+#: closed).  6 is free in every mutating handler (``launch`` uses 6, but
+#: launch never acquires the lock and the contract is per-handler).
+LOCK_ERROR_EXIT = 6
+
+
+def _format_mutation_busy(exc: RuntimeMutationBusyError) -> str:
+    """Format a refused mutation for the user — clean message, no traceback.
+
+    Mission ZA-M1-2L §24 format: "Runtime mutation refused:" / "Status:
+    BUSY" / "Current operation: <op>" (diagnostic only) / "No changes have
+    been applied."
+    """
+    lines = ["Runtime mutation refused:"]
+    lines.append(f" {exc}")
+    lines.append("Status: BUSY")
+    if exc.operation:
+        lines.append(f"Current operation: {exc.operation}")
+    if exc.pid is not None:
+        lines.append(f"Owner pid: {exc.pid}")
+    lines.append("No changes have been applied.")
+    return "\n".join(lines)
+
+
+def _format_mutation_lock_unavailable(exc: RuntimeMutationLockError) -> str:
+    """Format a lock-primitive failure (fail closed, never mutate)."""
+    return f"Runtime mutation lock unavailable: {exc}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -287,6 +334,13 @@ def _handle_runtime(args, *, stdout: TextIO) -> int:
             st = rt.create()
             print(_format_runtime_status(st), file=stdout)
             return 0
+        except RuntimeMutationBusyError as exc:
+            # D8: BUSY = 4 (free for runtime create: 0/3).
+            print(_format_mutation_busy(exc), file=sys.stderr)
+            return BUSY_EXIT
+        except RuntimeMutationLockError as exc:
+            print(_format_mutation_lock_unavailable(exc), file=sys.stderr)
+            return LOCK_ERROR_EXIT
         except SharedRuntimeError as exc:
             print(f"Cannot create shared runtime: {exc}", file=sys.stderr)
             return 3
@@ -309,13 +363,28 @@ def _handle_runtime(args, *, stdout: TextIO) -> int:
             result = service.apply_offline_deployment(args.release_dir)
             print(_format_deployment_result(result), file=stdout)
             return 0 if result.success else 3
+        except RuntimeMutationBusyError as exc:
+            # D8: BUSY = 5 (4 is OfflineReleaseError for runtime apply).
+            print(_format_mutation_busy(exc), file=sys.stderr)
+            return BUSY_EXIT_ALT
+        except RuntimeMutationLockError as exc:
+            print(_format_mutation_lock_unavailable(exc), file=sys.stderr)
+            return LOCK_ERROR_EXIT
         except OfflineReleaseError as exc:
             print(f"apply failed: {exc}", file=sys.stderr)
             return 4
 
     if args.runtime_command == "rollback":
         service = _make_service()
-        status = service.rollback_runtime()
+        try:
+            status = service.rollback_runtime()
+        except RuntimeMutationBusyError as exc:
+            # D8: BUSY = 4 (free for runtime rollback: 0/3).
+            print(_format_mutation_busy(exc), file=sys.stderr)
+            return BUSY_EXIT
+        except RuntimeMutationLockError as exc:
+            print(_format_mutation_lock_unavailable(exc), file=sys.stderr)
+            return LOCK_ERROR_EXIT
         print(_format_runtime_status(status), file=stdout)
         if (status.state == RuntimeState.READY
                 and status.reason_code == RuntimeReasonCode.RUNTIME_READY):
@@ -344,9 +413,23 @@ def _handle_runtime_gc_plan(args, *, stdout: TextIO) -> int:
     recoverable total, blocking reasons, stale-metadata warnings).
     Exit code 0 when the plan is READY, 1 when BLOCKED (same convention
     as ``runtime plan`` for blocked previews).  Never mutates anything.
+
+    ZA-M1-2L (D9): probes the mutation lock (try-acquire + immediate
+    release, strictly read-only, never raises); when a writer is active,
+    an honest warning line is printed to stderr — the snapshot may change.
+    Exit codes are unchanged.
     """
     layout = default_runtime_layout()
     plan = build_gc_plan(layout.root)
+    busy = RuntimeMutationLock(layout.root).probe_busy()
+    if busy is not None:
+        operation = busy.get("operation")
+        pid = busy.get("pid")
+        print(
+            f"Warning: runtime mutation in progress (operation={operation}, "
+            f"pid={pid}). Snapshot may change.",
+            file=sys.stderr,
+        )
     print(_format_gc_plan(plan), file=stdout)
     return 0 if plan.status == GcStatus.READY else 1
 
@@ -358,14 +441,23 @@ def _handle_runtime_gc(args, *, stdout: TextIO) -> int:
     plan to :func:`apply_gc_plan` (which re-plans and stale-checks
     itself).  No interactive prompt — the human gate is the validation.
     Exit codes: 0 success, 1 fresh plan BLOCKED, 2 stale plan refused,
-    3 apply completed with per-slot/metadata errors.
+    3 apply completed with per-slot/metadata errors, 4 mutation BUSY
+    (D8), 6 mutation lock unavailable (fail closed).
     """
     layout = default_runtime_layout()
     plan = build_gc_plan(layout.root)
     if plan.status == GcStatus.BLOCKED:
         print(_format_gc_plan(plan), file=stdout)
         return 1
-    result = apply_gc_plan(layout.root, plan)
+    try:
+        result = apply_gc_plan(layout.root, plan)
+    except RuntimeMutationBusyError as exc:
+        # D8: BUSY = 4 (free for runtime gc: 0/1/2/3).
+        print(_format_mutation_busy(exc), file=sys.stderr)
+        return BUSY_EXIT
+    except RuntimeMutationLockError as exc:
+        print(_format_mutation_lock_unavailable(exc), file=sys.stderr)
+        return LOCK_ERROR_EXIT
     print(_format_gc_result(result), file=stdout)
     if result.stale:
         return 2
@@ -564,6 +656,13 @@ def _handle_install(args, *, stdout: TextIO) -> int:
             fetcher=fetcher,
             work_root=work_root,
         )
+    except RuntimeMutationBusyError as exc:
+        # D8: BUSY = 4 (free for install: 2/3/7/8/9/11).
+        print(_format_mutation_busy(exc), file=sys.stderr)
+        return BUSY_EXIT
+    except RuntimeMutationLockError as exc:
+        print(_format_mutation_lock_unavailable(exc), file=sys.stderr)
+        return LOCK_ERROR_EXIT
     except UnknownProductError:
         catalog_ids = ", ".join(service.catalog.available_ids()) or "none"
         print(
@@ -607,7 +706,10 @@ def _handle_gpu_install(*, stdout: TextIO) -> int:
     acquisition and NO runtime work.  A ``PLAN_READY`` plan is handed
     to :meth:`~zealfie.app.service.ZeAlfieService.install_accelerated_runtime`
     with the service default acquirer (the packaged artifact manifest)
-    and a simple progress line per phase on stdout.  The composition
+    and a simple progress line per phase on stdout.
+
+    Exit codes: 0 success, 3 deployment failure, 4 plan failure, 5
+    mutation BUSY (D8), 6 mutation lock unavailable (fail closed).  The composition
     root's archive fetcher and install work root (the existing
     ``_make_install_deps`` factories — same transports as the normal
     install path, no new transport) are transmitted so the service can
@@ -655,6 +757,13 @@ def _handle_gpu_install(*, stdout: TextIO) -> int:
             work_root=work_root,
             progress_callback=_progress,
         )
+    except RuntimeMutationBusyError as exc:
+        # D8: BUSY = 5 (4 is plan failure for gpu-install).
+        print(_format_mutation_busy(exc), file=sys.stderr)
+        return BUSY_EXIT_ALT
+    except RuntimeMutationLockError as exc:
+        print(_format_mutation_lock_unavailable(exc), file=sys.stderr)
+        return LOCK_ERROR_EXIT
     except Exception as exc:
         print(f"gpu install failed: {exc}", file=sys.stderr)
         return 4

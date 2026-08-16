@@ -29,10 +29,12 @@ Matrix → test mapping (§33):
         tests/test_acceleration_compatibility.py), asserted green in
         validation; not duplicated here.
   (29)  test_runtime_status_available_during_busy
-  (30)  test_cli_gc_plan_warning_during_busy — added with the CLI/GUI
-        BUSY handling (commit b)
-  (31)  test_cli_busy_exit_codes_and_messages — commit b
-  (32)  test_gui_*_worker_busy_mapping — commit b
+  (30)  test_cli_gc_plan_warning_during_busy
+  (31)  test_cli_busy_exit_codes_and_messages (create/rollback/gc=4,
+        install=4, apply=5, gpu-install=5) + test_cli_lock_unavailable_exit_6
+  (32)  test_gui_install_worker_busy_mapping
+        test_gui_install_worker_lock_unavailable_mapping
+        test_gui_accelerated_worker_busy_mapping
   (33)  exactly-one-owner stress — proven in tests/test_mutation_lock.py
         (Phase B+C, referenced only, not duplicated).
   (34)  test_lease_released_on_exception_integrated_flow
@@ -696,6 +698,264 @@ def test_runtime_status_available_during_busy(tmp_path: Path) -> None:
     finally:
         _release_holder(thread, release)
 
+
+# ===========================================================================
+# (30) gc-plan honest warning during busy (D9) — exit codes unchanged
+# ===========================================================================
+
+
+@needs_posix
+def test_cli_gc_plan_warning_during_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import zealfie.cli as cli
+
+    layout = _synthesize_ready_runtime(tmp_path, python_link=True)
+    monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout)
+    import io
+
+    plan_stdout = io.StringIO()
+    thread, release = _thread_holder(layout.root, OPERATION_RUNTIME_APPLY)
+    try:
+        code = cli.run(["runtime", "gc-plan"], stdout=plan_stdout)
+        captured = capsys.readouterr()
+    finally:
+        _release_holder(thread, release)
+    assert code == 0
+    assert (
+        f"Warning: runtime mutation in progress (operation="
+        f"{OPERATION_RUNTIME_APPLY}, pid={os.getpid()}). Snapshot may change."
+    ) in captured.err
+    assert "Safe runtime GC plan:" in plan_stdout.getvalue()
+
+
+# ===========================================================================
+# (31) CLI BUSY exit codes and messages (4 / 5) + lock unavailable (6)
+# ===========================================================================
+
+
+def _run_cli(cli, argv, stdout=None):
+    import io
+
+    return cli.run(argv, stdout=stdout or io.StringIO())
+
+
+@needs_posix
+def test_cli_busy_exit_codes_and_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import zealfie.cli as cli
+
+    # ---- runtime create → BUSY exit 4 ----
+    layout_create = RuntimeLayout(root=tmp_path / "rt-create")
+    monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout_create)
+    thread, release = _thread_holder(layout_create.root, OPERATION_RUNTIME_CREATE)
+    try:
+        code = _run_cli(cli, ["runtime", "create"])
+        captured = capsys.readouterr()
+    finally:
+        _release_holder(thread, release)
+    assert code == cli.BUSY_EXIT
+    assert "Runtime mutation refused:" in captured.err
+    assert "Status: BUSY" in captured.err
+    assert f"Current operation: {OPERATION_RUNTIME_CREATE}" in captured.err
+    assert "No changes have been applied." in captured.err
+    assert not layout_create.root.exists()
+
+    # ---- runtime rollback → BUSY exit 4 ----
+    layout_rb = _synthesize_ready_runtime(tmp_path / "rb")
+    service_rb = ZeAlfieService(runtime=SharedRuntime(layout=layout_rb))
+    monkeypatch.setattr(cli, "_make_service", lambda: service_rb)
+    pointer_before = layout_rb.active_pointer.read_bytes()
+    thread, release = _thread_holder(layout_rb.root, OPERATION_RUNTIME_ROLLBACK)
+    try:
+        code = _run_cli(cli, ["runtime", "rollback"])
+        captured = capsys.readouterr()
+    finally:
+        _release_holder(thread, release)
+    assert code == cli.BUSY_EXIT
+    assert "Runtime mutation refused:" in captured.err
+    assert f"Current operation: {OPERATION_RUNTIME_ROLLBACK}" in captured.err
+    assert layout_rb.active_pointer.read_bytes() == pointer_before
+
+    # ---- runtime gc → BUSY exit 4 ----
+    layout_gc = _synthesize_ready_runtime(tmp_path / "gc", orphans=(ORPHAN_ID,))
+    monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout_gc)
+    thread, release = _thread_holder(layout_gc.root, OPERATION_RUNTIME_GC)
+    try:
+        code = _run_cli(cli, ["runtime", "gc"])
+        captured = capsys.readouterr()
+    finally:
+        _release_holder(thread, release)
+    assert code == cli.BUSY_EXIT
+    assert "Runtime mutation refused:" in captured.err
+    assert f"Current operation: {OPERATION_RUNTIME_GC}" in captured.err
+    assert layout_gc.slot_path(ORPHAN_ID).is_dir()
+
+    # ---- install → BUSY exit 4 ----
+    service_in, layout_in = _service_with_tmp_runtime(tmp_path / "install")
+    monkeypatch.setattr(cli, "_make_service", lambda: service_in)
+    monkeypatch.setattr(
+        cli, "_make_install_deps", lambda: (None, None, tmp_path / "install-work")
+    )
+    thread, release = _thread_holder(layout_in.root, OPERATION_PRODUCT_INSTALL)
+    try:
+        code = _run_cli(cli, ["install", "testx"])
+        captured = capsys.readouterr()
+    finally:
+        _release_holder(thread, release)
+    assert code == cli.BUSY_EXIT
+    assert "Runtime mutation refused:" in captured.err
+    assert f"Current operation: {OPERATION_PRODUCT_INSTALL}" in captured.err
+
+    # ---- runtime apply → BUSY exit 5 (4 is OfflineReleaseError) ----
+    layout_ap = _synthesize_ready_runtime(tmp_path / "apply")
+
+    class _ApplyLockService:
+        def __init__(self, root: Path) -> None:
+            self._lock = RuntimeMutationLock(root)
+
+        def apply_offline_deployment(self, release_dir):
+            with self._lock.acquire(OPERATION_RUNTIME_APPLY):
+                raise AssertionError("lease must not be acquirable during BUSY")
+
+    monkeypatch.setattr(
+        cli, "_make_service", lambda: _ApplyLockService(layout_ap.root)
+    )
+    thread, release = _thread_holder(layout_ap.root, OPERATION_RUNTIME_APPLY)
+    try:
+        code = _run_cli(cli, ["runtime", "apply", "--release-dir", "/nonexistent"])
+        captured = capsys.readouterr()
+    finally:
+        _release_holder(thread, release)
+    assert code == cli.BUSY_EXIT_ALT
+    assert "Runtime mutation refused:" in captured.err
+    assert f"Current operation: {OPERATION_RUNTIME_APPLY}" in captured.err
+
+    # ---- system gpu-install → BUSY exit 5 (4 is plan failure) ----
+    service_gpu, layout_gpu = _service_with_tmp_runtime(tmp_path / "gpu")
+    fake_plan = SimpleNamespace(
+        status=AcceleratedPlanStatus.PLAN_READY,
+        backend="cuda",
+        products_concerned=(),
+        blocked_reason=None,
+    )
+    monkeypatch.setattr(
+        service_gpu, "build_accelerated_deployment_plan", lambda: fake_plan
+    )
+    monkeypatch.setattr(cli, "_make_service", lambda: service_gpu)
+    monkeypatch.setattr(
+        cli, "_make_install_deps", lambda: (None, None, tmp_path / "gpu-work")
+    )
+    thread, release = _thread_holder(layout_gpu.root, OPERATION_GPU_INSTALL)
+    try:
+        code = _run_cli(cli, ["system", "gpu-install"])
+        captured = capsys.readouterr()
+    finally:
+        _release_holder(thread, release)
+    assert code == cli.BUSY_EXIT_ALT
+    assert "Runtime mutation refused:" in captured.err
+    assert f"Current operation: {OPERATION_GPU_INSTALL}" in captured.err
+
+
+@needs_posix
+def test_cli_lock_unavailable_exit_6(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import zealfie.cli as cli
+
+    layout = RuntimeLayout(root=tmp_path / "rt-lockerr")
+    monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout)
+    # Simulate a non-POSIX platform: the primitive fails → fail closed.
+    monkeypatch.setattr(mutation_lock_module, "_platform_is_posix", lambda: False)
+    code = _run_cli(cli, ["runtime", "create"])
+    captured = capsys.readouterr()
+    assert code == cli.LOCK_ERROR_EXIT
+    assert "Runtime mutation lock unavailable:" in captured.err
+    assert not layout.root.exists()
+
+
+# ===========================================================================
+# (32) GUI BUSY mapping — worker → message, no crash, clean finish
+# ===========================================================================
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 not available")
+def test_gui_install_worker_busy_mapping(tmp_path: Path) -> None:
+    from zealfie.gui.install_worker import InstallWorker
+
+    class _BusyService:
+        def install_product(self, *args, **kwargs):
+            raise RuntimeMutationBusyError(
+                lock_path=Path("/tmp/x.zealfie-mutation.lock"),
+                operation=OPERATION_PRODUCT_INSTALL,
+                pid=os.getpid(),
+            )
+
+    worker = InstallWorker(
+        "testx",
+        _BusyService(),
+        resolver=lambda o, r, ref: "a" * 40,
+        fetcher=lambda o, r, sha: b"zip",
+        work_root=tmp_path,
+        operation="install",
+    )
+    failed: list[tuple[str, str]] = []
+    finished: list[bool] = []
+    worker.install_failed.connect(lambda pid, msg: failed.append((pid, msg)))
+    worker.finished.connect(lambda: finished.append(True))
+    worker.run()
+    assert failed == [("testx", "another ZeAlfie runtime operation is in progress")]
+    assert finished == [True]
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 not available")
+def test_gui_install_worker_lock_unavailable_mapping(tmp_path: Path) -> None:
+    from zealfie.gui.install_worker import InstallWorker
+
+    class _LockBrokenService:
+        def install_product(self, *args, **kwargs):
+            raise RuntimeMutationLockError("fcntl unavailable")
+
+    worker = InstallWorker(
+        "testx",
+        _LockBrokenService(),
+        resolver=lambda o, r, ref: "a" * 40,
+        fetcher=lambda o, r, sha: b"zip",
+        work_root=tmp_path,
+        operation="install",
+    )
+    failed: list[tuple[str, str]] = []
+    finished: list[bool] = []
+    worker.install_failed.connect(lambda pid, msg: failed.append((pid, msg)))
+    worker.finished.connect(lambda: finished.append(True))
+    worker.run()
+    assert len(failed) == 1
+    assert failed[0][0] == "testx"
+    assert "runtime mutation lock is unavailable" in failed[0][1]
+    assert finished == [True]
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 not available")
+def test_gui_accelerated_worker_busy_mapping(tmp_path: Path) -> None:
+    from zealfie.gui.accelerated_install_worker import AcceleratedInstallWorker
+
+    class _BusyService:
+        def install_accelerated_runtime(self, **kwargs):
+            raise RuntimeMutationBusyError(
+                lock_path=Path("/tmp/x.zealfie-mutation.lock"),
+                operation=OPERATION_GPU_INSTALL,
+                pid=os.getpid(),
+            )
+
+    worker = AcceleratedInstallWorker(_BusyService(), work_root=tmp_path)
+    finished: list[object] = []
+    worker.finished.connect(finished.append)
+    worker.run()
+    assert len(finished) == 1
+    result = finished[0]
+    assert result.success is False
+    assert "another ZeAlfie runtime operation is in progress" in result.reason
 
 # ===========================================================================
 # (34) lease released on exception in an integrated flow → re-acquisition OK
