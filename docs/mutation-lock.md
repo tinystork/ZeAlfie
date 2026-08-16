@@ -28,7 +28,8 @@ follows a product install is inside the `product-install` lease window.
 
 ## Lock file location (D5)
 
-The lock is a `fcntl.flock` on a **sibling** of the *resolved* runtime
+The lock is an exclusive OS-level lock (`fcntl.flock` on POSIX,
+`msvcrt.locking` on Windows) on a **sibling** of the *resolved* runtime
 root:
 
 ```
@@ -41,7 +42,10 @@ to `".zealfie-" + sha256(str(root))[:16] + ".mutation-lock"`.
 The root is resolved (`Path.resolve(strict=False)`) *before* deriving the
 lock path, so equivalent spellings of the same root — symlinks, trailing
 slashes, relative vs absolute paths, `..` detours — map to the same lock
-file.  Only the lock file's parent directory is ever created; the runtime
+file.  On Windows the resolved root is additionally canonicalized with
+`os.path.normcase` (case/separator), because Windows filesystems are
+case-insensitive: the same root spelled differently must map to the same
+lock file.  Only the lock file's parent directory is ever created; the runtime
 root itself is **never** created by locking (an `ABSENT` runtime stays
 `ABSENT`, and nothing is written under `slots/` or `state/`).
 
@@ -63,12 +67,14 @@ and builds (D1, early acquisition).
 
 `flock` locks are released by the operating system when the holding
 process dies or the file descriptor is closed — including `SIGKILL`.
-**No manual cleanup is ever required**: a crash leaves a stale lock file
-and a stale owner sidecar on disk, and both are ignored by subsequent
-acquisitions.
+Windows `msvcrt.locking` byte-range locks are likewise owned and
+released by the OS on process death; no manual unlock is possible or
+needed.  **No manual cleanup is ever required**: a crash leaves a stale
+lock file and a stale owner sidecar on disk, and both are ignored by
+subsequent acquisitions.
 
 **FILE EXISTS != LOCK HELD.**  The lock file is a rendezvous point, not
-the authority; only a live `flock` blocks.  This module never deletes the
+the authority; only a live OS lock blocks (on either platform).  This module never deletes the
 lock file (deleting it while held would allow a second holder on a new
 inode).
 
@@ -91,7 +97,7 @@ while a mutation is in progress.  `runtime gc-plan` may call
 `probe_busy()` (try-acquire + immediate release, strictly read-only,
 never raises) to add a warning line when a writer is active (D9).
 
-`probe_busy()` takes a real exclusive `flock` for a micro-window (it
+`probe_busy()` takes a real exclusive OS lock for a micro-window (it
 must try-acquire to observe contention).  A mutation starting exactly
 while the probe holds it may receive one spurious BUSY without owner
 diagnostics.  That is a safe failure — no invariant is ever violated —
@@ -108,9 +114,10 @@ When another writer holds the lease:
   `acquired_at`, `invocation_id`) when the sidecar is readable;
 * no mutation is performed and nothing is written to the runtime.
 
-When the primitive itself fails (non-POSIX platform, missing `fcntl`,
-permissions, OS error), `acquire()` raises `RuntimeMutationLockError` —
-**fail closed**: a mutation must never proceed without a lease.
+When the primitive itself fails (unsupported platform, missing
+`fcntl`/`msvcrt`, permissions, OS error), `acquire()` raises
+`RuntimeMutationLockError` — **fail closed**: a mutation must never
+proceed without a lease.
 
 ## Nested transaction rule (D3)
 
@@ -118,9 +125,9 @@ Leases are tracked in a `ContextVar` stack per thread/task:
 
 * a **nested acquire for the same resolved root in the same context**
   (e.g. service → engine → transaction) reuses the existing lease token
-  (reference count incremented, no second `flock`, no deadlock);
+  (reference count incremented, no second OS lock, no deadlock);
 * a **different thread is a new writer**: its context is virgin, so it
-  performs a real non-blocking `flock` and fails with BUSY while the
+  performs a real non-blocking OS lock and fails with BUSY while the
   lease is held — a different thread of the same process is never
   considered reentrant;
 * **subprocesses never inherit the lock**: the fd is close-on-exec
@@ -138,11 +145,25 @@ the current context — raising `RuntimeMutationLeaseRequired` otherwise
 * **Linux / macOS (POSIX)**: `fcntl.flock(LOCK_EX | LOCK_NB)` on the
   lock file descriptor.  `fcntl` is imported lazily inside the backend
   functions, so the module imports on every platform.
-* **Windows (non-POSIX)**: **no backend** — `acquire()` raises
+* **Windows**: `msvcrt.locking(LK_NBLCK)` — a non-blocking exclusive
+  byte-range lock on byte range `[0, 1)` of the lock file.  The lock
+  file is padded to at least one byte on first creation so the range
+  legally exists (the contents are never authority).  Windows locks are
+  owned by the OS and released automatically on process death; a second
+  handle in the same process conflicts natively, so a different thread
+  gets BUSY without extra local state.  `msvcrt` is imported lazily
+  inside the backend functions.
+* **Other platforms**: no backend — `acquire()` raises
   `RuntimeMutationLockError` *before* creating any file or directory,
-  and no mutation is allowed without a lease (fail closed).  Physical
-  validation of Windows and macOS has not been performed; Linux is the
-  only platform exercised by the test suite and the witnesses.
+  and no mutation is allowed without a lease (fail closed).
+
+Real-Windows behavior remains a **HUMAN_GATE witness**
+(`tests/witness/windows_lock_witness.py`): the Windows backend is
+exercised only by synthetic decision-logic tests (fake `msvcrt`) on
+Linux.  It has **not** been validated on a real Windows host — that
+witness must be run by a human on real Windows before any claim of
+Windows production readiness.  Linux is the only platform exercised by
+the full test suite.
 
 ## Relationship with the other safety layers
 

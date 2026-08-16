@@ -866,10 +866,13 @@ def test_cli_lock_unavailable_exit_6(
 
     layout = RuntimeLayout(root=tmp_path / "rt-lockerr")
     monkeypatch.setattr(cli, "default_runtime_layout", lambda: layout)
-    # Simulate a non-POSIX platform: the primitive fails → fail closed.
-    monkeypatch.setattr(mutation_lock_module, "_platform_is_posix", lambda: False)
-    code = _run_cli(cli, ["runtime", "create"])
-    captured = capsys.readouterr()
+    # Simulate an unsupported platform: the primitive fails → fail closed.
+    monkeypatch.setattr(mutation_lock_module, "_os_name_override", "java")
+    try:
+        code = _run_cli(cli, ["runtime", "create"])
+        captured = capsys.readouterr()
+    finally:
+        monkeypatch.setattr(mutation_lock_module, "_os_name_override", None)
     assert code == cli.LOCK_ERROR_EXIT
     assert "Runtime mutation lock unavailable:" in captured.err
     assert not layout.root.exists()

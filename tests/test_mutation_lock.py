@@ -29,6 +29,19 @@ Additional (mission §31 / §35 / path safety / platform):
   - test_probe_busy_during_and_after_hold
   - test_lock_fd_is_not_inherited_by_subprocess (PEP 446)
   - test_non_posix_platform_fails_closed_before_any_disk_write
+Windows backend synthetic tests (decision logic only, fake msvcrt):
+  test_windows_acquire_release_cycle
+  test_windows_second_acquire_same_root_busy
+  test_windows_stale_lock_file_does_not_block
+  test_windows_stale_owner_sidecar_does_not_block
+  test_windows_corrupt_sidecar_busy_diagnostics_none
+  test_windows_nested_same_context_reuses_lease
+  test_windows_different_thread_same_process_busy
+  test_windows_exception_in_context_manager_releases
+  test_windows_primitive_failure_fails_closed
+  test_windows_contention_winerror33_is_busy
+  test_windows_probe_busy_free_and_held
+  test_windows_import_safety_no_platform_modules
   - test_require_lease_without_lease_raises
   - test_require_lease_with_lease_returns_token
   - test_operation_constants_exact_values
@@ -37,6 +50,7 @@ Additional (mission §31 / §35 / path safety / platform):
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import json
 import os
@@ -736,20 +750,400 @@ def test_lock_fd_is_not_inherited_by_subprocess(tmp_path: Path) -> None:
 def test_non_posix_platform_fails_closed_before_any_disk_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Simulate a non-POSIX platform by monkeypatching the platform check
-    # (on a real Windows host this returns False naturally).  Patching
+    # Simulate an unsupported platform through the documented test seam
+    # (on a real unsupported host os.name differs naturally).  Patching
     # os.name itself would make pathlib switch to WindowsPath.
-    monkeypatch.setattr(mutation_lock_module, "_platform_is_posix", lambda: False)
-    root = tmp_path / "sub" / "runtime_root"
-    lock = RuntimeMutationLock(root)
-    with pytest.raises(RuntimeMutationLockError):
-        lock.acquire(OPERATION_RUNTIME_GC)
-    # fail closed BEFORE any disk write: no lock file, no directory, no root
-    assert not lock.lock_path().exists()
-    assert not lock.lock_path().parent.exists()
-    assert not root.exists()
-    # the read-only probe degrades gracefully instead of raising
-    assert lock.probe_busy() is None
+    monkeypatch.setattr(mutation_lock_module, "_os_name_override", "java")
+    try:
+        root = tmp_path / "sub" / "runtime_root"
+        lock = RuntimeMutationLock(root)
+        with pytest.raises(RuntimeMutationLockError):
+            lock.acquire(OPERATION_RUNTIME_GC)
+        # fail closed BEFORE any disk write: no lock file, no directory, no root
+        assert not lock.lock_path().exists()
+        assert not lock.lock_path().parent.exists()
+        assert not root.exists()
+        # the read-only probe degrades gracefully instead of raising
+        assert lock.probe_busy() is None
+    finally:
+        monkeypatch.setattr(mutation_lock_module, "_os_name_override", None)
+
+
+# ---------------------------------------------------------------------------
+# Windows backend — synthetic decision-logic tests (they run on Linux).
+#
+# The fake ``msvcrt`` proves the backend's DECISION LOGIC: dispatch,
+# open/backing/release sequences, and the strict OSError classification
+# (winerror 33 / errno contention mapping -> BUSY, anything else -> fail
+# closed).  It is NOT evidence about the real Windows primitive —
+# real-Windows behavior remains a HUMAN_GATE witness
+# (tests/witness/windows_lock_witness.py).
+#
+# Mission matrix mapping:
+#   acquire/release            -> test_windows_acquire_release_cycle
+#   release-then-reacquire     -> test_windows_acquire_release_cycle (tail)
+#   same-root BUSY             -> test_windows_second_acquire_same_root_busy
+#   different-root OK          -> POSIX test_different_roots_do_not_conflict
+#                                 (root identity is backend-independent)
+#   stale lock file            -> test_windows_stale_lock_file_does_not_block
+#   stale owner sidecar        -> test_windows_stale_owner_sidecar_does_not_block
+#   corrupt sidecar            -> test_windows_corrupt_sidecar_busy_diagnostics_none
+#   nested (reuse/refcount)    -> test_windows_nested_same_context_reuses_lease
+#   different thread           -> test_windows_different_thread_same_process_busy
+#   exception in ctx manager   -> test_windows_exception_in_context_manager_releases
+#   unsupported platform       -> test_non_posix_platform_fails_closed_before_any_disk_write
+#   import safety              -> test_windows_import_safety_no_platform_modules
+#   primitive failure          -> test_windows_primitive_failure_fails_closed
+#   contention (winerror 33)   -> test_windows_contention_winerror33_is_busy
+#   probe free / held          -> test_windows_probe_busy_free_and_held
+# ---------------------------------------------------------------------------
+
+
+class _FakeMsvcrt:
+    """Stateful fake of the Windows msvcrt byte-range lock primitive.
+
+    A single process-global "region held" flag stands in for the Windows
+    byte-range lock on [0, 1) (fd-independent, like the OS region).
+    ``LK_NBLCK`` while held raises the OSError the real primitive reports
+    for contention (``winerror`` 33 = ERROR_LOCK_VIOLATION, mapped to
+    errno EACCES); ``LK_UNLCK`` releases.  Every call is recorded.
+    """
+
+    LK_NBLCK = 1
+    LK_UNLCK = 2
+
+    def __init__(self) -> None:
+        self.held = False
+        self.calls: list[tuple[str, int]] = []
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None:
+        if mode == self.LK_UNLCK:
+            self.calls.append(("unlock", nbytes))
+            self.held = False
+            return
+        self.calls.append(("lock", nbytes))
+        if self.held:
+            exc = OSError(13, "lock violation")
+            exc.winerror = 33
+            raise exc
+        self.held = True
+
+
+@contextlib.contextmanager
+def _windows_backend(monkeypatch: pytest.MonkeyPatch, fake: _FakeMsvcrt):
+    """Run with the Windows backend active (override + injected fake msvcrt).
+
+    ``_os_name_override`` is reset inside the context; the fake in
+    ``sys.modules`` is injected/removed by hand (pytest 8.x
+    ``MonkeyPatch.setitem`` does not support ``raising=`` and cannot
+    record the absence of a key) with an exact restore of the previous
+    state.
+    """
+    monkeypatch.setattr(mutation_lock_module, "_os_name_override", "nt")
+    had_msvcrt = "msvcrt" in sys.modules
+    previous = sys.modules.get("msvcrt")
+    sys.modules["msvcrt"] = fake
+    try:
+        yield
+    finally:
+        monkeypatch.setattr(mutation_lock_module, "_os_name_override", None)
+        if had_msvcrt:
+            sys.modules["msvcrt"] = previous
+        else:
+            sys.modules.pop("msvcrt", None)
+
+
+def test_windows_acquire_release_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        root = tmp_path / "runtime_root"
+        lock = RuntimeMutationLock(root)
+        lease = lock.acquire(OPERATION_RUNTIME_CREATE)
+        assert isinstance(lease, RuntimeMutationLease)
+        assert fake.held is True
+        assert RuntimeMutationLock.current_lease() is lease
+        # the empty lock file was padded with the deterministic backing byte
+        assert lock.lock_path().is_file()
+        assert lock.lock_path().stat().st_size == 1
+        assert stat.S_IMODE(lock.lock_path().stat().st_mode) == 0o600
+        assert not root.exists()
+        lease.release()
+        # fake region freed and fd closed
+        assert fake.held is False
+        assert lease._fd is None
+        assert RuntimeMutationLock.current_lease() is None
+        # release-then-reacquire: a fresh acquisition works immediately
+        with lock.acquire(OPERATION_RUNTIME_GC):
+            assert fake.held is True
+        assert fake.held is False
+
+
+def test_windows_second_acquire_same_root_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second writer for the same root gets BUSY with zero mutation.
+
+    The second writer must be a *virgin context*: a same-context nested
+    acquire of the same root is REUSE by design (D3 — see
+    ``test_windows_nested_same_context_reuses_lease``).  An empty
+    ``contextvars.Context`` runs the second acquire in the SAME thread,
+    exercising the real backend path (second handle → winerror 33).
+    """
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        root = tmp_path / "runtime_root"
+        lock_a = RuntimeMutationLock(root)
+        lock_b = RuntimeMutationLock(root)
+        lease = lock_a.acquire(OPERATION_RUNTIME_APPLY)
+        try:
+            sidecar_before = _owner_sidecar(lock_a).read_text(encoding="utf-8")
+            fresh = contextvars.Context()
+            with pytest.raises(RuntimeMutationBusyError) as excinfo:
+                fresh.run(lock_b.acquire, OPERATION_RUNTIME_GC)
+            assert BUSY_MESSAGE_CORE in str(excinfo.value)
+            # zero mutation: no sidecar overwrite — still names A's op/pid
+            assert _owner_sidecar(lock_a).read_text(encoding="utf-8") == sidecar_before
+            payload = json.loads(sidecar_before)
+            assert payload["operation"] == OPERATION_RUNTIME_APPLY
+            assert payload["pid"] == os.getpid()
+            # BUSY diagnostics come from A's sidecar
+            assert excinfo.value.operation == OPERATION_RUNTIME_APPLY
+            assert excinfo.value.pid == os.getpid()
+            # A still holds the region
+            assert fake.held is True
+        finally:
+            lease.release()
+
+
+def test_windows_stale_lock_file_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        root = tmp_path / "runtime_root"
+        lock = RuntimeMutationLock(root)
+        lock.lock_path().parent.mkdir(parents=True, exist_ok=True)
+        stale = "stale garbage from a previous crash\n"
+        lock.lock_path().write_text(stale)
+        with lock.acquire(OPERATION_RUNTIME_GC):
+            assert fake.held is True
+            # never truncated, never rewritten: contents are not authority
+            assert lock.lock_path().read_text(encoding="utf-8") == stale
+        assert fake.held is False
+
+
+def test_windows_stale_owner_sidecar_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        root = tmp_path / "runtime_root"
+        lock = RuntimeMutationLock(root)
+        _owner_sidecar(lock).parent.mkdir(parents=True, exist_ok=True)
+        _owner_sidecar(lock).write_text(
+            json.dumps(
+                {
+                    "operation": "runtime-gc",
+                    "pid": 99999999,
+                    "acquired_at": "2020-01-01T00:00:00+00:00",
+                    "invocation_id": "deadbeef",
+                }
+            )
+        )
+        # stale diagnostics are never authority → acquisition proceeds and
+        # overwrites the sidecar with THIS acquisition's identity
+        with lock.acquire(OPERATION_RUNTIME_APPLY):
+            assert fake.held is True
+        payload = json.loads(_owner_sidecar(lock).read_text(encoding="utf-8"))
+        assert payload["operation"] == OPERATION_RUNTIME_APPLY
+        assert payload["pid"] == os.getpid()
+
+
+def test_windows_corrupt_sidecar_busy_diagnostics_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        root = tmp_path / "runtime_root"
+        lock = RuntimeMutationLock(root)
+        _owner_sidecar(lock).parent.mkdir(parents=True, exist_ok=True)
+        _owner_sidecar(lock).write_text("{not valid json")
+        # corrupt sidecar + free fake → acquisition itself proceeds
+        lease = lock.acquire(OPERATION_RUNTIME_APPLY)
+        try:
+            assert fake.held is True
+            # corrupt it again AFTER acquisition: the BUSY reader must
+            # tolerate it and yield None diagnostics (never raise)
+            _owner_sidecar(lock).write_text("{still not valid json")
+            fresh = contextvars.Context()
+            with pytest.raises(RuntimeMutationBusyError) as excinfo:
+                fresh.run(lock.acquire, OPERATION_RUNTIME_GC)
+            assert BUSY_MESSAGE_CORE in str(excinfo.value)
+            assert excinfo.value.operation is None
+            assert excinfo.value.pid is None
+            assert excinfo.value.acquired_at is None
+            assert excinfo.value.invocation_id is None
+        finally:
+            lease.release()
+
+
+def test_windows_nested_same_context_reuses_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        root = tmp_path / "runtime_root"
+        lock = RuntimeMutationLock(root)
+        outer = lock.acquire(OPERATION_PRODUCT_INSTALL)
+        try:
+            inner = lock.acquire(OPERATION_RUNTIME_APPLY)
+            third = RuntimeMutationLock(root).acquire(OPERATION_RUNTIME_CREATE)
+            assert inner is outer
+            assert third is outer
+            assert outer._refcount == 3
+            # exactly one LK_NBLCK ever issued — nesting adds no lock calls
+            assert [c for c in fake.calls if c[0] == "lock"] == [("lock", 1)]
+            assert fake.held is True
+            third.release()
+            inner.release()
+            # refcount back to 1: still held, no unlock yet
+            assert outer._refcount == 1
+            assert fake.held is True
+        finally:
+            outer.release()
+        assert fake.held is False
+        assert [c for c in fake.calls if c[0] == "unlock"] == [("unlock", 1)]
+
+
+def test_windows_different_thread_same_process_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        root = tmp_path / "runtime_root"
+        lock = RuntimeMutationLock(root)
+        with lock.acquire(OPERATION_RUNTIME_APPLY):
+            # a different thread is a NEW writer (virgin context): its
+            # second handle conflicts natively → winerror 33 → BUSY
+            result = _acquire_in_thread(lock, OPERATION_RUNTIME_GC)
+            assert isinstance(result, RuntimeMutationBusyError)
+            assert BUSY_MESSAGE_CORE in str(result)
+            assert result.operation == OPERATION_RUNTIME_APPLY
+            assert result.pid == os.getpid()
+        # after release, the thread acquires fine
+        result = _acquire_in_thread(lock, OPERATION_RUNTIME_GC)
+        assert isinstance(result, RuntimeMutationLease)
+        result.release()
+        assert fake.held is False
+
+
+def test_windows_exception_in_context_manager_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        lock = RuntimeMutationLock(tmp_path / "runtime_root")
+        with pytest.raises(ValueError, match="boom"):
+            with lock.acquire(OPERATION_RUNTIME_GC):
+                assert fake.held is True
+                raise ValueError("boom")
+        assert fake.held is False
+        assert RuntimeMutationLock.current_lease() is None
+        with lock.acquire(OPERATION_RUNTIME_GC):
+            pass
+        assert fake.held is False
+
+
+def test_windows_primitive_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+
+    def _raise_eio(fd: int, mode: int, nbytes: int) -> None:
+        # OSError with errno 5 (EIO) and NO winerror — not one of the
+        # documented contention signatures → fail closed, never BUSY.
+        raise OSError(5, "input/output error")
+
+    with _windows_backend(monkeypatch, fake):
+        lock = RuntimeMutationLock(tmp_path / "runtime_root")
+        monkeypatch.setattr(fake, "locking", _raise_eio)
+        with pytest.raises(RuntimeMutationLockError, match="msvcrt.locking failed"):
+            lock.acquire(OPERATION_RUNTIME_GC)
+        assert RuntimeMutationLock.current_lease() is None
+        assert fake.held is False
+
+
+def test_windows_contention_winerror33_is_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Classification: winerror 33 (ERROR_LOCK_VIOLATION) → BUSY."""
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        fake.held = True  # another process holds the region
+        lock = RuntimeMutationLock(tmp_path / "runtime_root")
+        with pytest.raises(RuntimeMutationBusyError) as excinfo:
+            lock.acquire(OPERATION_RUNTIME_GC)
+        assert BUSY_MESSAGE_CORE in str(excinfo.value)
+        assert RuntimeMutationLock.current_lease() is None
+
+
+def test_windows_probe_busy_free_and_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeMsvcrt()
+    with _windows_backend(monkeypatch, fake):
+        lock = RuntimeMutationLock(tmp_path / "runtime_root")
+        assert lock.probe_busy() is None  # free
+        assert fake.held is False  # the probe released its own try-acquire
+        lease = lock.acquire(OPERATION_RUNTIME_APPLY)
+        try:
+            assert lock.probe_busy() is None  # we are the owner
+            info = _probe_in_thread(lock)  # a virgin context sees the owner
+            assert info is not None
+            assert info["pid"] == os.getpid()
+            assert info["operation"] == OPERATION_RUNTIME_APPLY
+        finally:
+            lease.release()
+        assert lock.probe_busy() is None
+
+
+def test_windows_import_safety_no_platform_modules() -> None:
+    """mutation_lock.py never imports fcntl/msvcrt eagerly (import safety).
+
+    Loads the module file in isolation in a fresh interpreter.  Note: the
+    naive check — ``import zealfie.runtime.mutation_lock`` then asserting
+    "fcntl" not in sys.modules — fails on POSIX for reasons unrelated to
+    this module: the package chain (zealfie.runtime → deployment → venv
+    → subprocess) makes CPython's subprocess import fcntl at module
+    level.  The real invariant is that *this module* has no eager
+    platform-primitive import, which isolation proves exactly.
+    """
+    script = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+        spec = importlib.util.spec_from_file_location(
+            "zealfie.runtime.mutation_lock", sys.argv[1]
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        print("FCNTL" if "fcntl" in sys.modules else "NOFCNTL", flush=True)
+        print("MSVCRT" if "msvcrt" in sys.modules else "NOMSVCRT", flush=True)
+        print("LOADED" if hasattr(mod, "RuntimeMutationLock") else "NOTLOADED", flush=True)
+        """
+    ).strip()
+    proc = subprocess.run(
+        [sys.executable, "-c", script, str(mutation_lock_module.__file__)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "NOFCNTL" in proc.stdout
+    assert "NOMSVCRT" in proc.stdout
+    assert "LOADED" in proc.stdout
 
 
 # ---------------------------------------------------------------------------

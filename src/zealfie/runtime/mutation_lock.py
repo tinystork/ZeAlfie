@@ -6,26 +6,39 @@ may own the runtime at a time.  The lease is acquired with
 complete logical mutation (D1) and covers the whole mutation window,
 including downloads and builds.  Read-only commands never acquire it.
 
-Backend — POSIX only (D4).  The lock is a ``fcntl.flock(LOCK_EX | LOCK_NB)``
-on a sibling lock file derived from the *resolved* runtime root (D5)::
+Backend (D4).  The lock is an exclusive, non-blocking OS lock on a
+sibling lock file derived from the *resolved* runtime root (D5)::
 
     <root>.parent / f".{root.name}.zealfie-mutation.lock"
 
 (if ``root.name`` is empty, the name is
-``".zealfie-" + sha256(str(root))[:16] + ".mutation-lock"``).  ``fcntl`` is
-imported *inside* the backend functions, never at module level, so this
-module imports cleanly on every platform.  On a non-POSIX platform
-(Windows), :meth:`RuntimeMutationLock.acquire` raises
-:class:`RuntimeMutationLockError` *before* touching the filesystem: no
-lock file, no directory — and, critically, no mutation is ever allowed
-without a lease (fail closed).  Only the parent directory of the lock
-file is created; the runtime root itself is never created by locking.
+``".zealfie-" + sha256(str(root))[:16] + ".mutation-lock"``).
+
+* **POSIX** (Linux / macOS): ``fcntl.flock(LOCK_EX | LOCK_NB)`` on the
+  lock file descriptor.
+* **Windows** (``os.name == "nt"``): ``msvcrt.locking(fd, LK_NBLCK, 1)``
+  — a non-blocking exclusive byte-range lock on byte range ``[0, 1)`` of
+  the lock file.  The lock file is padded to at least one byte on first
+  creation so the range legally exists; its contents are never
+  authority.  Windows locks are process-owned by the OS: they are
+  released automatically on process death, and a second handle in the
+  same process conflicts natively (a different thread → BUSY without
+  extra local state).
+* **any other platform**: :meth:`RuntimeMutationLock.acquire` raises
+  :class:`RuntimeMutationLockError` *before* touching the filesystem: no
+  lock file, no directory — and, critically, no mutation is ever allowed
+  without a lease (fail closed).
+
+``fcntl`` / ``msvcrt`` are imported *inside* the backend functions,
+never at module level, so this module imports cleanly on every platform.
+Only the parent directory of the lock file is created; the runtime root
+itself is never created by locking.
 
 The lock file is only a rendezvous point, never the authority:
 **FILE EXISTS != LOCK HELD**.  A stale lock file (left by a crash or by
-manual creation) never blocks acquisition; only a live ``flock`` does.
-The kernel releases the flock automatically when the holding process
-dies or the file descriptor is closed, so crash recovery needs no manual
+manual creation) never blocks acquisition; only a live OS lock does.
+The OS releases the lock automatically when the holding process dies or
+the file descriptor is closed, so crash recovery needs no manual
 cleanup.  The lock file is never deleted by this module.
 
 Diagnostics: each acquisition atomically overwrites
@@ -38,8 +51,8 @@ missing sidecars are tolerated and never cause BUSY.
 Reentrance (D3): held leases are tracked in a ``ContextVar`` stack per
 thread/task.  A nested :meth:`~RuntimeMutationLock.acquire` for the same
 resolved root in the same context reuses the existing lease (refcount
-incremented, no new flock, no deadlock).  A different thread gets a
-fresh context and therefore a real non-blocking flock: if the lease is
+incremented, no new OS lock, no deadlock).  A different thread gets a
+fresh context and therefore a real non-blocking OS lock: if the lease is
 held it fails fast with :class:`RuntimeMutationBusyError` — a different
 thread of the same process is a *new writer*, never reentrant.
 Subprocesses never inherit the lock fd (PEP 446, close-on-exec by
@@ -107,9 +120,9 @@ def _utc_now_iso() -> str:
 class RuntimeMutationLockError(Exception):
     """The lock primitive itself failed.
 
-    Fail closed: a primitive failure (non-POSIX platform, unavailable
-    ``fcntl``, permissions, OS error) must never allow a mutation to
-    proceed without a lease.
+    Fail closed: a primitive failure (unsupported platform, unavailable
+    backend primitive — ``fcntl`` or ``msvcrt`` —, permissions, OS error)
+    must never allow a mutation to proceed without a lease.
     """
 
 
@@ -230,33 +243,56 @@ class RuntimeMutationLease:
         return False
 
 
-# -- POSIX backend ------------------------------------------------------------
+# -- platform dispatch / backends (D4) ----------------------------------------
 
 
-def _platform_is_posix() -> bool:
-    """True when the POSIX-only flock backend (``fcntl``) is usable."""
-    return os.name == "posix"
+_os_name_override: str | None = None
+
+
+def _effective_os_name() -> str:
+    """``os.name``, overridable for tests (never set in production code)."""
+    return _os_name_override if _os_name_override is not None else os.name
+
+
+def _backend_kind() -> str:
+    """Dispatch key: "posix" (fcntl) | "windows" (msvcrt) | "unsupported"."""
+    name = _effective_os_name()
+    if name == "posix":
+        return "posix"
+    if name == "nt":
+        return "windows"
+    return "unsupported"
 
 
 def _check_platform() -> None:
-    """Gate the POSIX-only backend (D4) — fails closed before any disk write.
+    """Gate the backend (D4) — fails closed before any disk write.
 
-    ``fcntl`` is imported here (not at module level) so the module itself
-    imports cleanly on every platform, including Windows.
+    ``fcntl`` / ``msvcrt`` are imported here (not at module level) so the
+    module itself imports cleanly on every platform.
     """
-    if not _platform_is_posix():
+    kind = _backend_kind()
+    if kind == "posix":
+        try:
+            import fcntl  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeMutationLockError(
+                "fcntl is unavailable on this platform; refusing to mutate "
+                "without a lock"
+            ) from exc
+    elif kind == "windows":
+        try:
+            import msvcrt  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeMutationLockError(
+                "msvcrt is unavailable on this platform; refusing to mutate "
+                "without a lock"
+            ) from exc
+    else:
         raise RuntimeMutationLockError(
-            "ZeAlfie runtime mutation lock is POSIX-only (fcntl.flock): "
-            f"os.name={os.name!r} is not supported; refusing to mutate "
+            "ZeAlfie runtime mutation lock has no backend for "
+            f"os.name={_effective_os_name()!r}; refusing to mutate "
             "without a lock"
         )
-    try:
-        import fcntl  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeMutationLockError(
-            "fcntl is unavailable on this platform; refusing to mutate "
-            "without a lock"
-        ) from exc
 
 
 def _open_lock_fd(lock_path: Path) -> int:
@@ -269,7 +305,25 @@ def _open_lock_fd(lock_path: Path) -> int:
         ) from exc
 
 
-def _try_flock(fd: int) -> bool:
+def _ensure_lock_range_backing(fd: int) -> None:
+    """Pad the lock file to >=1 byte so the Windows byte range [0, 1) exists.
+
+    ``msvcrt.locking`` requires the locked region to exist in the file; a
+    freshly created lock file is empty.  Write one zero byte at offset 0
+    only when the file is empty — deterministic backing, the contents are
+    never authority (FILE EXISTS != LOCK HELD), and the file is never
+    truncated.  Only the Windows path calls this.
+    """
+    try:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\x00")
+    except OSError as exc:
+        raise RuntimeMutationLockError(
+            f"cannot prepare mutation lock file backing: {exc}"
+        ) from exc
+
+
+def _try_lock_posix(fd: int) -> bool:
     """Non-blocking exclusive flock.  Returns False when the lock is held."""
     import fcntl
 
@@ -282,6 +336,55 @@ def _try_flock(fd: int) -> bool:
     return True
 
 
+def _try_lock_windows(fd: int) -> bool:
+    """Non-blocking exclusive Windows byte-range lock.  False when held.
+
+    ``msvcrt.locking(fd, LK_NBLCK, 1)`` locks byte range [0, 1).  The OS
+    owns the lock: it is released on process death, and a second handle
+    in the same process conflicts natively (different thread -> BUSY
+    without extra local state).  Error classification is strict (B5,
+    fail closed): only the documented contention signatures map to BUSY;
+    every other OSError is a primitive failure.
+    """
+    import msvcrt
+
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError as exc:
+        raise RuntimeMutationLockError(
+            f"cannot seek mutation lock file: {exc}"
+        ) from exc
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        # POSIX-built OSErrors carry no ``winerror`` attribute at all;
+        # getattr keeps the strict classification uniform (B5).
+        winerror = getattr(exc, "winerror", None)
+        if winerror == 33:
+            # ERROR_LOCK_VIOLATION — the region is held elsewhere.
+            return False
+        if winerror is None and exc.errno in (
+            errno.EACCES,
+            errno.EDEADLK,
+            errno.EAGAIN,
+        ):
+            # msvcrt contention errno mapping.
+            return False
+        raise RuntimeMutationLockError(f"msvcrt.locking failed: {exc}") from exc
+    return True
+
+
+def _try_lock(fd: int) -> bool:
+    """Non-blocking exclusive lock via the active backend.  False = held.
+
+    :func:`_check_platform` gates unsupported platforms before any fd
+    exists, so the kind here is "posix" or "windows".
+    """
+    if _backend_kind() == "windows":
+        return _try_lock_windows(fd)
+    return _try_lock_posix(fd)
+
+
 def _close_fd_best_effort(fd: int) -> None:
     try:
         os.close(fd)
@@ -290,15 +393,39 @@ def _close_fd_best_effort(fd: int) -> None:
 
 
 def _release_fd(fd: int) -> None:
-    """``flock(LOCK_UN)`` then close — best-effort (crash-safe by design)."""
-    try:
-        import fcntl
+    """Release via the active backend, then close — best-effort (crash-safe).
 
+    POSIX: ``flock(LOCK_UN)`` then close.  Windows: ``lseek(0)`` +
+    ``msvcrt.locking(fd, LK_UNLCK, 1)`` then close.  Unsupported: close
+    only.  The fd is always closed, even when the unlock fails.
+    """
+    kind = _backend_kind()
+    if kind == "windows":
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError as exc:
-            logger.debug("mutation lock LOCK_UN failed (fd closed anyway): %s", exc)
-    finally:
+            import msvcrt
+
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError as exc:
+                logger.debug(
+                    "mutation lock LK_UNLCK failed (fd closed anyway): %s", exc
+                )
+        finally:
+            _close_fd_best_effort(fd)
+    elif kind == "posix":
+        try:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError as exc:
+                logger.debug(
+                    "mutation lock LOCK_UN failed (fd closed anyway): %s", exc
+                )
+        finally:
+            _close_fd_best_effort(fd)
+    else:
         _close_fd_best_effort(fd)
 
 
@@ -380,7 +507,8 @@ def _read_owner_info(lock_path: Path) -> dict[str, Any]:
 
 
 class RuntimeMutationLock:
-    """Per-runtime-root inter-process mutation lock (fcntl.flock, POSIX-only).
+    """Per-runtime-root inter-process mutation lock (fcntl.flock on POSIX,
+    msvcrt.locking on Windows).
 
     See the module docstring for the full contract (D3-D7):
     fail-fast BUSY, reentrance by ContextVar stack, crash-safe primitive,
@@ -392,6 +520,10 @@ class RuntimeMutationLock:
         # of the same root (symlinks, trailing slash, relative vs absolute)
         # map to the same resolved root and therefore the same lock file.
         self.runtime_root = Path(runtime_root).expanduser().resolve(strict=False)
+        if _effective_os_name() == "nt":
+            # Windows filesystems are case-insensitive (D5): the same root
+            # spelled differently must map to the same lock file.
+            self.runtime_root = Path(os.path.normcase(str(self.runtime_root)))
 
     def lock_path(self) -> Path:
         """Derived sibling lock-file path for this runtime root (D5).
@@ -440,7 +572,9 @@ class RuntimeMutationLock:
             ) from exc
         fd = _open_lock_fd(lock_path)
         try:
-            acquired = _try_flock(fd)
+            if _backend_kind() == "windows":
+                _ensure_lock_range_backing(fd)
+            acquired = _try_lock(fd)
         except BaseException:
             _close_fd_best_effort(fd)
             raise
@@ -482,7 +616,7 @@ class RuntimeMutationLock:
         probe cannot be performed (unsupported platform, IO error) — the
         probe is strictly read-only and never raises.
 
-        The try-acquire is a real exclusive flock held for a micro-window:
+        The try-acquire is a real exclusive OS lock held for a micro-window:
         a mutation starting exactly while the probe holds it may observe
         one spurious BUSY without owner diagnostics.  That is a safe
         failure — no invariant is ever violated — and the user simply
@@ -497,7 +631,9 @@ class RuntimeMutationLock:
             _check_platform()
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             fd = _open_lock_fd(lock_path)
-            acquired = _try_flock(fd)
+            if _backend_kind() == "windows":
+                _ensure_lock_range_backing(fd)
+            acquired = _try_lock(fd)
         except (RuntimeMutationLockError, OSError):
             if fd is not None:
                 _close_fd_best_effort(fd)
