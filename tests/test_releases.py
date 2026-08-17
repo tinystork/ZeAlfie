@@ -1182,6 +1182,9 @@ def test_adversarial_artifact0_wrong_host_bypassed_default(tmp_path, witness_whe
     Even though artifact 0 would be valid on Windows, on Linux the
     verifier must refuse to silently verify it.  The old default of
     artifact_index=0 would have let this pass.
+
+    Uses an explicit synthetic Linux host (host-independent by
+    design) so the scenario also holds on macOS/Windows CI runners.
     """
     sha = _sha256(witness_wheel)
     size = witness_wheel.stat().st_size
@@ -1220,7 +1223,7 @@ def test_adversarial_artifact0_wrong_host_bypassed_default(tmp_path, witness_whe
 
     _copy_wheel_as(witness_wheel, root, "adversarial-copy.whl")
     # With explicit index 1 (correct for Linux host) → succeeds.
-    host = HostTarget.from_current_host()
+    host = HostTarget("py313", "cp313", "linux_x86_64")  # synthetic Linux host
     idx = select_artifact(manifest, host)
     assert idx == 1  # the linux one
     va = verify_artifact(
