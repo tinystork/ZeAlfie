@@ -230,3 +230,4 @@ runtime preserved; rollback path unchanged.
 | Windows technical-subprocess console UX | FIXED (CREATE_NO_WINDOW helper; real-window verification = follow-up) |
 | Windows nvidia-smi format + probe encoding | FIXED (24026d9) + regression tests |
 | macOS readiness | **AUDITED — synthetic tests only** (real macOS = HUMAN GATE) |
+| Diagnostic log discoverability | FOLLOW-UP (no persistent log file today — loggers write to stderr; a logging subsystem is out of scope for this mission) |
