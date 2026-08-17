@@ -15,6 +15,9 @@ name: "macOS readiness"
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/m1-2m-macos-readiness
 
 permissions:
   contents: read
