@@ -146,7 +146,8 @@ from zealfie.releases.model import (
     VerifiedArtifact,
 )
 from zealfie.releases.resolver import ReleaseResolutionError, resolve_local_release
-from zealfie.releases.verifier import verify_artifact
+from zealfie.releases.verifier import ArtifactRejectionError, verify_artifact
+from zealfie.runtime.artifact_cache import ArtifactCacheStore, runtime_cache_gc
 from zealfie.runtime.deployment import apply_deployment_plan
 from zealfie.runtime.gc import (
     GcResult,
@@ -513,6 +514,16 @@ class ZeAlfieService:
     artifact source is configured yet), and a non-``PLAN_READY`` plan
     performs no acquisition and no runtime work.
 
+    ZA-M1-3A.3 (LOT C+D) adds the shared verified artifact cache:
+    KEEP products, dependency wheelhouse entries, and accelerated GPU
+    wheels are stored content-addressed under
+    ``<runtime_root>/cache/artifacts`` (outside slots/) and reused only
+    after byte-level digest re-verification; a bounded best-effort cache
+    GC prunes artifacts not referenced by the persisted slot state
+    (ACTIVE + PREVIOUS always survive) after every successful
+    transaction.  The cache is an optimization, never an authority: any
+    miss or mismatch re-acquires normally.
+
     Dependencies (registry, runtime, catalog, host, selection_store)
     are injectable so tests can supply synthetic instances.
     """
@@ -582,6 +593,16 @@ class ZeAlfieService:
         # available either way).  Default True: in steady-state
         # operation only ACTIVE + PREVIOUS slots persist.
         self._auto_gc = bool(auto_gc)
+        # ZA-M1-3A.3 LOT C+D: shared verified artifact cache, derived from
+        # the runtime layout (``<runtime_root>/cache/artifacts``, outside
+        # slots/).  Layout-less test doubles leave it disabled (None):
+        # every cache path then behaves exactly as before.
+        layout_for_cache = getattr(self._runtime, "layout", None)
+        self._artifact_cache = (
+            ArtifactCacheStore(layout_for_cache.artifact_cache_dir)
+            if layout_for_cache is not None
+            else None
+        )
 
     # ------------------------------------------------------------------
     # ZA-M1-2L: runtime mutation lease helper
@@ -636,6 +657,7 @@ class ZeAlfieService:
         layout = getattr(self._runtime, "layout", None)
         if layout is None:
             return None
+        result: GcResult | None = None
         try:
             plan = build_gc_plan(layout.root)
             if plan.status == GcStatus.BLOCKED:
@@ -643,20 +665,24 @@ class ZeAlfieService:
                     "auto-GC skipped: runtime GC plan is BLOCKED (%s)",
                     "; ".join(plan.blocking_reasons),
                 )
-                return None
-            result = apply_gc_plan(layout.root, plan)
-            if result.deleted_slots:
-                logger.info(
-                    "auto-GC deleted historical slots %s "
-                    "(reclaimed ~%d bytes estimated)",
-                    ", ".join(result.deleted_slots),
-                    result.reclaimed_bytes,
-                )
-            if result.errors:
-                logger.warning(
-                    "auto-GC completed with errors: %s",
-                    "; ".join(result.errors),
-                )
+            else:
+                result = apply_gc_plan(layout.root, plan)
+                if result.deleted_slots:
+                    logger.info(
+                        "auto-GC deleted historical slots %s "
+                        "(reclaimed ~%d bytes estimated)",
+                        ", ".join(result.deleted_slots),
+                        result.reclaimed_bytes,
+                    )
+                if result.errors:
+                    logger.warning(
+                        "auto-GC completed with errors: %s",
+                        "; ".join(result.errors),
+                    )
+            # ZA-M1-3A.3 LOT D: after slot GC, prune unreferenced cache
+            # artifacts (best-effort; the just-written state protects the
+            # transaction's own artifacts).
+            self._artifact_cache_gc_best_effort(layout)
             return result
         except Exception:
             logger.warning(
@@ -664,6 +690,94 @@ class ZeAlfieService:
                 exc_info=True,
             )
             return None
+
+    def _artifact_cache_gc_best_effort(self, layout) -> None:
+        """Bounded best-effort GC of unreferenced cache artifacts (LOT D).
+
+        Deletes only artifacts NOT referenced by the persisted slot state
+        stores (product provenance wheel digests, installed-lock
+        dependency identities, accelerated metadata variant digests) —
+        so the ACTIVE + PREVIOUS protection set and the just-completed
+        transaction's artifacts always survive.  Every failure mode is
+        logged, never raised, and never changes the transaction outcome.
+        """
+        if self._artifact_cache is None:
+            return
+        try:
+            result = runtime_cache_gc(layout.root)
+        except Exception as exc:
+            logger.warning("artifact cache GC failed: %s", exc)
+            return
+        if result.deleted:
+            logger.info(
+                "artifact cache GC deleted %d unreferenced artifact(s) "
+                "(reclaimed ~%d bytes)",
+                len(result.deleted),
+                result.reclaimed_bytes,
+            )
+        for error in result.errors:
+            logger.warning("artifact cache GC: %s", error)
+
+    # ------------------------------------------------------------------
+    # ZA-M1-3A.3 LOT C.2: proven dependency identities + acquisition
+    # ------------------------------------------------------------------
+
+    def _proven_dependency_requirements(self) -> tuple[tuple[str, str], ...]:
+        """Return ``(name, version)`` identities from the active installed lock.
+
+        The active slot's installed-runtime lock proves which dependency
+        distributions were installed by the previous transaction.  These
+        identities let the wheelhouse acquirer reuse exact cached wheels
+        instead of re-downloading them.  ``()`` when no lock is available
+        (layout-less test doubles, ABSENT runtime, unknown slot) — the
+        acquirer then behaves exactly as before (normal pip acquisition).
+        """
+        store = self._installed_lock_store
+        if store is None:
+            return ()
+        lock = store.load_active()
+        if lock is None:
+            return ()
+        return tuple(
+            sorted(
+                (dependency.name, dependency.version)
+                for dependency in lock.dependencies.values()
+            )
+        )
+
+    def _acquire_product_dependencies(
+        self,
+        prepared_artifact: PreparedProductArtifact,
+        staging_dir: Path,
+        *,
+        proven: tuple[tuple[str, str], ...],
+    ) -> None:
+        """Acquire dependencies for one prepared product wheel.
+
+        When a shared artifact cache is available AND the active installed
+        lock proves dependency identities, the acquirer may satisfy those
+        identities from the cache (fail-closed, digest-verified) instead of
+        the network; otherwise the call is byte-identical to the
+        pre-cache behaviour.
+        """
+        desc = self._catalog.get(prepared_artifact.product_id)
+        req = build_acquisition_request(
+            prepared_artifact.wheel_path,
+            active_extras=frozenset(desc.required_extras),
+        )
+        if self._artifact_cache is not None:
+            # Pass the cache whenever it exists: with a proven closure the
+            # acquirer may satisfy identities locally (0 network for hits);
+            # without one it still FEEDS the verified result into the cache
+            # so the next transaction can reuse it.
+            self._acquirer.acquire(
+                req,
+                staging_dir=staging_dir,
+                cache=self._artifact_cache,
+                proven_requirements=proven,
+            )
+        else:
+            self._acquirer.acquire(req, staging_dir=staging_dir)
 
     # ------------------------------------------------------------------
     # M1-2G: Host acceleration discovery (read-only)
@@ -1372,14 +1486,10 @@ class ZeAlfieService:
                         "Acquiring dependencies\u2026",
                     )
                     auto_staging = _private_acquisition_staging(work_root)
+                    proven = self._proven_dependency_requirements()
                     for pa in prepared:
-                        desc = self._catalog.get(pa.product_id)
-                        req = build_acquisition_request(
-                            pa.wheel_path,
-                            active_extras=frozenset(desc.required_extras),
-                        )
-                        self._acquirer.acquire(
-                            req, staging_dir=auto_staging,
+                        self._acquire_product_dependencies(
+                            pa, auto_staging, proven=proven,
                         )
                     dependency_wheelhouse = auto_staging
                 _emit_progress(
@@ -1426,7 +1536,9 @@ class ZeAlfieService:
             effective_acquirer = (
                 acquirer
                 if acquirer is not None
-                else default_manifest_artifact_acquirer()
+                else default_manifest_artifact_acquirer(
+                    cache=self._artifact_cache,
+                )
             )
             if cancel_check is not None:
                 try:
@@ -1834,7 +1946,32 @@ class ZeAlfieService:
                 staged, output_dir=work_root,
             )
 
-        # 7. Compute SHA256 and size of the built wheel.
+        # 7-12. Verify through the existing release verification chain,
+        #     then feed the verified wheel into the shared artifact cache
+        #     (ZA-M1-3A.3 LOT C: fill is best-effort — a cache failure
+        #     never changes the prepared result).
+        prepared = self._verify_prepared_wheel(wheel_path, desc, resolved)
+        self._fill_product_cache(prepared)
+        return prepared
+
+    def _verify_prepared_wheel(
+        self,
+        wheel_path: Path,
+        desc: ProductDescriptor,
+        resolved: ResolvedSource,
+    ) -> PreparedProductArtifact:
+        """Build a :class:`PreparedProductArtifact` from an existing wheel.
+
+        Shared by the fetch+build path (``_prepare_product_artifact_from_resolved``)
+        and the artifact-cache KEEP reuse path (``_prepare_keep_product_artifact``).
+        The wheel file is treated as read-only input: its size and SHA256
+        are computed from the actual bytes, its identity metadata is
+        inspected, and it is verified through the existing release
+        verification chain (path safety, size, SHA256, wheel identity,
+        version match, distribution name match, entry-point contract).
+        Raises :class:`ArtifactRejectionError` on any failure — never
+        produces a half-verified artifact.
+        """
         wheel_size = wheel_path.stat().st_size
         sha256_hash = hashlib.sha256()
         with open(wheel_path, "rb") as fh:
@@ -1842,13 +1979,10 @@ class ZeAlfieService:
                 sha256_hash.update(chunk)
         wheel_sha256 = sha256_hash.hexdigest()
 
-        # 8. Inspect wheel for identity metadata (version, distribution_name).
         from zealfie.building import inspect_wheel
 
         info = inspect_wheel(wheel_path)
 
-        # 9. Materialize a single-product ComponentRegistry from the
-        #    product descriptor — mirrors materialize_desired_components.
         component_def = ComponentDefinition(
             component_id=desc.product_id,
             display_name=desc.display_name,
@@ -1858,8 +1992,6 @@ class ZeAlfieService:
         )
         registry = ComponentRegistry([component_def])
 
-        # 10. Synthesize a single-artifact ReleaseManifest from the
-        #     built wheel's observed identity and integrity.
         artifact_entry = ArtifactEntry(
             filename=wheel_path.name,
             size=wheel_size,
@@ -1871,25 +2003,35 @@ class ZeAlfieService:
             version=info.version,
             artifacts=(artifact_entry,),
         )
-
-        # 11. Verify through the existing release verification chain.
-        #     This checks: path safety, size, SHA256, wheel identity,
-        #     version match, distribution name match, and entry-point
-        #     contract.  Raises ArtifactRejectionError on any failure.
         verified = verify_artifact(
             manifest,
             registry=registry,
             artifact_root=wheel_path.parent,
         )
-
-        # 12. Return the prepared artifact — no runtime mutation has
-        #     occurred, no install, no selection persistence.
         return PreparedProductArtifact(
             product_id=desc.product_id,
             component_id=desc.product_id,
             resolved_source=resolved,
             wheel_path=wheel_path,
             verified_artifact=verified,
+        )
+
+    def _fill_product_cache(self, prepared: PreparedProductArtifact) -> None:
+        """Feed a verified product wheel into the artifact cache (LOT C).
+
+        Best-effort only: :meth:`ArtifactCacheStore.put` never raises and
+        a failure is logged inside the store — it can never change the
+        prepared result or the transaction outcome.
+        """
+        cache = self._artifact_cache
+        if cache is None:
+            return
+        verified = prepared.verified_artifact
+        cache.put(
+            prepared.wheel_path,
+            kind="product",
+            distribution=verified.distribution_name,
+            version=verified.version,
         )
 
     def prepare_product_artifact_at_commit(
@@ -1960,10 +2102,63 @@ class ZeAlfieService:
         authoritative for version); a mismatch fails honestly rather than
         silently changing the recorded version.
 
-        A fresh ``wheel_sha256`` from the rebuild is recorded downstream by
+        ZA-M1-3A.3 LOT C (product cache): when the exact wheel recorded in
+        ``provenance.wheel_sha256`` is present in the shared artifact cache,
+        it is reused WITHOUT any GitHub fetch or build — but only after:
+
+        1. the cached file's SHA256 is recomputed and matches
+           ``provenance.wheel_sha256`` (content-addressed, filename-blind);
+        2. the wheel passes the full release verification chain
+           (:meth:`_verify_prepared_wheel`: identity, version, distribution,
+           entry-point contract) with ``version == provenance.version``.
+
+        Any failure (cache miss, bad digest, verification failure) falls
+        back to the exact-SHA rebuild path below — the cache is never a
+        source of authority.  The mutable ``requested_ref`` is still never
+        re-resolved on either path.
+
+        A fresh ``wheel_sha256`` from a rebuild is recorded downstream by
         the existing provenance persistence, so an artifact rebuilt from
         the same source SHA is always described honestly.
         """
+        cache = self._artifact_cache
+        if cache is not None:
+            cached_wheel = cache.cached_path_for_digest(
+                provenance.wheel_sha256
+            )
+            if cached_wheel is not None:
+                resolved = ResolvedSource(
+                    source=RemoteSource(
+                        owner=provenance.source_owner,
+                        repo=provenance.source_repo,
+                        ref=provenance.requested_ref,
+                    ),
+                    commit_sha=provenance.commit_sha,
+                )
+                try:
+                    prepared = self._verify_prepared_wheel(
+                        cached_wheel, self._catalog.get(product_id), resolved
+                    )
+                except (ArtifactRejectionError, OSError, ValueError):
+                    # Verification failure, TOCTOU disappearance, or a
+                    # structurally broken cached wheel: fall back to the
+                    # normal exact-SHA rebuild — never activate unverified.
+                    prepared = None
+                if prepared is not None and (
+                    prepared.verified_artifact.version != provenance.version
+                    or prepared.verified_artifact.sha256
+                    != provenance.wheel_sha256
+                ):
+                    prepared = None
+                if prepared is not None:
+                    # Propagate known discovery-policy metadata forward
+                    # (no re-resolution).  A pre-Phase-4 provenance record
+                    # yields None → policy-unknown.
+                    return replace(
+                        prepared,
+                        policy=_policy_from_provenance(provenance),
+                    )
+
         prepared = self.prepare_product_artifact_at_commit(
             product_id,
             commit_sha=provenance.commit_sha,
@@ -2872,14 +3067,10 @@ class ZeAlfieService:
                         "Acquiring dependencies\u2026",
                     )
                     auto_staging = _private_acquisition_staging(work_root)
+                    proven = self._proven_dependency_requirements()
                     for pa in prepared:
-                        desc = self._catalog.get(pa.product_id)
-                        req = build_acquisition_request(
-                            pa.wheel_path,
-                            active_extras=frozenset(desc.required_extras),
-                        )
-                        self._acquirer.acquire(
-                            req, staging_dir=auto_staging,
+                        self._acquire_product_dependencies(
+                            pa, auto_staging, proven=proven,
                         )
                     dependency_wheelhouse = auto_staging
                 except (FileNotFoundError, MetadataError, ExtraNotFound,

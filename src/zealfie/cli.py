@@ -65,6 +65,7 @@ from .runtime import (
     apply_gc_plan,
     build_gc_plan,
     default_runtime_layout,
+    runtime_cache_gc,
 )
 
 from .sources import SourceResolutionError
@@ -93,7 +94,8 @@ def _positive_finite_float(value: str) -> float:
 #: Exit code for a refused mutation because another ZeAlfie writer holds
 #: the runtime mutation lease (D8).  Used by every mutating handler where
 #: exit code 4 is free: ``runtime create`` (0/3), ``runtime rollback``
-#: (0/3), ``runtime gc`` (0/1/2/3), ``install`` (2/3/7/8/9/11).
+#: (0/3), ``runtime gc`` (0/1/2/3), ``runtime gc-cache`` (0/3),
+#: ``install`` (2/3/7/8/9/11).
 BUSY_EXIT = 4
 
 #: BUSY exit code for the handlers where 4 is already taken by another
@@ -175,6 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_subs.add_parser(
         "gc",
         help="apply safe runtime garbage collection",
+    )
+    runtime_subs.add_parser(
+        "gc-cache",
+        help="apply safe artifact cache garbage collection (unreferenced only)",
     )
 
     # -- products subcommand (M1-2A) -----------------------------------------
@@ -397,6 +403,9 @@ def _handle_runtime(args, *, stdout: TextIO) -> int:
     if args.runtime_command == "gc":
         return _handle_runtime_gc(args, stdout=stdout)
 
+    if args.runtime_command == "gc-cache":
+        return _handle_runtime_gc_cache(args, stdout=stdout)
+
     # No runtime subcommand given → show help.
     return 0
 
@@ -432,6 +441,48 @@ def _handle_runtime_gc_plan(args, *, stdout: TextIO) -> int:
         )
     print(_format_gc_plan(plan), file=stdout)
     return 0 if plan.status == GcStatus.READY else 1
+
+
+def _handle_runtime_gc_cache(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie runtime gc-cache``.
+
+    Deletes only cache artifacts NOT referenced by the persisted slot
+    state stores (provenance wheel digests, installed-lock dependency
+    identities, accelerated metadata variant digests) — ACTIVE + PREVIOUS
+    and any in-flight transaction's artifacts are always protected.  Runs
+    under the runtime mutation lease.  Exit codes: 0 success (nothing to
+    do included), 3 partial/blocked cleanup errors, 4 mutation BUSY, 6
+    mutation lock unavailable (fail closed).
+    """
+    layout = default_runtime_layout()
+    try:
+        result = runtime_cache_gc(layout.root)
+    except RuntimeMutationBusyError as exc:
+        print(_format_mutation_busy(exc), file=sys.stderr)
+        return BUSY_EXIT
+    except RuntimeMutationLockError as exc:
+        print(_format_mutation_lock_unavailable(exc), file=sys.stderr)
+        return LOCK_ERROR_EXIT
+    print(_format_cache_gc_result(result), file=stdout)
+    if result.errors:
+        return 3
+    return 0
+
+
+def _format_cache_gc_result(result) -> str:
+    """Render an artifact-cache GC result for the CLI."""
+    lines = ["Artifact cache GC:"]
+    if result.errors:
+        for error in result.errors:
+            lines.append(f"  - {error}")
+    if result.deleted:
+        lines.append(
+            f"  deleted {len(result.deleted)} unreferenced artifact(s), "
+            f"reclaimed ~{result.reclaimed_bytes} bytes"
+        )
+    else:
+        lines.append("  nothing to delete")
+    return "\n".join(lines)
 
 
 def _handle_runtime_gc(args, *, stdout: TextIO) -> int:
