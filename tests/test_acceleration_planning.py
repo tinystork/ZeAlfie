@@ -887,6 +887,10 @@ def test_driver_below_floor_blocks_plan():
     assert "host prerequisite not satisfied" in reason
     assert "nvidia-driver 550.54.13" in reason
     assert ">= 550.54.14" in reason
+    # Platform-neutral wording (Phase G): the failure-path string must not
+    # claim a specific platform — it is shown on Windows hosts too.
+    assert "(minimum officiel CUDA 12.4)" in reason
+    assert "Linux x86_64" not in reason
     assert plan.host_prerequisites is None
 
 

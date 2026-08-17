@@ -78,7 +78,8 @@ The witness proved **real compute**, not merely detection.
 
 | Platform | Primitive | Status |
 |---|---|---|
-| Linux / macOS (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` | implemented, witness-proven |
+| Linux (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` | implemented, **witness-proven on Linux** |
+| macOS (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` (same primitive) | implemented; **real witness = HUMAN GATE** |
 | Windows (`os.name == "nt"`) | `msvcrt.locking(LK_NBLCK)` byte-range lock on `[0,1)` | implemented; **real witness = HUMAN GATE (W1)** |
 | any other platform | no backend | fail closed (`RuntimeMutationLockError`) |
 
@@ -228,4 +229,4 @@ runtime preserved; rollback path unchanged.
 | Fresh Windows CPU chain | **PASS (real witness, 2026-08-17)** |
 | Windows technical-subprocess console UX | FIXED (CREATE_NO_WINDOW helper; real-window verification = follow-up) |
 | Windows nvidia-smi format + probe encoding | FIXED (24026d9) + regression tests |
-| macOS readiness | **READINESS PASS WITH NOTES** (audit + synthetic tests; real macOS = HUMAN GATE) |
+| macOS readiness | **AUDITED — synthetic tests only** (real macOS = HUMAN GATE) |
