@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import errno
 import hashlib
 import json
 import os
@@ -1089,6 +1090,32 @@ def test_windows_contention_winerror33_is_busy(
         assert RuntimeMutationLock.current_lease() is None
 
 
+def test_windows_contention_errno_fallback_is_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Classification: contention reported WITHOUT ``winerror`` (errno
+    EACCES mapping, e.g. PyErr_SetFromErrno) → still BUSY, never LockError.
+
+    This is the branch a real CPython msvcrt can hit when the OSError is
+    built from errno alone; the fake msvcrt above always sets
+    ``winerror``, so this path needs its own dedicated test.
+    """
+    fake = _FakeMsvcrt()
+
+    def _raise_errno_eacces(fd: int, mode: int, nbytes: int) -> None:
+        exc = OSError(errno.EACCES, "lock violation")
+        assert not hasattr(exc, "winerror")  # the fallback is what is tested
+        raise exc
+
+    with _windows_backend(monkeypatch, fake):
+        lock = RuntimeMutationLock(tmp_path / "runtime_root")
+        monkeypatch.setattr(fake, "locking", _raise_errno_eacces)
+        with pytest.raises(RuntimeMutationBusyError) as excinfo:
+            lock.acquire(OPERATION_RUNTIME_GC)
+        assert BUSY_MESSAGE_CORE in str(excinfo.value)
+        assert RuntimeMutationLock.current_lease() is None
+
+
 def test_windows_probe_busy_free_and_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1135,7 +1162,16 @@ def test_windows_import_safety_no_platform_modules() -> None:
         """
     ).strip()
     proc = subprocess.run(
-        [sys.executable, "-c", script, str(mutation_lock_module.__file__)],
+        [
+            # -S: skip site imports; some environments load fcntl at
+            # interpreter startup (site/venv), which would otherwise
+            # make this isolation probe report FCNTL falsely.
+            sys.executable,
+            "-S",
+            "-c",
+            script,
+            str(mutation_lock_module.__file__),
+        ],
         capture_output=True,
         text=True,
         timeout=60,
