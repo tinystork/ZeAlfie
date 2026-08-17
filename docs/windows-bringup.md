@@ -1,8 +1,78 @@
 # Windows Bring-Up (ZA-M1-2L.W)
 
-Status: implementation complete on `feature/m1-2l-runtime-mutation-lock`;
-**real-Windows validation is a HUMAN GATE** — nothing in this document
-claims Windows is validated or production-ready.
+Status: implementation complete on `feature/m1-2l-runtime-mutation-lock`.
+W2 (fresh CPU chain) and W3 (GPU compute) are **real-witness PASS** on a
+genuine Windows machine (2026-08-17).  W1 (mutation lock primitive) and
+any real macOS execution remain **HUMAN GATES** — nothing in this
+document claims W1-validated or macOS-validated status.
+
+## Real Windows witness evidence (2026-08-17)
+
+Machine: Windows, Python 3.13, NVIDIA GeForce RTX 3070 Laptop GPU,
+driver 576.80.  Fresh workflow: clone feature branch → dedicated `.venv`
+→ `pip install -e .` → ZeAlfie GUI → install ZeSolver → launch ZeSolver
+→ install ZeMosaic → launch ZeMosaic → configure GPU runtime → run
+ZeMosaic GPU workload → run ZeSolver GPU workload.
+
+### W2 — fresh Windows CPU chain: PASS (real witness)
+
+| Step | Result |
+|---|---|
+| Fresh Windows ZeAlfie install | PASS |
+| ZeAlfie GUI | PASS |
+| shared runtime creation | PASS |
+| ZeSolver install | PASS |
+| ZeSolver launch | PASS |
+| ZeMosaic install | PASS |
+| ZeMosaic launch | PASS |
+| ZeSolver + ZeMosaic coexistence | PASS |
+
+### W3 — Windows GPU: PASS (real witness)
+
+| Step | Result |
+|---|---|
+| GPU | NVIDIA GeForce RTX 3070 Laptop GPU |
+| driver | 576.80 |
+| Windows NVIDIA discovery | PASS (after `nounits` hotfix, commit 24026d9) |
+| win_amd64 immutable closure acquisition | PASS |
+| CuPy compute | PASS |
+| NVRTC RawKernel | PASS |
+| accelerated runtime activation | PASS (after UTF-8 probe hotfix, 24026d9) |
+| ZeMosaic real GPU workload | PASS |
+| ZeSolver requested / selected / used | auto / cuda / cuda (device 0) |
+| ZeSolver batch | cuda_images=66, cpu_images=0, fallbacks=0, gpu_errors=0, gpu_oom=0 |
+| VRAM peak | ~1.14 GB |
+| terminal | completed |
+
+The witness proved **real compute**, not merely detection.
+
+### Defects found and closed by the real witness
+
+* **W-BUG-01** — invalid nvidia-smi format option (`nouuid` →
+  `nounits`).  Fixed in 24026d9; regression test
+  `test_windows_smi_invocation_uses_nounits_format_argv`
+  (`tests/test_host_capabilities.py`) pins the exact argv.
+* **W-BUG-02** — compute probe source encoded with the Windows locale
+  (CP1252) because the parent subprocess used text mode without an
+  explicit encoding, while the child interpreter expects UTF-8.  Fixed
+  in 24026d9 (`encoding="utf-8"`); regression tests
+  `test_backend_compute_probe_unicode_transport_positive_control` and
+  `test_backend_compute_probe_unicode_survives_windows_locale_parent`
+  (`tests/test_accelerated_deployment_engine.py`) reproduce the bug
+  class behaviourally.
+* **W-UX-01** — foreground console flashes from technical helper
+  subprocesses.  Fixed by `zealfie.common.subprocess_platform`
+  (`technical_subprocess_platform_kwargs()` → `CREATE_NO_WINDOW` on
+  Windows) applied to technical helper sites only; product application
+  launches are untouched (regression tests in
+  `tests/test_technical_subprocess_platform.py`).  Known limitation:
+  stdlib venv/ensurepip spawns its own internal subprocess without
+  creationflags.
+* **W-TEXT-01** — user-visible CUDA prerequisite text claimed
+  "Linux x86_64" during Windows flows.  Fixed in
+  `src/zealfie/acceleration/compatibility.py` (platform-neutral
+  wording; single curated driver floor unchanged).
+
 
 ## Platform support matrix (runtime mutation lock)
 
@@ -57,6 +127,11 @@ changes; cp313 for cupy-cuda12x, py3 for the nvidia-*-cu12 packages).
   weakening, no `import cupy`-only shortcut.
 * Real Windows GPU compute = **HUMAN GATE (W3)**.
 
+> **Update (2026-08-17, real witness):** W3 executed on a genuine Windows
+> machine (RTX 3070 Laptop, driver 576.80) and **PASSED** — see the
+> "Real Windows witness evidence" section at the top of this document.
+> The GPU witness proved real compute, not merely detection.
+
 ## Human gates — copy/paste-ready witness instructions
 
 ### W1 — Windows mutation lock
@@ -78,6 +153,38 @@ Expected: `ACQUIRED` then `RELEASED` immediately — no manual deletion of
 any lock file. Capture: `BUSY`, the stale lock file presence, and the
 re-acquisition. Any `LOCKERROR`, traceback, or a BUSY in the last step =
 witness FAILED.
+
+Crash variant (mandatory, proves OS-owned lock lifetime):
+
+    # Console A: owner acquires and prints READY
+    python tests/witness/windows_lock_witness.py C:\temp\zealfie-root owner runtime-apply
+
+    # Console B: contender must print BUSY immediately
+    python tests/witness/windows_lock_witness.py C:\temp\zealfie-root contender runtime-apply
+
+    # Force-kill A (Ctrl+C does NOT apply here: the witness holds on
+    # stdin — use Task Manager, or `taskkill /F /PID <pid-of-A>` from a
+    # third console).  Do NOT delete the lock file.
+
+    # Console B again: must print ACQUIRED then RELEASED immediately
+    python tests/witness/windows_lock_witness.py C:\temp\zealfie-root contender runtime-apply
+
+Expected after the force-kill: B acquires immediately with **no manual
+deletion** of `C:\temp\.zealfie-root.zealfie-mutation.lock` (the stale
+file may remain on disk — FILE EXISTS != LOCK HELD).  Any LOCKERROR,
+traceback, or BUSY in the last step = witness FAILED.
+
+Different-root variant (inexpensive, proves lock scoping):
+
+    # Console A holds the lease on C:\temp\zealfie-root
+    python tests/witness/windows_lock_witness.py C:\temp\zealfie-root owner runtime-apply
+
+    # Console B uses a DIFFERENT root: must print ACQUIRED + RELEASED
+    # immediately (different runtime roots never contend)
+    python tests/witness/windows_lock_witness.py C:\temp\zealfie-root-2 contender runtime-apply
+
+Expected: concurrent acquisition succeeds for a different root while the
+first root is still held.
 
 ### W2 — fresh Windows CPU chain
 
@@ -113,9 +220,12 @@ runtime preserved; rollback path unchanged.
 | Item | Status |
 |---|---|
 | Windows mutation lock backend | IMPLEMENTED (tests: synthetic decision logic) |
-| Real Windows mutation witness | HUMAN GATE (W1) |
+| Real Windows mutation witness | HUMAN GATE (W1) — instructions above |
 | Windows-aware host GPU probing | IMPLEMENTED (tests: injected fakes) |
-| Real Windows GPU detection | HUMAN GATE (W3) |
+| Real Windows GPU detection | **PASS (real witness, 2026-08-17)** |
 | win_amd64 artifact closure | IMPLEMENTED (PyPI + byte-verified hashes) |
-| Real Windows GPU compute gate | HUMAN GATE (W3) |
-| Fresh Windows CPU chain | HUMAN GATE (W2) |
+| Real Windows GPU compute gate | **PASS (real witness, 2026-08-17)** |
+| Fresh Windows CPU chain | **PASS (real witness, 2026-08-17)** |
+| Windows technical-subprocess console UX | FIXED (CREATE_NO_WINDOW helper; real-window verification = follow-up) |
+| Windows nvidia-smi format + probe encoding | FIXED (24026d9) + regression tests |
+| macOS readiness | **READINESS PASS WITH NOTES** (audit + synthetic tests; real macOS = HUMAN GATE) |
