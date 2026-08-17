@@ -475,10 +475,12 @@ per-runtime-root mutation lease: among cooperating writers that acquire
 it, at most **one mutating ZeAlfie operation** (runtime create/apply/
 rollback/discard/gc, product install/update, gpu-install) may own the
 runtime at a time.  The primitive is ``fcntl.flock`` on a sibling lock
-file (POSIX-only, fail-closed on unsupported platforms), crash-safe,
+file on POSIX and a ``msvcrt.locking`` (``LK_NBLCK``) byte-range lock on
+Windows — fail-closed on platforms with no backend — crash-safe,
 advisory, and orthogonal to the existing stale checks and atomic
-persistence; read-only commands are unaffected.  See
-``docs/mutation-lock.md`` for the full contract.
+persistence; read-only commands are unaffected (real-Windows behaviour
+is validated by human-gate witness, see ``docs/windows-bringup.md``).
+See ``docs/mutation-lock.md`` for the full contract.
 
 The persistent runtime is distinct from both the development ``.venv`` and
 the test-only ``TemporaryVenv``.  Temporary test environments and scratch
