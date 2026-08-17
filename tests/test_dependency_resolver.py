@@ -6,6 +6,7 @@ No network, no mutation, no runtime slots — purely the resolver.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -391,6 +392,28 @@ def test_sys_tag_provider_returns_frozenset() -> None:
     assert len(tags) > 0
     for tag in tags:
         assert isinstance(tag, Tag)
+
+
+def test_default_marker_env_os_name_is_posix_pep508() -> None:
+    """PEP 508: marker env ``os_name`` must be ``os.name`` (posix/nt).
+
+    A requirement marker ``os_name == "posix"`` must evaluate True on a
+    POSIX host; the raw value must equal ``os.name`` on every platform
+    (``platform.system()`` values like "Linux"/"Darwin" are not valid
+    PEP 508 os_name values and would silently disable such markers).
+    """
+    from packaging.markers import Marker
+
+    from zealfie.dependencies.host_tags import default_marker_env
+
+    env = default_marker_env()
+    assert env["os_name"] == os.name
+    if os.name == "posix":
+        assert Marker('os_name == "posix"').evaluate(env) is True
+    elif os.name == "nt":
+        assert Marker('os_name == "nt"').evaluate(env) is True
+    else:
+        pytest.skip(f"no PEP 508 os_name assertion for os.name={os.name!r}")
 
 
 # ---------------------------------------------------------------------------

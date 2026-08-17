@@ -42,6 +42,7 @@ def default_marker_env() -> dict[str, str]:
     Includes the ``extra`` key with an empty string default; callers
     should override ``extra`` for extra-specific evaluation.
     """
+    import os
     import platform
     import sys
 
@@ -49,7 +50,9 @@ def default_marker_env() -> dict[str, str]:
     return {
         "python_version": f"{major}.{minor}",
         "python_full_version": sys.version.split()[0],
-        "os_name": platform.system().replace(" ", "_"),
+        # PEP 508: the os_name marker is os.name ("posix" / "nt" / "java"),
+        # never platform.system() ("Linux" / "Windows" / "Darwin").
+        "os_name": os.name,
         "sys_platform": sys.platform,
         "platform_system": platform.system(),
         "platform_machine": platform.machine(),
