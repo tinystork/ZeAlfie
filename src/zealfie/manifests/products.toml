@@ -121,12 +121,17 @@ display_name = "ZeAnalyser"
 distribution_name = "ZeAnalyser"
 description = "Deep image analysis toolkit — FWHM, eccentricity, SNR, and session statistics."
 
+# ZA-M1-3A.2 (E): ZeAnalyser 3.3.1 is now released on ``main`` of the
+# zeanalyser repository.  ``stable`` follows ``main`` (the factory
+# default channel); ``beta`` keeps tracking the ``beta`` branch for
+# early adopters.
 [products.remote_source]
 owner = "tinystork"
 repo = "zeanalyser"
-ref = "beta"
+ref = "main"
 
 [products.channels]
+stable = "main"
 beta = "beta"
 
 [[products.launch.entry_points]]

@@ -1122,7 +1122,8 @@ def test_zemosaic_has_remote_source():
 
 def test_zeanalyser_has_remote_source():
     """ZeAnalyser's catalog entry carries the declared remote source
-    (ZA-M1-3A: owner=tinystork, repo=zeanalyser, ref=beta)."""
+    (ZA-M1-3A.2: owner=tinystork, repo=zeanalyser, ref=main — 3.3.1 is
+    released on main)."""
     catalog = default_catalog()
     from zealfie.sources import RemoteSource
     desc = catalog.get("zeanalyser")
@@ -1130,7 +1131,7 @@ def test_zeanalyser_has_remote_source():
     assert isinstance(desc.remote_source, RemoteSource)
     assert desc.remote_source.owner == "tinystork"
     assert desc.remote_source.repo == "zeanalyser"
-    assert desc.remote_source.ref == "beta"
+    assert desc.remote_source.ref == "main"
 
 
 def test_other_products_have_no_remote_source():
@@ -1712,14 +1713,29 @@ def test_zemosaic_defaults_to_stable_main_channel():
 
 
 def test_zeanalyser_beta_channel_maps_to_beta():
-    """ZeAnalyser exposes exactly ``beta -> beta`` (ZA-M1-3A)."""
+    """ZeAnalyser exposes ``stable -> main`` AND ``beta -> beta``
+    (ZA-M1-3A.2: 3.3.1 on main; beta keeps tracking beta)."""
     catalog = default_catalog()
     desc = catalog.get("zeanalyser")
-    assert desc.channel_refs == (("beta", "beta"),)
-    assert desc.channel_ref_map == {"beta": "beta"}
-    assert desc.available_channels == ("beta",)
+    assert desc.channel_refs == (("stable", "main"), ("beta", "beta"))
+    assert desc.channel_ref_map == {"stable": "main", "beta": "beta"}
+    assert desc.available_channels == ("stable", "beta")
+    assert desc.channel_ref("stable") == "main"
     assert desc.channel_ref("beta") == "beta"
-    assert desc.channel_ref("stable") is None
+
+
+def test_zeanalyser_default_follow_stable_resolves_main():
+    """The factory default policy (follow, channel=stable) resolves to
+    ``main`` for ZeAnalyser (ZA-M1-3A.2: default follow/stable is a
+    valid, release-tracking configuration)."""
+    from zealfie.products.policy import default_product_policy, effective_ref
+
+    catalog = default_catalog()
+    desc = catalog.get("zeanalyser")
+    policy = default_product_policy("zeanalyser")
+    assert policy.policy == "follow"
+    assert policy.channel == "stable"
+    assert effective_ref(policy, channel_refs=desc.channel_ref_map) == "main"
 
 
 def test_no_remote_source_products_have_no_channels():
