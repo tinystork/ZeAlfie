@@ -148,6 +148,12 @@ from zealfie.releases.model import (
 from zealfie.releases.resolver import ReleaseResolutionError, resolve_local_release
 from zealfie.releases.verifier import verify_artifact
 from zealfie.runtime.deployment import apply_deployment_plan
+from zealfie.runtime.gc import (
+    GcResult,
+    GcStatus,
+    apply_gc_plan,
+    build_gc_plan,
+)
 from zealfie.runtime.manager import SharedRuntime
 from zealfie.runtime.mutation_lock import (
     OPERATION_GPU_INSTALL,
@@ -525,6 +531,7 @@ class ZeAlfieService:
         policy_store: ProductPolicyStore | None = None,
         capability_collector: object | None = None,
         recommender: object | None = None,
+        auto_gc: bool = True,
     ) -> None:
         self._registry = registry or default_registry()
         self._runtime = runtime or SharedRuntime()
@@ -569,6 +576,12 @@ class ZeAlfieService:
         # to the read-only HostProber and the pure recommend() function.
         self._capability_collector = capability_collector or HostProber().collect
         self._recommender = recommender or recommend
+        # ZA-M1-3A.3: bounded best-effort GC of historical slots after
+        # every successful transaction.  ``False`` disables it (the
+        # manual ``runtime gc`` / ``runtime gc-plan`` commands remain
+        # available either way).  Default True: in steady-state
+        # operation only ACTIVE + PREVIOUS slots persist.
+        self._auto_gc = bool(auto_gc)
 
     # ------------------------------------------------------------------
     # ZA-M1-2L: runtime mutation lease helper
@@ -592,6 +605,65 @@ class ZeAlfieService:
         if layout is None:
             return None
         return RuntimeMutationLock(layout.root)
+
+    # ------------------------------------------------------------------
+    # ZA-M1-3A.3: bounded best-effort auto-GC after successful
+    # transactions
+    # ------------------------------------------------------------------
+
+    def _runtime_gc_best_effort(self) -> GcResult | None:
+        """Run a bounded best-effort GC of historical slots (ZA-M1-3A.3).
+
+        Called only after a successful transaction that activated a new
+        slot.  Plans and applies the GC for the runtime root, which
+        deletes only slots outside {active, previous} (the rollback
+        target is never touched) together with their store entries.
+
+        Every failure mode is contained: a BLOCKED plan (e.g. an
+        unrelated repair state) skips destructively, and any exception
+        — including a busy mutation lock or a Windows file-locked
+        cleanup — is logged as a warning and never changes the outcome
+        of the transaction that called this.  Per-slot cleanup failures
+        inside the apply engine are collected on the result (partial,
+        non-destructive cleanup; the next transaction retries).
+
+        Returns the :class:`GcResult` when a GC was attempted, ``None``
+        when auto-GC is disabled or the runtime exposes no layout
+        (test doubles).
+        """
+        if not self._auto_gc:
+            return None
+        layout = getattr(self._runtime, "layout", None)
+        if layout is None:
+            return None
+        try:
+            plan = build_gc_plan(layout.root)
+            if plan.status == GcStatus.BLOCKED:
+                logger.warning(
+                    "auto-GC skipped: runtime GC plan is BLOCKED (%s)",
+                    "; ".join(plan.blocking_reasons),
+                )
+                return None
+            result = apply_gc_plan(layout.root, plan)
+            if result.deleted_slots:
+                logger.info(
+                    "auto-GC deleted historical slots %s "
+                    "(reclaimed ~%d bytes estimated)",
+                    ", ".join(result.deleted_slots),
+                    result.reclaimed_bytes,
+                )
+            if result.errors:
+                logger.warning(
+                    "auto-GC completed with errors: %s",
+                    "; ".join(result.errors),
+                )
+            return result
+        except Exception:
+            logger.warning(
+                "auto-GC failed; the completed transaction is unaffected",
+                exc_info=True,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # M1-2G: Host acceleration discovery (read-only)
@@ -1454,6 +1526,10 @@ class ZeAlfieService:
                     PHASE_PERCENT[InstallPhase.COMPLETED],
                     "Accelerated runtime is ready",
                 )
+                # ZA-M1-3A.3: bounded best-effort auto-GC — historical
+                # slots (outside active/previous) only, never the
+                # rollback target; failures are logged, never raised.
+                self._runtime_gc_best_effort()
             return result
         finally:
             if auto_staging is not None:
@@ -2411,6 +2487,13 @@ class ZeAlfieService:
                 ready_message,
 
             )
+
+            # ---- 11. Bounded best-effort auto-GC (ZA-M1-3A.3) --------
+            # Historical slots (outside active/previous) are pruned
+            # together with their store entries.  Best-effort only: a
+            # BLOCKED plan or any failure is logged and never changes
+            # the transaction outcome.
+            self._runtime_gc_best_effort()
 
 
 
