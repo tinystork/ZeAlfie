@@ -1,10 +1,10 @@
 # Windows Bring-Up (ZA-M1-2L.W)
 
-Status: implementation complete on `feature/m1-2l-runtime-mutation-lock`.
-W2 (fresh CPU chain) and W3 (GPU compute) are **real-witness PASS** on a
-genuine Windows machine (2026-08-17).  W1 (mutation lock primitive) and
-any real macOS execution remain **HUMAN GATES** — nothing in this
-document claims W1-validated or macOS-validated status.
+Status: **closed** — merged to `main` (see final status table).
+W1 (mutation lock primitive), W2 (fresh CPU chain) and W3 (GPU compute)
+are all **real-witness PASS** on a genuine Windows machine
+(2026-08-17).  Real macOS execution remains a **HUMAN GATE** — nothing
+in this document claims macOS-validated status.
 
 ## Real Windows witness evidence (2026-08-17)
 
@@ -26,6 +26,20 @@ ZeMosaic GPU workload → run ZeSolver GPU workload.
 | ZeMosaic install | PASS |
 | ZeMosaic launch | PASS |
 | ZeSolver + ZeMosaic coexistence | PASS |
+
+### W1 — Windows mutation lock: PASS (real witness, 2026-08-17)
+
+Two-process witness on one Windows host, same runtime root:
+
+| Property | Result |
+|---|---|
+| same root: owner READY, contender BUSY | PASS — real inter-process exclusion |
+| crash release: owner force-killed, contender ACQUIRED / RELEASED without lock-file deletion | PASS — OS owns the lock lifetime, no manual cleanup |
+| different root: root1 held, root2 ACQUIRED / RELEASED concurrently | PASS — lock scoping per runtime root |
+| case normalization: `C:\temp\zealfie-root` held, `C:\TEMP\ZEALFIE-ROOT` → BUSY | PASS — Windows case-insensitive root identity |
+
+Any other output (`LOCKERROR`, a traceback, or a BUSY in the last step
+of any variant) would have meant witness FAILED.
 
 ### W3 — Windows GPU: PASS (real witness)
 
@@ -80,10 +94,10 @@ The witness proved **real compute**, not merely detection.
 |---|---|---|
 | Linux (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` | implemented, **witness-proven on Linux** |
 | macOS (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` (same primitive) | implemented; **real witness = HUMAN GATE** |
-| Windows (`os.name == "nt"`) | `msvcrt.locking(LK_NBLCK)` byte-range lock on `[0,1)` | implemented; **real witness = HUMAN GATE (W1)** |
+| Windows (`os.name == "nt"`) | `msvcrt.locking(LK_NBLCK)` byte-range lock on `[0,1)` | implemented; **real witness PASS (W1, 2026-08-17)** |
 | any other platform | no backend | fail closed (`RuntimeMutationLockError`) |
 
-Windows semantics (implementation-level, to be confirmed by witness W1):
+Windows semantics (implementation-level, **confirmed by real witness W1**):
 
 * exclusive byte-range lock, byte `[0,1)`, deterministic range;
 * non-blocking, fail-fast: contention (`ERROR_LOCK_VIOLATION`, winerror 33)
@@ -133,9 +147,13 @@ changes; cp313 for cupy-cuda12x, py3 for the nvidia-*-cu12 packages).
 > "Real Windows witness evidence" section at the top of this document.
 > The GPU witness proved real compute, not merely detection.
 
-## Human gates — copy/paste-ready witness instructions
+## Witness instructions (historical — W1/W2/W3 executed and PASSED, 2026-08-17)
 
-### W1 — Windows mutation lock
+The instructions below are kept verbatim as the reproducible protocol
+used for the real Windows witnesses.  W1/W2/W3 are now **closed**; the
+only remaining platform gate is a real macOS execution.
+
+### W1 — Windows mutation lock (executed → PASS)
 
 Two consoles on the same real Windows machine, same runtime root:
 
@@ -213,7 +231,7 @@ The accelerated install keeps the M1-2L transaction ownership:
 `gpu-plan` → hardware re-check → base preparation → artifact acquisition
 → dependency install → compute gate → activation → accelerated metadata
 write, all under one `OPERATION_GPU_INSTALL` mutation lease (identical
-on Windows once W1 passes). No in-place upgrade; previous known-good
+on Windows — witness-proven by W1). No in-place upgrade; previous known-good
 runtime preserved; rollback path unchanged.
 
 ## Implementation vs witness status
@@ -221,7 +239,7 @@ runtime preserved; rollback path unchanged.
 | Item | Status |
 |---|---|
 | Windows mutation lock backend | IMPLEMENTED (tests: synthetic decision logic) |
-| Real Windows mutation witness | HUMAN GATE (W1) — instructions above |
+| Real Windows mutation witness | **PASS (real witness, 2026-08-17)** — W1 closed |
 | Windows-aware host GPU probing | IMPLEMENTED (tests: injected fakes) |
 | Real Windows GPU detection | **PASS (real witness, 2026-08-17)** |
 | win_amd64 artifact closure | IMPLEMENTED (PyPI + byte-verified hashes) |
