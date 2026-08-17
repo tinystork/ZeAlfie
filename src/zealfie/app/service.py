@@ -97,6 +97,7 @@ from zealfie.dependencies.acquisition import (
 from zealfie.dependencies.models import (
     ExtraNotFound,
     MetadataError,
+    RuntimeLock,
 )
 
 from zealfie.launching import (
@@ -177,6 +178,8 @@ from zealfie.host import (
     GpuSetupIntent,
     HostCapabilities,
     HostProber,
+    HostReasonCode,
+    RecommendationStatus,
     build_gpu_setup_intent,
     recommend,
 )
@@ -620,7 +623,80 @@ class ZeAlfieService:
         """
         if capabilities is None:
             capabilities = self.collect_host_capabilities()
-        return self._recommender(capabilities)
+        recommendation = self._recommender(capabilities)
+        # ZA-M1-3A.2: the recommendation is an observation -> interpretation
+        # of the HOST only; runtime readiness is a separate, slot-state fact.
+        # When the host side says OFFER_SETUP but the ACTIVE slot already
+        # carries a validated accelerated runtime, the honest user-facing
+        # status is ALREADY_READY (never derived from backend probes alone).
+        # Injected recommenders may return anything (tests, fakes): the
+        # overlay only applies to real AccelerationRecommendation values.
+        if (
+            isinstance(recommendation, AccelerationRecommendation)
+            and recommendation.status is RecommendationStatus.OFFER_SETUP
+            and self.acceleration_runtime_ready()
+        ):
+            recommendation = AccelerationRecommendation(
+                status=RecommendationStatus.ALREADY_READY,
+                backend=recommendation.backend,
+                reason_code=HostReasonCode.ACCELERATION_ALREADY_READY,
+                reason=(
+                    "an accelerated runtime is installed and validated in "
+                    "the active runtime slot"
+                ),
+                gpus=recommendation.gpus,
+            )
+        return recommendation
+
+    def acceleration_runtime_ready(self) -> bool:
+        """Return whether the ACTIVE slot carries a validated accelerated runtime.
+
+        ZA-M1-3A.2 (GPU readiness): readiness is derived ONLY from the
+        active slot's persisted state — never from host probes alone
+        (a visible GPU + driver is OFFER_SETUP territory, not readiness):
+
+        1. the runtime must expose a layout whose active pointer names a
+           READY slot;
+        2. that slot must have a valid accelerated-metadata record
+           (:class:`~zealfie.acceleration.deployment.AcceleratedSlotMetadataStore`);
+        3. every recorded variant ``(distribution, version, sha256)``
+           must be verified installed at the recorded version inside the
+           slot's own interpreter (real distribution probe).
+
+        Read-only; any missing, corrupt, or unverifiable state fails
+        closed to ``False`` (the GUI then keeps the honest offer).
+        """
+        layout = getattr(self._runtime, "layout", None)
+        if layout is None:
+            return False
+        status = self._runtime.status()
+        if status.state is not RuntimeState.READY or status.active_slot_id is None:
+            return False
+        try:
+            metadata = AcceleratedSlotMetadataStore(layout).load_slot(
+                status.active_slot_id
+            )
+        except Exception:
+            return False
+        if metadata is None:
+            return False
+        slot_path = layout.slot_path(status.active_slot_id)
+        if sys.platform == "win32":
+            python = slot_path / "Scripts" / "python.exe"
+        else:
+            python = slot_path / "bin" / "python"
+        if not python.is_file():
+            return False
+        for distribution, version, _digest in metadata.variants:
+            try:
+                probe = probe_runtime_distribution(str(python), distribution)
+            except Exception:
+                return False
+            if not probe.get("installed"):
+                return False
+            if probe.get("version") != version:
+                return False
+        return True
 
     def prepare_gpu_setup_intent(
         self,
@@ -849,11 +925,18 @@ class ZeAlfieService:
            runs the engine with the default gate / metadata store when
            not provided, deriving ``declaring_distributions`` from the
            product catalog (product id -> distribution name).
-        6. On success NO product provenance, selection, or
-           installed-lock writes occur: products are unchanged, and the
-           engine's observational ``accelerated-metadata.json`` record
-           is the only new persistent state.  On any failure the
-           previously active runtime is left intact and usable.
+        6. On success the NEW active slot is fully described
+           (ZA-M1-3A.2 slot state continuity): product provenance for
+           the exact KEEP identities is recorded under the new
+           ``active_slot_id`` (same versions / commit SHAs / wheel
+           digests as the previous provenance — never re-resolved,
+           never invented), and the installed-runtime lock for the new
+           slot is reduced from the engine's extended lock (base
+           closure verbatim + the acquired accelerated closure that
+           was actually deployed).  Selection / policy / channels are
+           untouched (products are unchanged).  On any failure or
+           cancellation the previously active slot keeps its provenance
+           and lock authority: no write under the new slot id occurs.
         7. The method NEVER pip-installs into the active slot: every
            install goes to the fresh candidate slot created by the
            engine, and the active pointer is only switched at
@@ -1021,11 +1104,18 @@ class ZeAlfieService:
            runs the engine with the default gate / metadata store when
            not provided, deriving ``declaring_distributions`` from the
            product catalog (product id -> distribution name).
-        6. On success NO product provenance, selection, or
-           installed-lock writes occur: products are unchanged, and the
-           engine's observational ``accelerated-metadata.json`` record
-           is the only new persistent state.  On any failure the
-           previously active runtime is left intact and usable.
+        6. On success the NEW active slot is fully described
+           (ZA-M1-3A.2 slot state continuity): product provenance for
+           the exact KEEP identities is recorded under the new
+           ``active_slot_id`` (same versions / commit SHAs / wheel
+           digests as the previous provenance — never re-resolved,
+           never invented), and the installed-runtime lock for the new
+           slot is reduced from the engine's extended lock (base
+           closure verbatim + the acquired accelerated closure that
+           was actually deployed).  Selection / policy / channels are
+           untouched (products are unchanged).  On any failure or
+           cancellation the previously active slot keeps its provenance
+           and lock authority: no write under the new slot id occurs.
         7. The method NEVER pip-installs into the active slot: every
            install goes to the fresh candidate slot created by the
            engine, and the active pointer is only switched at
@@ -1333,10 +1423,31 @@ class ZeAlfieService:
                 progress_callback=progress_callback,
             )
 
-            # ---- 6. Success: NO provenance/selection/installed-lock
-            #        writes — products are unchanged.  The engine's
-            #        metadata record is the only new persistent state. ----
+            # ---- 6. Slot state continuity (ZA-M1-3A.2) -------------------
+            # The engine activated a NEW slot.  That slot must be fully
+            # described like any install_product slot — otherwise the
+            # update checker reports PROVENANCE_UNKNOWN, a subsequent
+            # install cannot rebuild the full state from provenance, and
+            # the GUI still offers GPU setup (readiness is slot-state
+            # based).  On success only:
+            #   * provenance for the EXACT KEEP product identities
+            #     (same version / commit SHA / wheel digest — the
+            #     prepared artifacts reconstructed from the previous
+            #     provenance, never re-resolved, never invented);
+            #   * the installed-runtime lock reduced from the engine's
+            #     EXTENDED lock (base closure verbatim + the acquired
+            #     accelerated closure actually deployed).
+            # Selection / policy / channels are untouched (products are
+            # unchanged).  A failure or cancellation never reaches this
+            # block: the old slot keeps its provenance and lock
+            # authority, and no partial write under the new slot id can
+            # become authoritative.
             if result.success:
+                self._persist_provenance(prepared, result)
+                self._persist_installed_lock_for_slot(
+                    result.extended_dependency_lock,
+                    result.active_slot_id,
+                )
                 _emit_progress(
                     progress_callback,
                     InstallPhase.COMPLETED,
@@ -2314,7 +2425,7 @@ class ZeAlfieService:
     def _persist_provenance(
         self,
         prepared_artifacts: Sequence[PreparedProductArtifact],
-        result: DeploymentResult,
+        result: DeploymentResult | AcceleratedDeploymentResult,
     ) -> None:
         """Persist installed-product provenance after successful activation.
 
@@ -2355,18 +2466,31 @@ class ZeAlfieService:
         plan: DeploymentPlan,
         result: DeploymentResult,
     ) -> None:
+        self._persist_installed_lock_for_slot(
+            plan.dependency_lock,
+            result.active_slot_id,
+        )
+
+    def _persist_installed_lock_for_slot(
+        self,
+        lock: RuntimeLock | None,
+        slot_id: str | None,
+    ) -> None:
         """Persist the reduced installed-runtime lock after activation.
 
         Called only after ``apply_deployment_plan`` returned success and
         selection persistence succeeded (alongside provenance).  The lock is
-        reduced from ``plan.dependency_lock`` — transient install-input
+        reduced from the provided ``lock`` — transient install-input
         fields (``wheel_path`` / ``size`` / ``sha256``) are dropped — and
         keyed by the new active slot id so it always describes the active
-        runtime, never a failed candidate.
+        runtime, never a failed candidate.  For the accelerated path the
+        caller passes the engine's extended lock (base closure + acquired
+        accelerated closure), so the recorded lock describes the FINAL
+        accelerated reality, never the pre-acceleration closure alone.
 
-        A ``None`` ``dependency_lock`` (no resolved closure was used) records
-        a known-empty lock for the slot, so "no closure used" is
-        distinguishable from UNKNOWN (no record).
+        A ``None`` lock (no resolved closure was used) records a known-empty
+        lock for the slot, so "no closure used" is distinguishable from
+        UNKNOWN (no record).
 
         This store is **observational only**: no install/update/rollback/KEEP
         decision reads it.  A persistence failure here does **not** roll back
@@ -2376,12 +2500,10 @@ class ZeAlfieService:
         store = self._installed_lock_store
         if store is None:
             return
-        slot_id = result.active_slot_id
         if not slot_id:
             return
         try:
-            lock = installed_lock_from_runtime_lock(plan.dependency_lock)
-            store.record(slot_id, lock)
+            store.record(slot_id, installed_lock_from_runtime_lock(lock))
         except Exception:
             logger.warning(
                 "failed to persist installed-runtime lock for slot %r; "

@@ -93,6 +93,19 @@ def test_panel_detail_blocked_includes_reason():
     )
 
 
+def test_panel_summary_already_ready_is_slot_state_verdict():
+    """ZA-M1-3A.2: ALREADY_READY is a SLOT-STATE verdict (active slot
+    carries validated accelerated-metadata + closure), never the mere
+    presence of a GPU.  The summary explicitly distinguishes the
+    validated runtime from the OFFER_SETUP offer and never says
+    "to configure"; the configure button stays hidden."""
+    rec = _rec(RecommendationStatus.ALREADY_READY)
+    summary = panel_summary(rec)
+    assert "active and validated" in summary
+    assert "to configure" not in summary
+    assert configure_button_visible(rec) is False
+
+
 # ===========================================================================
 # 2) Panel widget (headless)
 # ===========================================================================

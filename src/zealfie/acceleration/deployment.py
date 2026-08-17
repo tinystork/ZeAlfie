@@ -400,6 +400,14 @@ class AcceleratedDeploymentResult:
     success and stays the active slot on failure/cancellation — so every
     outcome of this orchestrator preserves it; the field records that
     guarantee explicitly.
+
+    ``extended_dependency_lock`` is set only on success (``COMPLETED``):
+    it is the exact ``RuntimeLock`` the engine deployed into the new
+    active slot (base entries verbatim + one non-primary entry per
+    acquired accelerated variant).  It lets the service persist the
+    installed-reality lock for the NEW slot (ZA-M1-3A.2 slot state
+    continuity) from the single authoritative source — never recomputed
+    by the caller.  ``None`` on every non-success path.
     """
 
     success: bool
@@ -409,6 +417,7 @@ class AcceleratedDeploymentResult:
     previous_slot_id: str | None = None
     reason: str | None = None
     old_runtime_preserved: bool = True
+    extended_dependency_lock: RuntimeLock | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1066,6 +1075,7 @@ def apply_accelerated_deployment(
             phase=AcceleratedDeploymentPhase.COMPLETED,
             active_slot_id=result.active_slot_id,
             previous_slot_id=result.previous_slot_id,
+            extended_dependency_lock=extended_lock,
         )
 
     return AcceleratedDeploymentResult(

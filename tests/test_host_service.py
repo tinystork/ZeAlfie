@@ -85,9 +85,16 @@ def test_service_defaults_are_constructible_and_hermetic(monkeypatch):
     assert calls == ["collect", "collect", "recommend"]
 
 
-def test_prepare_gpu_setup_intent_is_no_mutation():
+def test_prepare_gpu_setup_intent_is_no_mutation(tmp_path):
     # Inject an OFFER_SETUP-capable collector to exercise the intent path.
+    # ZA-M1-3A.2: the recommendation overlay consults the runtime's
+    # ACTIVE slot (accelerated-metadata + closure) before reporting
+    # ALREADY_READY — an empty hermetic runtime keeps this test
+    # deterministic on any machine (including hosts with a real
+    # validated accelerated runtime).
     from zealfie.host.models import GpuInfo
+    from zealfie.runtime.layout import RuntimeLayout
+    from zealfie.runtime.manager import SharedRuntime
 
     gpu = GpuInfo(
         vendor="NVIDIA",
@@ -105,7 +112,11 @@ def test_prepare_gpu_setup_intent_is_no_mutation():
     def collector():
         return _caps(gpus=(gpu,))
 
-    service = ZeAlfieService(capability_collector=collector, recommender=recommend)
+    service = ZeAlfieService(
+        capability_collector=collector,
+        recommender=recommend,
+        runtime=SharedRuntime(RuntimeLayout(root=tmp_path / "rt")),
+    )
     intent = service.prepare_gpu_setup_intent()
     assert intent.actionable is True
     assert intent.performed_any_mutation is False

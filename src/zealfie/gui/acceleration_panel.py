@@ -82,7 +82,14 @@ def panel_summary(recommendation: AccelerationRecommendation | None) -> str:
             "to configure"
         )
     if status is RecommendationStatus.ALREADY_READY:
-        return "GPU acceleration is already ready."
+        # ZA-M1-3A.2: ALREADY_READY is a SLOT-STATE verdict (active slot
+        # carries valid accelerated-metadata and the recorded closure is
+        # verified installed) — never the mere presence of a GPU.  The
+        # wording distinguishes it explicitly from the OFFER_SETUP case.
+        return (
+            "GPU acceleration runtime active and validated "
+            "(accelerated closure verified in the active runtime slot)."
+        )
     if status is RecommendationStatus.BLOCKED:
         return "NVIDIA GPU detected — compatible driver unavailable."
     if status is RecommendationStatus.NOT_APPLICABLE:

@@ -1105,8 +1105,11 @@ def test_service_accelerated_full_flow(
 
     Success, phase COMPLETED, old runtime preserved and still usable,
     active slot switched, fake-accel installed at the planned version,
-    accelerated-metadata.json recorded, product provenance/installed
-    lock/selection UNCHANGED, and KEEP exactness (no drift)."""
+    accelerated-metadata.json recorded, and ZA-M1-3A.2 slot state
+    continuity: the NEW slot carries provenance for the exact KEEP
+    identity and an installed-runtime lock including the accelerated
+    closure; the old slot's records stay intact; selection is
+    unchanged; KEEP exactness (no drift)."""
     # The default gate's backend compute probe (NVIDIA_CUDA) imports
     # cupy, which this synthetic candidate does not carry.  The compute
     # probe behaviour is covered by dedicated Phase F tests
@@ -1199,11 +1202,25 @@ def test_service_accelerated_full_flow(
         ("fake-accel", "1.0.0", _sha256(fake_accel_wheel)),
     )
 
-    # ---- Products unchanged: no provenance / lock / selection writes ----
-    assert provenance_store.load_slot(final.active_slot_id) == {}
+    # ---- ZA-M1-3A.2 slot state continuity ------------------------------
+    # The NEW slot is fully described: provenance for the exact KEEP
+    # identity (same version / commit / wheel digest — never invented),
+    # and an installed-runtime lock including the accelerated closure.
+    new_prov = provenance_store.load_slot(final.active_slot_id)
+    assert set(new_prov) == {"zewitness"}
+    assert new_prov["zewitness"] == prov_before["zewitness"]
+    # The old slot's records stay intact (rollback target).
     assert provenance_store.load_slot(active_before) == prov_slot_before
-    assert installed_store.load_slot(final.active_slot_id) is None
+    new_lock = installed_store.load_slot(final.active_slot_id)
+    assert new_lock is not None
+    assert "zealfie-witness" in new_lock.dependencies
+    assert "fake-accel" in new_lock.dependencies
+    accel_dep = new_lock.dependencies["fake-accel"]
+    assert accel_dep.version == "1.0.0"
+    assert accel_dep.primary is False
+    assert "zealfie-witness" in accel_dep.required_by
     assert installed_store.load_slot(active_before) == lock_slot_before
+    # Products are unchanged: selection is never touched.
     assert store.path.read_bytes() == selection_before
 
     # ---- Progress: completed only, and only at the end ------------------
