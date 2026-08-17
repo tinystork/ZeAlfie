@@ -10,6 +10,8 @@ import tempfile
 import venv
 from pathlib import Path
 
+from zealfie.common.subprocess_platform import technical_subprocess_platform_kwargs
+
 
 _TEMPORARY_VENV_PREFIX = "zealfie-tmp-venv-"
 
@@ -104,6 +106,7 @@ class TemporaryVenv:
             capture_output=True,
             text=True,
             timeout=timeout,
+            **technical_subprocess_platform_kwargs(),
         )
 
     def run_python(
@@ -134,6 +137,7 @@ class TemporaryVenv:
             text=True,
             timeout=timeout,
             env=env,
+            **technical_subprocess_platform_kwargs(),
         )
 
     # -- cleanup --------------------------------------------------------------

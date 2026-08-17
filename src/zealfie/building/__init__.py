@@ -10,6 +10,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from zealfie.common.subprocess_platform import technical_subprocess_platform_kwargs
+
 
 @dataclass(frozen=True, slots=True)
 class InspectedWheel:
@@ -107,6 +109,7 @@ def build_wheel(
             text=True,
             timeout=120,
             env={**os.environ, **build_env},
+            **technical_subprocess_platform_kwargs(),
         )
         if result.returncode != 0:
             raise RuntimeError(

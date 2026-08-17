@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Callable, Mapping, Protocol
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 
+from zealfie.common.subprocess_platform import technical_subprocess_platform_kwargs
 from zealfie.acceleration.planning import (
     AcceleratedDeploymentPlan,
     AcceleratedPlanStatus,
@@ -548,6 +549,7 @@ def _run_backend_compute_probe(
             text=True,
             encoding="utf-8",
             timeout=timeout,
+            **technical_subprocess_platform_kwargs(),
         )
     except subprocess.TimeoutExpired:
         return (

@@ -44,6 +44,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from zealfie.common.subprocess_platform import technical_subprocess_platform_kwargs
+
 from .models import (
     CapabilityStatus,
     GpuInfo,
@@ -95,6 +97,7 @@ def default_command_runner(argv: Sequence[str]) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            **technical_subprocess_platform_kwargs(),
         )
     except FileNotFoundError as exc:
         raise CommandUnavailableError(f"command not found: {argv[0]}") from exc

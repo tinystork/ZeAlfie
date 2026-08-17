@@ -13,6 +13,8 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+from zealfie.common.subprocess_platform import technical_subprocess_platform_kwargs
+
 
 # ---------------------------------------------------------------------------
 # Probe script (executed by the *runtime's* Python, not by the dev venv)
@@ -91,6 +93,7 @@ def probe_runtime_distribution(
         capture_output=True,
         text=True,
         timeout=timeout,
+        **technical_subprocess_platform_kwargs(),
     )
 
     if result.returncode != 0:
@@ -123,6 +126,7 @@ def probe_runtime_python_version(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **technical_subprocess_platform_kwargs(),
         )
     except (subprocess.TimeoutExpired, OSError):
         return None

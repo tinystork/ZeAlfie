@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from zealfie.building import inspect_wheel
+from zealfie.common.subprocess_platform import technical_subprocess_platform_kwargs
 from zealfie.components.model import ComponentDefinition, EntryPointContract
 
 from .layout import RuntimeLayout, default_runtime_layout
@@ -303,6 +304,7 @@ class SharedRuntime:
         result = subprocess.run(
             [str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(wp)],
             capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_SECONDS,
+            **technical_subprocess_platform_kwargs(),
         )
         if result.returncode != 0:
             return InstallResult(

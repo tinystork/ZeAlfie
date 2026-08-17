@@ -16,6 +16,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from zealfie.common.subprocess_platform import technical_subprocess_platform_kwargs
+
 from .acquisition import (
     AcquiredWheel,
     AcquisitionTransportError,
@@ -114,6 +116,7 @@ class PipWheelhouseAcquirer:
                     check=False,
                     timeout=timeout_seconds,
                     env=env,
+                    **technical_subprocess_platform_kwargs(),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise AcquisitionTransportError(
