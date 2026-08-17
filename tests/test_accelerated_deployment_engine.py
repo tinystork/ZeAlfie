@@ -20,6 +20,8 @@ everything else is FAST.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,7 @@ from zealfie.acceleration.deployment import (
     AcceleratedSlotMetadata,
     AcceleratedSlotMetadataStore,
     AcquiredAcceleratedVariant,
+    _run_backend_compute_probe,
     default_accelerated_gate,
     extend_runtime_lock_with_acceleration,
 )
@@ -727,3 +730,54 @@ def test_default_gate_probe_is_stdlib_only(
     probe = probe_runtime_distribution(str(python), "fake-accel")
     assert probe["installed"] is True
     assert probe["version"] == "1.0.0"
+
+
+
+# =============================================================================
+# Backend compute probe transport — non-ASCII script survives (W-BUG-02)
+# =============================================================================
+
+UNICODE_PROBE_SCRIPT = (
+    "# unicode transport probe \u2014 em-dash comment survives the trip\n"
+    "print('BACKEND_COMPUTE_PROBE_OK')\n"
+)
+
+
+def test_backend_compute_probe_unicode_transport_positive_control():
+    """Positive control (also the C3 Linux sentinel): a compute probe
+    script containing a non-ASCII character (em-dash in a comment)
+    survives the REAL stdin transport into the child interpreter and
+    succeeds (no mocks — a real subprocess is spawned)."""
+    result = _run_backend_compute_probe(
+        sys.executable,
+        "TEST",
+        {"label": "unicode transport probe", "script": UNICODE_PROBE_SCRIPT},
+    )
+    assert result is None
+
+
+def test_backend_compute_probe_unicode_survives_windows_locale_parent(
+    monkeypatch,
+):
+    """W-BUG-02 regression guard: on a Windows-locale (CP1252) parent the
+    default ``subprocess`` text encoding would encode the em-dash as
+    0x97 and the child interpreter would raise ``SyntaxError: Non-UTF-8
+    code ...`` (the real Windows defect).  The explicit
+    ``encoding="utf-8"`` in ``_run_backend_compute_probe`` keeps the
+    transport clean regardless of the parent locale."""
+    if not hasattr(subprocess, "_text_encoding"):
+        pytest.skip(
+            "subprocess._text_encoding does not exist on this interpreter "
+            "(verified present on CPython 3.13)"
+        )
+    # CPython's subprocess CALLS the module-level _text_encoding() when
+    # text=True and no explicit encoding is given; patching it with a
+    # callable returning "cp1252" reproduces a Windows-locale parent.
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+
+    result = _run_backend_compute_probe(
+        sys.executable,
+        "TEST",
+        {"label": "unicode transport probe", "script": UNICODE_PROBE_SCRIPT},
+    )
+    assert result is None

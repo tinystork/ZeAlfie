@@ -216,6 +216,26 @@ def test_nvidia_smi_absent_but_driver_detected_via_proc():
     assert rec.status is RecommendationStatus.OFFER_SETUP
 
 
+def test_nvidia_driver_detected_via_device_node():
+    # C1 Linux fallback evidence: /dev/nvidiactl present, no /proc content,
+    # no nvidia-smi — the device node alone signals a loaded driver.
+    prober = make_prober(
+        sysfs_vendors=("0x10de",),
+        smi_unavailable=True,
+        proc_content=None,
+        dev_exists=True,
+        lspci_stdout="",
+    )
+    caps = prober.collect()
+    assert caps.gpu_count == 1
+    assert caps.gpus[0].driver_status is CapabilityStatus.AVAILABLE
+    assert caps.gpus[0].driver_version is None
+    assert caps.gpus[0].nvidia_smi_available is False
+
+    rec = recommend(caps)
+    assert rec.status is RecommendationStatus.OFFER_SETUP
+
+
 # ===========================================================================
 # 6) invalid nvidia-smi output
 # ===========================================================================
@@ -544,6 +564,68 @@ def test_windows_no_nvidia_evidence_honest_unknown_not_blocked():
     assert rec.status is RecommendationStatus.UNKNOWN
     assert rec.status is not RecommendationStatus.BLOCKED
     assert rec.status is not RecommendationStatus.NOT_APPLICABLE
+
+
+def test_windows_smi_invocation_uses_nounits_format_argv():
+    """W-BUG-01 regression guard: the ``nvidia-smi`` query argv must carry
+    ``nounits`` (never the invalid ``nouuid``) so real Windows drivers
+    produce parseable ``name, driver_version`` CSV lines.
+
+    A recording command runner captures the observable argv handed to the
+    injected CommandRunner seam; every other injectable raises, proving
+    nothing but the platform probe and ``nvidia-smi`` is consulted on
+    Windows.
+    """
+    recorded: list[tuple[str, ...]] = []
+
+    def command_runner(argv):
+        recorded.append(tuple(argv))
+        if argv[0] == "nvidia-smi":
+            return "NVIDIA GeForce RTX 3070 Laptop GPU, 576.80\n"
+        raise AssertionError(f"unexpected command on Windows: {argv}")
+
+    def file_reader(path):
+        raise AssertionError(
+            f"file_reader must not be consulted on Windows: {path}"
+        )
+
+    def path_exists(path):
+        raise AssertionError(
+            f"path_exists must not be consulted on Windows: {path}"
+        )
+
+    def dir_lister(path):
+        raise AssertionError(
+            f"dir_lister must not be consulted on Windows: {path}"
+        )
+
+    prober = HostProber(
+        platform_provider=lambda: ("Windows", "AMD64"),
+        command_runner=command_runner,
+        file_reader=file_reader,
+        path_exists=path_exists,
+        dir_lister=dir_lister,
+    )
+    caps = prober.collect()
+
+    # collect() sees the GPU from the realistic working smi output.
+    assert caps.gpu_count == 1
+    gpu = caps.gpus[0]
+    assert gpu.vendor == "NVIDIA"
+    assert gpu.model == "NVIDIA GeForce RTX 3070 Laptop GPU"
+    assert gpu.driver_version == "576.80"
+    assert gpu.driver_status is CapabilityStatus.AVAILABLE
+
+    # The observable argv passed to the command runner is the fixed one.
+    assert len(recorded) == 1
+    argv = recorded[0]
+    assert argv == (
+        "nvidia-smi",
+        "--query-gpu=name,driver_version",
+        "--format=csv,noheader,nounits",
+    )
+    assert any("nounits" in part for part in argv)
+    assert not any("nouuid" in part for part in argv)
 
 
 # ===========================================================================
