@@ -248,8 +248,12 @@ def _entry_key(entry: AcceleratedArtifactEntry) -> tuple[str, str, str, str | No
 class AcceleratedArtifactManifest:
     """Immutable collection of declared accelerated artifacts.
 
-    Duplicate ``(distribution, backend, platform, python)`` keys and
-    duplicate filenames are rejected at construction (fail-closed).
+    Duplicate ``(distribution, backend, platform, python)`` keys are
+    rejected at construction (fail-closed).  Duplicate filenames are
+    rejected too — except when the entries reference the identical
+    immutable bytes (same validated ``url``, ``size`` and lowercased
+    ``sha256``), e.g. a ``py3-none-any`` wheel shared by multiple
+    platform rows.
     """
 
     entries: tuple[AcceleratedArtifactEntry, ...]
@@ -273,12 +277,20 @@ class AcceleratedArtifactManifest:
                 )
             seen_keys[key] = entry
             if entry.filename in seen_filenames:
-                raise InvalidArtifactManifestError(
-                    f"duplicate artifact filename {entry.filename!r} "
-                    f"(distributions {seen_filenames[entry.filename].distribution!r} "
-                    f"and {entry.distribution!r})"
+                prior = seen_filenames[entry.filename]
+                same_immutable_bytes = (
+                    prior.url == entry.url
+                    and prior.size == entry.size
+                    and prior.sha256 == entry.sha256
                 )
-            seen_filenames[entry.filename] = entry
+                if not same_immutable_bytes:
+                    raise InvalidArtifactManifestError(
+                        f"duplicate artifact filename {entry.filename!r} "
+                        f"(distributions {prior.distribution!r} "
+                        f"and {entry.distribution!r})"
+                    )
+            else:
+                seen_filenames[entry.filename] = entry
         object.__setattr__(self, "entries", entries)
 
     def find(

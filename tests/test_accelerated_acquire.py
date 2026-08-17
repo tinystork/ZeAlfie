@@ -27,15 +27,21 @@ import pytest
 
 from zealfie.acceleration import (
     AcceleratedAcquisitionUnavailable,
+    AcceleratedArtifactEntry,
+    AcceleratedArtifactManifest,
     AcceleratedDeploymentPlan,
     AcceleratedPlanStatus,
     AcceleratedVariant,
     HardwareCompatibility,
     HardwareCompatibilityReasonCode,
     HardwareCompatibilityStatus,
+    InvalidArtifactManifestError,
+    ManifestAcceleratedArtifactAcquirer,
     PlannedAcceleratedDependency,
     VariantStatus,
     default_accelerated_artifact_acquirer,
+    default_accelerated_artifact_manifest,
+    load_accelerated_artifact_manifest,
 )
 from zealfie.acceleration.deployment import (
     AcceleratedAcquisitionError,
@@ -385,3 +391,175 @@ def test_directory_acquirer_missing_fixture_wheel_raises(tmp_path: Path) -> None
     acquirer = _FixtureAcquirer(fixture_dir)
     with pytest.raises(FileNotFoundError):
         acquirer.acquire(plan, work_root)
+
+# ---------------------------------------------------------------------------
+# M1-2L M3 — Windows accelerated artifact closure (win_amd64 / cp313)
+# ---------------------------------------------------------------------------
+
+WIN_CLOSURE = {
+    "cupy-cuda12x": "14.1.1",
+    "cuda-pathfinder": "1.6.0",
+    "nvidia-cuda-runtime-cu12": "12.4.127",
+    "nvidia-cuda-nvrtc-cu12": "12.4.127",
+    "nvidia-cublas-cu12": "12.4.5.8",
+    "nvidia-cufft-cu12": "11.2.1.3",
+    "nvidia-cusparse-cu12": "12.3.1.170",
+    "nvidia-curand-cu12": "10.3.5.147",
+    "nvidia-cusolver-cu12": "11.6.1.9",
+    "nvidia-nvjitlink-cu12": "12.4.127",
+}
+
+
+def _two_platform_manifest(
+    *,
+    url_override: str | None = None,
+    size_override: int | None = None,
+    sha256_override: str | None = None,
+) -> str:
+    """Inline manifest with the same immutable wheel under two platform
+    rows; the win_amd64 row optionally differs in one metadata field."""
+    url = (
+        "https://files.pythonhosted.org/packages/fc/b4/"
+        "d088047afe39827556df21118cac9ffd20cc3f968c99a7681494d1eb333c/"
+        "cuda_pathfinder-1.6.0-py3-none-any.whl"
+    )
+    size = 54591
+    sha256 = "1503af579d8379c24bdd65528379bc57039b0455be9f5f9686cf8e473a1fce51"
+
+    def entry(platform: str, *, differ: bool) -> str:
+        e_url = url_override if (differ and url_override is not None) else url
+        e_size = size_override if (differ and size_override is not None) else size
+        e_sha = (
+            sha256_override if (differ and sha256_override is not None) else sha256
+        )
+        return f"""
+[[artifacts]]
+distribution = "cuda-pathfinder"
+version = "1.6.0"
+backend = "NVIDIA_CUDA"
+platform = "{platform}"
+python = "py3"
+requires_python = ">=3.10"
+filename = "cuda_pathfinder-1.6.0-py3-none-any.whl"
+url = "{e_url}"
+size = {e_size}
+sha256 = "{e_sha}"
+"""
+
+    return (
+        "schema_version = 1\n"
+        + entry("linux_x86_64", differ=False)
+        + entry("win_amd64", differ=True)
+    )
+
+
+def test_manifest_allows_same_immutable_artifact_across_platforms() -> None:
+    """Two platform rows may reference the same immutable wheel bytes
+    (same filename + url + size + sha256) — the manifest accepts both."""
+    manifest = load_accelerated_artifact_manifest(_two_platform_manifest())
+    assert len(manifest.entries) == 2
+    assert (
+        manifest.find("cuda-pathfinder", "NVIDIA_CUDA", "linux_x86_64")
+        is not None
+    )
+    assert (
+        manifest.find("cuda-pathfinder", "NVIDIA_CUDA", "win_amd64")
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    ("url_override", "size_override", "sha256_override"),
+    [
+        (
+            "https://files.pythonhosted.org/packages/ab/cd/"
+            "deadbeefcuda_pathfinder-1.6.0-py3-none-any.whl",
+            None,
+            None,
+        ),
+        (None, 54592, None),
+        (None, None, "a" * 64),
+    ],
+    ids=["url-differs", "size-differs", "sha256-differs"],
+)
+def test_manifest_rejects_same_filename_with_different_metadata(
+    url_override: str | None,
+    size_override: int | None,
+    sha256_override: str | None,
+) -> None:
+    """The same filename under two platform rows is rejected unless the
+    (url, size, sha256) bytes reference is identical — fail-closed."""
+    with pytest.raises(
+        InvalidArtifactManifestError, match="duplicate artifact filename"
+    ):
+        load_accelerated_artifact_manifest(
+            _two_platform_manifest(
+                url_override=url_override,
+                size_override=size_override,
+                sha256_override=sha256_override,
+            )
+        )
+
+
+def test_win_amd64_entries_resolve_via_find() -> None:
+    """Each of the 10 closure distributions resolves on win_amd64 with
+    the pinned version, and the linux lookup still returns the linux
+    platform entry (no cross-platform leak)."""
+    manifest = default_accelerated_artifact_manifest()
+    for distribution, version in WIN_CLOSURE.items():
+        win = manifest.find(
+            distribution, "NVIDIA_CUDA", "win_amd64", python_tag="cp313"
+        )
+        assert win is not None, distribution
+        assert win.version == version, distribution
+        assert win.platform == "win_amd64", distribution
+        linux = manifest.find(
+            distribution, "NVIDIA_CUDA", "linux_x86_64", python_tag="cp313"
+        )
+        assert linux is not None, distribution
+        assert linux.platform == "linux_x86_64", distribution
+        assert linux.version == version, distribution
+
+
+def test_win_closure_versions_match_linux_pins() -> None:
+    """The 10 win_amd64 versions equal the 10 linux_x86_64 versions."""
+    manifest = default_accelerated_artifact_manifest()
+    win = {
+        e.distribution: e.version
+        for e in manifest.entries
+        if e.platform == "win_amd64"
+    }
+    linux = {
+        e.distribution: e.version
+        for e in manifest.entries
+        if e.platform == "linux_x86_64"
+    }
+    assert win == WIN_CLOSURE
+    assert linux == WIN_CLOSURE
+
+
+def test_acquirer_resolves_win_platform_with_override() -> None:
+    """The acquirer with platform_tag="win_amd64" / python_tag="cp313"
+    resolves the Windows wheel facts (resolution only — no download)."""
+    acquirer = ManifestAcceleratedArtifactAcquirer(
+        manifest=default_accelerated_artifact_manifest(),
+        platform_tag="win_amd64",
+        python_tag="cp313",
+    )
+    cupy = acquirer._resolve_entry("cupy-cuda12x", "NVIDIA_CUDA")
+    assert cupy.platform == "win_amd64"
+    assert cupy.filename == "cupy_cuda12x-14.1.1-cp313-cp313-win_amd64.whl"
+    assert (
+        cupy.sha256
+        == "64072f4139b44df38215f0519a6badc14138fa0e4bb5b2db44fe94d05f8b9c8b"
+    )
+    cublas = acquirer._resolve_entry("nvidia-cublas-cu12", "NVIDIA_CUDA")
+    assert cublas.platform == "win_amd64"
+    assert (
+        cublas.filename
+        == "nvidia_cublas_cu12-12.4.5.8-py3-none-win_amd64.whl"
+    )
+    assert (
+        cublas.sha256
+        == "5a796786da89203a0657eda402bcdcec6180254a8ac22d72213abc42069522dc"
+    )

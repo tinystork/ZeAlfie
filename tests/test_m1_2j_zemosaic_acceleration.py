@@ -1070,13 +1070,17 @@ CLOSURE = {
 }
 
 
-def test_manifest_parses_full_closure_ten_artifacts():
-    """(e) The packaged manifest parses the new closure: exactly 10
-    artifacts, each sha256 exactly 64 hex, python tags coherent
-    (cp313 for cupy-cuda12x, py3 for the rest)."""
+def test_manifest_parses_full_closure_both_platforms():
+    """(e) The packaged manifest parses the full closure on both
+    platforms: exactly 20 artifacts, each sha256 exactly 64 hex, python
+    tags coherent (cp313 for cupy-cuda12x, py3 for the rest)."""
     manifest = default_accelerated_artifact_manifest()
-    assert len(manifest.entries) == 10
-    by_distribution = {e.distribution: e for e in manifest.entries}
+    assert len(manifest.entries) == 20
+    by_distribution = {
+        e.distribution: e
+        for e in manifest.entries
+        if e.platform == "linux_x86_64"
+    }
     assert set(by_distribution) == set(CLOSURE)
     for distribution, version in CLOSURE.items():
         entry = by_distribution[distribution]
@@ -1088,24 +1092,49 @@ def test_manifest_parses_full_closure_ten_artifacts():
             assert by_distribution[distribution].python == "py3"
     assert "fastrlock" not in by_distribution
 
+    win_by_distribution = {
+        e.distribution: e
+        for e in manifest.entries
+        if e.platform == "win_amd64"
+    }
+    assert set(win_by_distribution) == set(CLOSURE)
+    for distribution, version in CLOSURE.items():
+        entry = win_by_distribution[distribution]
+        assert entry.version == version
+        assert entry.platform == "win_amd64"
+        assert len(entry.sha256) == 64
+        assert all(c in "0123456789abcdef" for c in entry.sha256)
+    assert win_by_distribution["cupy-cuda12x"].python == "cp313"
+    for distribution in CLOSURE:
+        if distribution != "cupy-cuda12x":
+            assert win_by_distribution[distribution].python == "py3"
+    assert "fastrlock" not in win_by_distribution
+    assert sum(e.size for e in win_by_distribution.values()) == 1204421859
 
-def test_manifest_variant_catalog_has_ten_variants():
+
+def test_manifest_variant_catalog_has_twenty_variants():
     """(e) The variant catalog derived from the manifest resolves all 10
-    closure distributions (and nothing for fastrlock)."""
+    closure distributions on both platforms (and nothing for fastrlock)."""
     catalog = default_manifest_variant_catalog()
-    assert len(catalog.variants) == 10
+    assert len(catalog.variants) == 20
     for distribution, version in CLOSURE.items():
         variant = catalog.find_variant(
             distribution, "NVIDIA_CUDA", "linux_x86_64"
         )
         assert variant is not None, distribution
         assert variant.version == version
+    for distribution, version in CLOSURE.items():
+        variant = catalog.find_variant(
+            distribution, "NVIDIA_CUDA", "win_amd64"
+        )
+        assert variant is not None, distribution
+        assert variant.version == version
 
 
 def test_anti_drift_closure_snapshot_matches_manifest():
-    """(e) The Phase F closure table in the anti-drift snapshot matches
+    """(e) The Phase F closure tables in the anti-drift snapshot match
     the packaged manifest exactly (distributions, versions, and the
-    total download bytes = the sum of the manifest sizes)."""
+    per-platform total download bytes = the sum of the manifest sizes)."""
     import tomllib
 
     snapshot = tomllib.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
@@ -1118,10 +1147,26 @@ def test_anti_drift_closure_snapshot_matches_manifest():
         snapshot_distributions[distribution] = version
     assert snapshot_distributions == CLOSURE
 
+    windows = snapshot["accelerated_closure_windows"]
+    win_snapshot_distributions = {}
+    for line in windows["distributions"]:
+        distribution, _, version = line.partition("==")
+        distribution = distribution.strip()
+        version = version.strip()
+        win_snapshot_distributions[distribution] = version
+    assert win_snapshot_distributions == CLOSURE
+
     manifest = default_accelerated_artifact_manifest()
-    assert sum(entry.size for entry in manifest.entries) == (
-        closure["total_download_bytes"]
-    )
+    assert sum(
+        entry.size
+        for entry in manifest.entries
+        if entry.platform == "linux_x86_64"
+    ) == closure["total_download_bytes"]
+    assert sum(
+        entry.size
+        for entry in manifest.entries
+        if entry.platform == "win_amd64"
+    ) == windows["total_download_bytes"]
 
 
 def test_plan_ready_carries_host_prerequisites_classification():
