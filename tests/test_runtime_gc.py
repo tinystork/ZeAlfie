@@ -7,7 +7,7 @@ deterministic deletion order, and the §20 synthetic E2E.
 Case → test mapping (§19):
   1  test_case01_active_slot_kept
   2  test_case02_previous_slot_protected_by_default
-  3  test_case03_referenced_slots_protected
+  3  test_case03_historical_store_refs_prunable_clean_metadata
   4  test_case04_true_orphan_prunable
   5  test_case05_failed_candidate_prunable_clean_metadata
   6  test_case06_unknown_reference_blocks
@@ -62,6 +62,9 @@ import pytest
 import zealfie.cli as cli
 from zealfie.runtime import gc as gc_module
 from zealfie.runtime.gc import (
+    CLEAN_ACCELERATED_METADATA,
+    CLEAN_INSTALLED_LOCK,
+    CLEAN_PRODUCT_PROVENANCE,
     GcPlan,
     GcSlotEntry,
     GcStatus,
@@ -161,7 +164,8 @@ def _ready_fixture(tmp_path: Path) -> Path:
 
     ACTIVE (active), PREVIOUS (previous, also referenced by
     accelerated-metadata — mixed reference that must survive the purge),
-    REF_OLD (installed-lock + provenance → REFERENCED), FAILED_GPU
+    REF_OLD (installed-lock + provenance → PRUNABLE_CLEAN_METADATA),
+    FAILED_GPU
     (accelerated-metadata only → PRUNABLE_CLEAN_METADATA), ORPHAN
     (nothing → PRUNABLE).
     """
@@ -227,7 +231,7 @@ def test_case01_active_slot_kept(tmp_path):
     entry = _entry(plan, ACTIVE)
     assert entry.category is SlotCategory.ACTIVE
     assert entry.references == ("active.json",)
-    assert _prunable_ids(plan) == {FAILED_GPU, ORPHAN}
+    assert _prunable_ids(plan) == {REF_OLD, FAILED_GPU, ORPHAN}
 
 
 def test_case02_previous_slot_protected_by_default(tmp_path):
@@ -243,15 +247,23 @@ def test_case02_previous_slot_protected_by_default(tmp_path):
     assert PREVIOUS not in _prunable_ids(plan)
 
 
-def test_case03_referenced_slots_protected(tmp_path):
+def test_case03_historical_store_refs_prunable_clean_metadata(tmp_path):
+    """ZA-M1-3A.3: a historical slot referenced by the observational
+    stores is PRUNABLE_CLEAN_METADATA — never a protected REFERENCED
+    KEEP — with one CLEAN_* action per referencing store."""
     plan = build_gc_plan(_ready_fixture(tmp_path))
     entry = _entry(plan, REF_OLD)
-    assert entry.category is SlotCategory.REFERENCED
+    assert entry.category is SlotCategory.PRUNABLE_CLEAN_METADATA
     assert set(entry.references) == {
         "installed-lock.json",
         "product-provenance.json",
     }
-    assert REF_OLD not in _prunable_ids(plan)
+    assert entry.metadata_actions == (
+        CLEAN_INSTALLED_LOCK,
+        CLEAN_PRODUCT_PROVENANCE,
+    )
+    assert entry.metadata_action is None  # legacy scalar: multi-store
+    assert REF_OLD in _prunable_ids(plan)
 
 
 def test_case04_true_orphan_prunable(tmp_path):
@@ -267,6 +279,7 @@ def test_case05_failed_candidate_prunable_clean_metadata(tmp_path):
     entry = _entry(plan, FAILED_GPU)
     assert entry.category is SlotCategory.PRUNABLE_CLEAN_METADATA
     assert entry.metadata_action == "CLEAN_ACCELERATED_METADATA"
+    assert entry.metadata_actions == (CLEAN_ACCELERATED_METADATA,)
     assert entry.references == ("accelerated-metadata.json",)
 
 
@@ -457,7 +470,11 @@ def test_case19_partial_deletion_failure_preserves_active_and_continues(
     tmp_path, monkeypatch
 ):
     """A mid-run rmtree failure keeps the active runtime and lets the
-    remaining prunable slots be processed."""
+    remaining prunable slots be processed.  With the ZA-M1-3A.3 order
+    (metadata purge BEFORE directory removal), the failed slot's store
+    entries are already purged while its directory survives — the state
+    stays consistent (metadata never points at a deleted directory) and
+    self-heals: the next plan re-classifies the directory PRUNABLE."""
     root = _ready_fixture(tmp_path)
     plan = build_gc_plan(root)
     real_rmtree = shutil.rmtree
@@ -470,24 +487,39 @@ def test_case19_partial_deletion_failure_preserves_active_and_continues(
     monkeypatch.setattr(gc_module.shutil, "rmtree", flaky_rmtree)
     result = apply_gc_plan(root, plan)
     assert FAILED_GPU not in result.deleted_slots
-    assert ORPHAN in result.deleted_slots
+    assert set(result.deleted_slots) == {REF_OLD, ORPHAN}
     assert any("rt-dddddddddddd" in e for e in result.errors)
     assert (root / "slots" / ACTIVE).is_dir()
     assert (root / "slots" / PREVIOUS).is_dir()
     assert (root / "slots" / FAILED_GPU).is_dir()  # deletion failed → kept
-    # its metadata entry was NOT purged (slot not actually deleted)
+    # its metadata entry WAS purged (purge strictly precedes deletion)
     meta = json.loads(
         (root / "state" / "accelerated-metadata.json").read_text(
             encoding="utf-8"
         )
     )
-    assert FAILED_GPU in meta["slots"]
+    assert FAILED_GPU not in meta["slots"]
+    # self-healing: the surviving directory is now a clean PRUNABLE and
+    # the next plan is READY (no REPAIR_REQUIRED, never BLOCKED).
+    plan2 = build_gc_plan(root)
+    assert plan2.status is GcStatus.READY
+    entry2 = _entry(plan2, FAILED_GPU)
+    assert entry2.category is SlotCategory.PRUNABLE
+    assert entry2.references == ()
 
 
 def test_case20_metadata_write_failure_preserves_runtime(tmp_path, monkeypatch):
+    """A metadata-purge write failure preserves the slot directory this
+    round (ZA-M1-3A.3 per-slot semantics): purge runs BEFORE deletion, so
+    a refused purge means the slot directory stays on disk — the runtime
+    stays consistent, and the remaining slots are still processed."""
     root = _ready_fixture(tmp_path)
     active_before = (root / "state" / "active.json").read_bytes()
     meta_before = (root / "state" / "accelerated-metadata.json").read_bytes()
+    lock_before = (root / "state" / "installed-lock.json").read_bytes()
+    prov_before = (
+        root / "state" / "product-provenance.json"
+    ).read_bytes()
     plan = build_gc_plan(root)
     real_replace = os.replace
 
@@ -498,25 +530,38 @@ def test_case20_metadata_write_failure_preserves_runtime(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gc_module.os, "replace", failing_replace)
     result = apply_gc_plan(root, plan)
-    assert FAILED_GPU in result.deleted_slots
-    assert ORPHAN in result.deleted_slots
+    assert FAILED_GPU not in result.deleted_slots
+    assert set(result.deleted_slots) == {REF_OLD, ORPHAN}
     assert any("purge" in e for e in result.errors)
     # runtime preserved: active/previous intact, pointer byte-identical
     assert (root / "slots" / ACTIVE).is_dir()
     assert (root / "slots" / PREVIOUS).is_dir()
+    assert (root / "slots" / FAILED_GPU).is_dir()  # purge refused → kept
     assert (root / "state" / "active.json").read_bytes() == active_before
-    # metadata file untouched (atomic write never happened)
+    # the failed store is untouched (its atomic write never happened)
     assert (
         root / "state" / "accelerated-metadata.json"
     ).read_bytes() == meta_before
+    # the OTHER slots were still processed (REF_OLD purged from its stores)
+    assert (
+        root / "state" / "installed-lock.json"
+    ).read_bytes() != lock_before
+    assert (
+        root / "state" / "product-provenance.json"
+    ).read_bytes() != prov_before
 
 
 def test_case22_empty_prune_set_noop_success(tmp_path):
     root = _ready_fixture(tmp_path)
     state_dir = root / "state"
+    shutil.rmtree(root / "slots" / REF_OLD)
     shutil.rmtree(root / "slots" / FAILED_GPU)
     shutil.rmtree(root / "slots" / ORPHAN)
     _write_store(state_dir, "accelerated-metadata.json", {PREVIOUS: _accel_entry()})
+    _write_store(state_dir, "installed-lock.json", {ACTIVE: _lock_entry("zemosaic")})
+    _write_store(
+        state_dir, "product-provenance.json", {ACTIVE: _prov_entry("zemosaic")}
+    )
     plan = build_gc_plan(root)
     assert plan.status is GcStatus.READY
     assert _prunable_ids(plan) == set()
@@ -527,24 +572,28 @@ def test_case22_empty_prune_set_noop_success(tmp_path):
     assert result.stale is False
     assert result.errors == ()
     assert _record_sha256s(root) == before
-    assert result.preserved_slots == tuple(
-        sorted({ACTIVE, PREVIOUS, REF_OLD})
-    )
+    assert result.preserved_slots == tuple(sorted({ACTIVE, PREVIOUS}))
 
 
 def test_case23_reclaimed_bytes_accounting(tmp_path):
     root = _ready_fixture(tmp_path)
     plan = build_gc_plan(root)
+    ref_entry = _entry(plan, REF_OLD)
     failed_entry = _entry(plan, FAILED_GPU)
     orphan_entry = _entry(plan, ORPHAN)
     # sanity: the estimate at least covers the payload bytes
     assert orphan_entry.estimated_bytes >= 50
     assert failed_entry.estimated_bytes >= 40
-    expected = failed_entry.estimated_bytes + orphan_entry.estimated_bytes
+    assert ref_entry.estimated_bytes >= 30
+    expected = (
+        ref_entry.estimated_bytes
+        + failed_entry.estimated_bytes
+        + orphan_entry.estimated_bytes
+    )
     assert plan.total_recoverable_bytes == expected
     result = apply_gc_plan(root, plan)
     assert result.reclaimed_bytes == expected
-    assert set(result.deleted_slots) == {FAILED_GPU, ORPHAN}
+    assert set(result.deleted_slots) == {REF_OLD, FAILED_GPU, ORPHAN}
 
 
 def test_case24_cli_gc_plan_read_only(tmp_path, monkeypatch):
@@ -584,7 +633,7 @@ def test_case26_active_runtime_still_launchable_after_synthetic_gc(tmp_path):
     root = _ready_fixture(tmp_path)
     plan = build_gc_plan(root)
     result = apply_gc_plan(root, plan)
-    assert set(result.deleted_slots) == {FAILED_GPU, ORPHAN}
+    assert set(result.deleted_slots) == {REF_OLD, FAILED_GPU, ORPHAN}
     version = probe_runtime_python_version(
         _slot_python_path(root / "slots" / ACTIVE)
     )
@@ -609,24 +658,32 @@ def test_synthetic_e2e_full_gc_cycle(tmp_path):
 
     plan = build_gc_plan(root)
     assert plan.status is GcStatus.READY
-    assert _prunable_ids(plan) == {FAILED_GPU, ORPHAN}
+    assert _prunable_ids(plan) == {REF_OLD, FAILED_GPU, ORPHAN}
     assert plan.total_recoverable_bytes > 0
 
     result = apply_gc_plan(root, plan)
     assert result.stale is False
     assert result.errors == ()
-    assert result.deleted_slots == (FAILED_GPU, ORPHAN)  # sorted by slot id
+    # sorted by slot id; REF_OLD's purge precedes its deletion
+    assert result.deleted_slots == (REF_OLD, FAILED_GPU, ORPHAN)
 
-    # only the orphan + failed candidate were deleted
+    # only the historical slots were deleted
     assert (root / "slots" / ACTIVE).is_dir()
     assert (root / "slots" / PREVIOUS).is_dir()
-    assert (root / "slots" / REF_OLD).is_dir()
+    assert not (root / "slots" / REF_OLD).exists()
     assert not (root / "slots" / FAILED_GPU).exists()
     assert not (root / "slots" / ORPHAN).exists()
 
-    # installed-lock / provenance / active.json byte-identical
-    assert (state_dir / "installed-lock.json").read_bytes() == lock_before
-    assert (state_dir / "product-provenance.json").read_bytes() == prov_before
+    # installed-lock / provenance: REF_OLD purged, ACTIVE entry intact;
+    # active.json byte-identical
+    lock = json.loads(
+        (state_dir / "installed-lock.json").read_text(encoding="utf-8")
+    )
+    prov = json.loads(
+        (state_dir / "product-provenance.json").read_text(encoding="utf-8")
+    )
+    assert set(lock["slots"]) == {ACTIVE}
+    assert set(prov["slots"]) == {ACTIVE}
     assert (state_dir / "active.json").read_bytes() == active_before
 
     # accelerated-metadata: FAILED_GPU purged, mixed references intact
@@ -648,6 +705,7 @@ def test_synthetic_e2e_full_gc_cycle(tmp_path):
     plan2 = build_gc_plan(root)
     assert plan2.status is GcStatus.READY
     assert _prunable_ids(plan2) == set()
+    assert plan2.blocking_reasons == ()  # READY, no REPAIR_REQUIRED
     result2 = apply_gc_plan(root, plan2)
     assert result2.deleted_slots == () and result2.errors == ()
 
@@ -672,7 +730,7 @@ def test_forged_plan_cannot_delete_protected(tmp_path):
                     category=SlotCategory.PRUNABLE,  # lie
                     reason="forged",
                     references=entry.references,
-                    metadata_action=None,
+                    metadata_actions=(),
                     estimated_bytes=entry.estimated_bytes,
                 )
             )
@@ -695,7 +753,7 @@ def test_forged_plan_cannot_delete_protected(tmp_path):
     assert (root / "slots" / ACTIVE).is_dir()
     assert (root / "slots" / PREVIOUS).is_dir()
     # the honest prunables are still deleted
-    assert set(result.deleted_slots) == {FAILED_GPU, ORPHAN}
+    assert set(result.deleted_slots) == {REF_OLD, FAILED_GPU, ORPHAN}
 
 
 def test_fingerprint_deterministic(tmp_path):
@@ -725,7 +783,7 @@ def test_deletion_order_deterministic(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gc_module, "_safe_delete_slot", spy)
     result = apply_gc_plan(root, plan)
-    assert order == [FAILED_GPU, ORPHAN] == sorted(order)
+    assert order == [REF_OLD, FAILED_GPU, ORPHAN] == sorted(order)
     assert result.deleted_slots == tuple(sorted(result.deleted_slots))
 
 
@@ -820,11 +878,12 @@ def test_cli_gc_applies_and_reports(tmp_path, monkeypatch):
     out = stdout.getvalue()
     assert "Safe runtime GC result:" in out
     assert (
-        f"Deleted slots: {FAILED_GPU}, {ORPHAN}" in out
+        f"Deleted slots: {REF_OLD}, {FAILED_GPU}, {ORPHAN}" in out
     )
     assert "Stale plan: no" in out
     assert not (root / "slots" / ORPHAN).exists()
     assert not (root / "slots" / FAILED_GPU).exists()
+    assert not (root / "slots" / REF_OLD).exists()
     assert (root / "slots" / ACTIVE).is_dir()
     meta = json.loads(
         (root / "state" / "accelerated-metadata.json").read_text(
@@ -833,6 +892,19 @@ def test_cli_gc_applies_and_reports(tmp_path, monkeypatch):
     )
     assert FAILED_GPU not in meta["slots"]
     assert PREVIOUS in meta["slots"]
+    # the historical REF_OLD entries were purged from both stores
+    lock = json.loads(
+        (root / "state" / "installed-lock.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert REF_OLD not in lock["slots"]
+    prov = json.loads(
+        (root / "state" / "product-provenance.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert REF_OLD not in prov["slots"]
 
 
 def test_cli_gc_stale_exits_2(tmp_path, monkeypatch):
