@@ -10,6 +10,15 @@ M0-8B adds the transactional offline deployment engine.
 
 from __future__ import annotations
 
+from .artifact_cache import (
+    ArtifactCacheStore,
+    CacheGcPlan,
+    CacheGcResult,
+    apply_cache_gc_plan,
+    build_cache_gc_plan,
+    materialize_cached,
+    runtime_cache_gc,
+)
 from .deployment import DeploymentCancelledError, apply_deployment_plan
 from .gc import (
     GcPlan,
@@ -77,6 +86,9 @@ from .transaction import RuntimeTransaction, generate_slot_id
 
 __all__ = [
     "ActiveRuntimeState",
+    "ArtifactCacheStore",
+    "CacheGcPlan",
+    "CacheGcResult",
     "CandidateState",
     "DeploymentAction",
     "DeploymentCancelledError",
@@ -123,8 +135,10 @@ __all__ = [
     "RuntimeTransaction",
     "SharedRuntime",
     "SharedRuntimeError",
+    "apply_cache_gc_plan",
     "apply_deployment_plan",
     "apply_gc_plan",
+    "build_cache_gc_plan",
     "build_gc_plan",
     "check_desired_state_conflicts",
     "build_deployment_plan",
@@ -133,7 +147,9 @@ __all__ = [
     "generate_slot_id",
     "load_active_state",
     "installed_lock_from_runtime_lock",
+    "materialize_cached",
     "probe_runtime_distribution",
     "probe_runtime_python_version",
+    "runtime_cache_gc",
     "save_active_state",
 ]

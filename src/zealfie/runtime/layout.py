@@ -25,6 +25,11 @@ class RuntimeLayout:
 
     ``state_dir`` is ``root/state``.  The active pointer lives at
     ``state_dir/active.json``.
+
+    ``artifact_cache_dir`` is ``root/cache/artifacts`` — the persistent,
+    content-addressed verified-artifact cache (ZA-M1-3A.3).  It lives
+    OUTSIDE ``slots/`` (a cache entry is never part of a slot and must
+    never be garbage-collected as one).
     """
 
     root: Path
@@ -38,6 +43,11 @@ class RuntimeLayout:
     @property
     def state_dir(self) -> Path:
         return self.root / "state"
+
+    @property
+    def artifact_cache_dir(self) -> Path:
+        """Root of the shared verified-artifact cache (outside ``slots/``)."""
+        return self.root / "cache" / "artifacts"
 
     # -- pointer --------------------------------------------------------------
 
