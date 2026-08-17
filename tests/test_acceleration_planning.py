@@ -42,6 +42,7 @@ from zealfie.host.models import (
     HostReasonCode,
     RecommendationStatus,
 )
+from zealfie.host.recommendation import recommend
 from zealfie.products.catalog import ProductCatalog, load_catalog_from_text
 from zealfie.runtime.model import RuntimeState, RuntimeStatus
 
@@ -988,3 +989,110 @@ def _make_none_prereq_plan() -> AcceleratedDeploymentPlan:
         blocked_reason="blocked",
         closure_impact=(),
     )
+
+
+# ===========================================================================
+# ZA-M1-2L.W-C3 — macOS GPU policy safety (synthetic)
+#
+# macOS readiness is a HUMAN GATE (no real Mac here).  These synthetic
+# tests prove the honest chain: a Mac without NVIDIA evidence never
+# produces an OFFER_SETUP/BLOCKED-with-CUDA recommendation, and a macOS
+# platform tag never selects a CUDA closure variant — fail-closed with
+# no added requirements.
+# ===========================================================================
+
+MACOS_PLATFORM_TAG = "macosx_14_0_arm64"
+
+
+def make_macos_capabilities(partial: bool = False) -> HostCapabilities:
+    """A confident macOS host observation with NO GPU evidence (Apple
+    Silicon-style, synthetic)."""
+    return HostCapabilities(
+        os_name="macos",
+        cpu_arch="arm64",
+        platform_status=CapabilityStatus.AVAILABLE,
+        platform_reason_code=HostReasonCode.OS_DETECTED,
+        platform_reason="os detected",
+        gpus=(),
+        partial=partial,
+    )
+
+
+def test_macos_without_nvidia_evidence_recommends_not_applicable():
+    """A Mac with no NVIDIA evidence -> NOT_APPLICABLE (never OFFER_SETUP,
+    never BLOCKED-with-CUDA)."""
+    rec = recommend(make_macos_capabilities())
+    assert rec.status is RecommendationStatus.NOT_APPLICABLE
+
+
+def test_macos_partial_evidence_recommends_unknown():
+    """A Mac with partial evidence -> UNKNOWN (never an actionable CUDA
+    offer)."""
+    rec = recommend(make_macos_capabilities(partial=True))
+    assert rec.status is RecommendationStatus.UNKNOWN
+
+
+def test_macos_no_nvidia_plan_blocked_no_cuda_closure():
+    """Planning on a Mac without NVIDIA evidence: BLOCKED, no backend,
+    no added requirements, no CUDA closure — derived through the real
+    recommender, not a hand-built interpretation."""
+    capabilities = make_macos_capabilities()
+    recommendation = recommend(capabilities)
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib"))),
+        capabilities=capabilities,
+        recommendation=recommendation,
+        platform_tag=MACOS_PLATFORM_TAG,
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked is True
+    assert plan.backend is None
+    assert plan.added_requirements == ()
+    assert plan.closure_impact == ()
+    assert plan.target_runtime == "no new runtime required"
+    assert plan.hardware.status is HardwareCompatibilityStatus.BLOCKED
+
+
+def test_macos_partial_plan_unknown_fail_closed():
+    """Partial macOS evidence -> UNKNOWN plan, fail-closed, no added
+    requirements."""
+    capabilities = make_macos_capabilities(partial=True)
+    recommendation = recommend(capabilities)
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib"))),
+        capabilities=capabilities,
+        recommendation=recommendation,
+        platform_tag=MACOS_PLATFORM_TAG,
+    )
+    assert plan.status is AcceleratedPlanStatus.UNKNOWN
+    assert plan.blocked is True
+    assert plan.backend is None
+    assert plan.added_requirements == ()
+    assert plan.closure_impact == ()
+
+
+def test_macos_platform_tag_no_variant_fails_closed_no_cuda_closure():
+    """A variant catalog carrying only linux_x86_64 / win_amd64 rows
+    matches no macOS platform tag -> BLOCKED with no CUDA closure and
+    the honest NOT_AVAILABLE entry (no Apple GPU support is invented)."""
+    plan = build(
+        ("zebench", _acc_block(_requirement("accelerated-lib"))),
+        capabilities=make_nvidia_capabilities("550.163.01"),
+        variant_catalog=AcceleratedVariantCatalog(
+            variants=(
+                variant("accelerated-lib", platform="linux_x86_64"),
+                variant("accelerated-lib", platform="win_amd64"),
+            )
+        ),
+        platform_tag=MACOS_PLATFORM_TAG,
+    )
+    assert plan.status is AcceleratedPlanStatus.BLOCKED
+    assert plan.blocked is True
+    assert plan.blocked_reason == (
+        "no accelerated variant available for: accelerated-lib"
+    )
+    assert plan.target_runtime == "no new runtime required"
+    assert plan.closure_impact == ()
+    entry = plan.added_requirements[0]
+    assert entry.variant is None
+    assert entry.variant_status is VariantStatus.NOT_AVAILABLE

@@ -235,8 +235,7 @@ def test_preview_plan_ready_shows_host_prerequisites():
                 HostPrerequisiteEntry(
                     entry="nvidia-driver",
                     requirement=(
-                        ">= 550.54.14 (minimum officiel CUDA 12.4, "
-                        "Linux x86_64)"
+                        ">= 550.54.14 (minimum officiel CUDA 12.4)"
                     ),
                     status=HostPrerequisiteStatus.OK,
                     observed="550.163.01",
@@ -268,7 +267,7 @@ def test_preview_plan_ready_shows_host_prerequisites():
     assert "Host prerequisites:" in text
     assert (
         "- REQUIRED_HOST nvidia-driver >= 550.54.14 (minimum officiel "
-        "CUDA 12.4, Linux x86_64) (observed 550.163.01)" in text
+        "CUDA 12.4) (observed 550.163.01)" in text
     )
     assert "[not observed]" in text
     assert "- MANAGED_RUNTIME cupy-cuda12x ==14.1.1" in text

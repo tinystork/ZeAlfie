@@ -293,8 +293,7 @@ def _prereq_ready_plan() -> AcceleratedDeploymentPlan:
                 HostPrerequisiteEntry(
                     entry="nvidia-driver",
                     requirement=(
-                        ">= 550.54.14 (minimum officiel CUDA 12.4, "
-                        "Linux x86_64)"
+                        ">= 550.54.14 (minimum officiel CUDA 12.4)"
                     ),
                     status=HostPrerequisiteStatus.OK,
                     observed="550.163.01",
@@ -336,7 +335,7 @@ def test_gpu_plan_ready_shows_host_prerequisites(monkeypatch):
     assert "Host prerequisites:" in output
     assert (
         "- REQUIRED_HOST nvidia-driver >= 550.54.14 (minimum officiel "
-        "CUDA 12.4, Linux x86_64) (observed 550.163.01)" in output
+        "CUDA 12.4) (observed 550.163.01)" in output
     )
     assert (
         "- REQUIRED_HOST nvidia-gpu-cc NVIDIA GPU Compute Capability "

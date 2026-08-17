@@ -286,7 +286,7 @@ BACKEND_REQUIRED_HOST: dict[str, tuple[tuple[str, str], ...]] = {
     "NVIDIA_CUDA": (
         (
             "nvidia-driver",
-            ">= 550.54.14 (minimum officiel CUDA 12.4, Linux x86_64)",
+            ">= 550.54.14 (minimum officiel CUDA 12.4)",
         ),
         (
             "nvidia-gpu-cc",
@@ -295,6 +295,11 @@ BACKEND_REQUIRED_HOST: dict[str, tuple[tuple[str, str], ...]] = {
     ),
 }
 
+#: NOTE on the driver floor: this is a SINGLE curated value (derived
+#: from Linux observations) shared by every platform — the real Windows
+#: witness driver 576.80 satisfied the same check, so user-facing text
+#: must never claim a specific platform for it.  Per-platform floors
+#: are a documented FOLLOW-UP, not implemented here.
 #: Checkable driver version floor per backend (parsed against the
 #: observed ``GpuInfo.driver_version``).
 BACKEND_DRIVER_FLOORS: dict[str, str] = {
@@ -359,8 +364,7 @@ def evaluate_host_prerequisites(
                 reason = (
                     f"host prerequisite not satisfied for {backend}: "
                     f"nvidia-driver {entry.observed} does not meet "
-                    f">= {driver_floor} (minimum officiel CUDA 12.4, "
-                    "Linux x86_64)"
+                    f">= {driver_floor} (minimum officiel CUDA 12.4)"
                 )
         else:
             entries.append(

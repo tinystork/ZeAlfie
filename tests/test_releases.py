@@ -2182,3 +2182,219 @@ def test_revalidate_exported_from_releases_package(witness_wheel) -> None:
 
     result = releases.revalidate_verified_artifact(va, registry=registry)
     assert result is not None
+
+
+# ===================================================================
+# ZA-M1-2L.W-C3 — macOS host-target / artifact selection (synthetic)
+#
+# macOS readiness is a HUMAN GATE: no real Mac exists in this
+# environment, so these tests exercise the pure selection layer with
+# representative macOS HostTarget values.  They prove the classification
+# is honest — a macOS host can never select a win_amd64 or linux_x86_64
+# artifact, zero-compatible fails closed, and universal/any artifacts
+# still match.
+# ===================================================================
+
+
+_MACOS_X86_64_HOST = HostTarget("py312", "cp312", "macosx_12_0_x86_64")
+_MACOS_ARM64_HOST = HostTarget("py312", "cp312", "macosx_14_0_arm64")
+
+
+def _macos_multi_manifest() -> ReleaseManifest:
+    """Three fully-tagged artifacts: win_amd64, linux_x86_64, macOS."""
+    return parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-win.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "win_amd64"
+
+        [[artifacts]]
+        filename = "f-linux.whl"
+        size = 0
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "linux_x86_64"
+
+        [[artifacts]]
+        filename = "f-macos.whl"
+        size = 0
+        sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "{macos_platform}"
+    """).replace("{macos_platform}", "macosx_12_0_x86_64"))
+
+
+def test_macos_x86_64_host_selects_only_macos_artifact():
+    """A macOS x86_64 host selects the macosx_* artifact, never win/linux."""
+    manifest = _macos_multi_manifest()
+    idx = select_artifact(manifest, _MACOS_X86_64_HOST)
+    assert manifest.artifacts[idx].filename == "f-macos.whl"
+    assert manifest.artifacts[idx].platform_tag == "macosx_12_0_x86_64"
+
+
+def test_macos_arm64_host_selects_only_macos_arm64_artifact():
+    """An Apple Silicon host selects the macosx_*_arm64 artifact, never
+    win/linux."""
+    manifest = parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-win.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "win_amd64"
+
+        [[artifacts]]
+        filename = "f-linux.whl"
+        size = 0
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "linux_x86_64"
+
+        [[artifacts]]
+        filename = "f-macos-arm64.whl"
+        size = 0
+        sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "macosx_14_0_arm64"
+    """))
+    idx = select_artifact(manifest, _MACOS_ARM64_HOST)
+    assert manifest.artifacts[idx].filename == "f-macos-arm64.whl"
+    assert manifest.artifacts[idx].platform_tag == "macosx_14_0_arm64"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [_MACOS_X86_64_HOST, _MACOS_ARM64_HOST],
+    ids=["macos_x86_64", "macos_arm64"],
+)
+def test_macos_host_never_selects_win_or_linux_artifact(host):
+    """A macOS host with only win_amd64/linux_x86_64 artifacts fails
+    closed — never silently picks a foreign platform wheel."""
+    manifest = parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-win.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "win_amd64"
+
+        [[artifacts]]
+        filename = "f-linux.whl"
+        size = 0
+        sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "linux_x86_64"
+    """))
+    with pytest.raises(ArtifactSelectionError, match="no artifact compatible"):
+        select_artifact(manifest, host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [_MACOS_X86_64_HOST, _MACOS_ARM64_HOST],
+    ids=["macos_x86_64", "macos_arm64"],
+)
+def test_macos_host_zero_compatible_fails_cleanly(host):
+    """Zero compatible artifacts for a macOS host -> ArtifactSelectionError
+    naming the host tags (honest classification)."""
+    manifest = parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-linux.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py312"
+        abi_tag = "cp312"
+        platform_tag = "linux_x86_64"
+    """))
+    with pytest.raises(
+        ArtifactSelectionError,
+        match=f"platform={host.platform_tag}",
+    ):
+        select_artifact(manifest, host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [_MACOS_X86_64_HOST, _MACOS_ARM64_HOST],
+    ids=["macos_x86_64", "macos_arm64"],
+)
+def test_macos_host_universal_artifact_still_selected(host):
+    """An untagged (universal) artifact still matches a macOS host."""
+    manifest = parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-universal.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    """))
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+    assert manifest.artifacts[0].filename == "f-universal.whl"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [_MACOS_X86_64_HOST, _MACOS_ARM64_HOST],
+    ids=["macos_x86_64", "macos_arm64"],
+)
+def test_macos_host_platform_any_artifact_still_selected(host):
+    """A py3/none/any artifact still matches a macOS host."""
+    manifest = parse_release_manifest(textwrap.dedent("""\
+        schema_version = 1
+        component_id = "x"
+        version = "1"
+
+        [[artifacts]]
+        filename = "f-pure.whl"
+        size = 0
+        sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        python_tag = "py3"
+        abi_tag = "none"
+        platform_tag = "any"
+    """))
+    idx = select_artifact(manifest, host)
+    assert idx == 0
+    assert manifest.artifacts[0].filename == "f-pure.whl"
+
+
+def test_host_target_from_current_host_macos_platform_normalization(monkeypatch):
+    """sysconfig.get_platform() macOS output is normalized to wheel-tag
+    convention: "macosx-14.0-arm64" -> "macosx_14_0_arm64"."""
+    import sysconfig
+
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: "macosx-14.0-arm64")
+    host = HostTarget.from_current_host()
+    assert host.platform_tag == "macosx_14_0_arm64"
+
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: "macosx-12.0-x86_64")
+    host = HostTarget.from_current_host()
+    assert host.platform_tag == "macosx_12_0_x86_64"
