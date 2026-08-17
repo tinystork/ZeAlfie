@@ -1120,10 +1120,23 @@ def test_zemosaic_has_remote_source():
     assert desc.remote_source.ref == "main"
 
 
+def test_zeanalyser_has_remote_source():
+    """ZeAnalyser's catalog entry carries the declared remote source
+    (ZA-M1-3A: owner=tinystork, repo=zeanalyser, ref=beta)."""
+    catalog = default_catalog()
+    from zealfie.sources import RemoteSource
+    desc = catalog.get("zeanalyser")
+    assert desc.remote_source is not None
+    assert isinstance(desc.remote_source, RemoteSource)
+    assert desc.remote_source.owner == "tinystork"
+    assert desc.remote_source.repo == "zeanalyser"
+    assert desc.remote_source.ref == "beta"
+
+
 def test_other_products_have_no_remote_source():
     """Products without explicit remote_source in TOML have None."""
     catalog = default_catalog()
-    for pid in ("zeseestarstacker", "zeanalyser"):
+    for pid in ("zeseestarstacker",):
         desc = catalog.get(pid)
         assert desc.remote_source is None, f"{pid} should have no remote_source"
 
@@ -1698,10 +1711,21 @@ def test_zemosaic_defaults_to_stable_main_channel():
     assert desc.channel_ref_map == {"stable": "main"}
 
 
+def test_zeanalyser_beta_channel_maps_to_beta():
+    """ZeAnalyser exposes exactly ``beta -> beta`` (ZA-M1-3A)."""
+    catalog = default_catalog()
+    desc = catalog.get("zeanalyser")
+    assert desc.channel_refs == (("beta", "beta"),)
+    assert desc.channel_ref_map == {"beta": "beta"}
+    assert desc.available_channels == ("beta",)
+    assert desc.channel_ref("beta") == "beta"
+    assert desc.channel_ref("stable") is None
+
+
 def test_no_remote_source_products_have_no_channels():
     """Products without remote_source expose no channels (fail-closed)."""
     catalog = default_catalog()
-    for pid in ("zeseestarstacker", "zeanalyser"):
+    for pid in ("zeseestarstacker",):
         desc = catalog.get(pid)
         assert desc.channel_refs == ()
         assert desc.channel_ref_map == {}

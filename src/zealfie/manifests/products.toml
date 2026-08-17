@@ -121,6 +121,14 @@ display_name = "ZeAnalyser"
 distribution_name = "ZeAnalyser"
 description = "Deep image analysis toolkit — FWHM, eccentricity, SNR, and session statistics."
 
+[products.remote_source]
+owner = "tinystork"
+repo = "zeanalyser"
+ref = "beta"
+
+[products.channels]
+beta = "beta"
+
 [[products.launch.entry_points]]
 group = "gui_scripts"
 name = "zeanalyser"
