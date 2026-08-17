@@ -1,0 +1,246 @@
+# macOS readiness — manual, bounded, evidence-producing validation of the
+# ZeAlfie runtime on GitHub-hosted macOS runners (ARM64 + Intel).
+#
+# Trigger: workflow_dispatch ONLY (no push/PR/schedule — this job is a
+# human-invoked readiness gate, not part of regular CI).
+#
+# Action majors pinned at implementation time (2026-08-17) after auditing
+# the GitHub API for the latest release tags:
+#   actions/checkout      -> v7.0.1  (major v7)
+#   actions/setup-python  -> v7.0.0  (major v7)
+#
+# No caching, no continue-on-error anywhere: every step must succeed on
+# its own for the job to pass.
+name: "macOS readiness"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-readiness:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: "macos-15", arch: "arm64"}
+          - {runner: "macos-15-intel", arch: "x86_64"}
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 20
+
+    steps:
+      - id: checkout
+        name: Checkout
+        uses: "actions/checkout@v7"
+
+      - id: setup-python
+        name: Setup Python 3.13
+        uses: "actions/setup-python@v7"
+        with:
+          python-version: "3.13"
+
+      - id: host-identity
+        name: Host identity
+        shell: bash
+        run: |
+          sw_vers
+          uname -a
+          uname -m
+          python --version
+          python -c "import platform; print(platform.platform()); print(platform.machine()); print(platform.python_version())"
+          echo "runner.os=${{ runner.os }} runner.arch=${{ runner.arch }} matrix.arch=${{ matrix.arch }}"
+          echo "DARWIN_VERSION=$(sw_vers -productVersion)" >> "$GITHUB_ENV"
+
+      - id: install
+        name: Install (editable + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - id: import-smoke
+        name: Import / CLI smoke
+        run: |
+          python -c "import zealfie; print('zealfie import PASS')"
+          python -c "import zealfie.runtime; print('zealfie.runtime import PASS')"
+          zealfie --help > "$RUNNER_TEMP/zealfie_help.txt"
+          echo "zealfie --help exit=$? (PASS)"
+          head -n 20 "$RUNNER_TEMP/zealfie_help.txt"
+
+      - id: host-target-evidence
+        name: Host target evidence
+        run: |
+          python -c "from zealfie.releases.model import HostTarget; t = HostTarget.from_current_host(); print(t); assert t.platform_tag.startswith('macosx_'), t.platform_tag"
+          python -c "import platform; assert platform.machine() == '${{ matrix.arch }}', platform.machine(); print('platform.machine', platform.machine(), 'matches matrix.arch')"
+
+      - id: runtime-path-evidence
+        name: Runtime path evidence
+        run: |
+          python -c "from zealfie.runtime.layout import default_runtime_root; p = str(default_runtime_root()); print(p); assert 'Library' in p and 'Application Support' in p and p.endswith('zealfie/runtime'), p"
+
+      - id: posix-lock-witness
+        name: Real POSIX lock witness
+        run: |
+          python tests/witness/posix_lock_ci_witness.py drive
+
+      - id: acceleration-safety-probes
+        name: Acceleration safety probes
+        run: |
+          python - <<'PYEOF'
+          from pathlib import Path
+
+          from zealfie.acceleration.planning import (
+              AcceleratedPlanStatus,
+              AcceleratedVariantCatalog,
+              build_accelerated_deployment_plan,
+          )
+          from zealfie.host.probes import HostProber
+          from zealfie.host.recommendation import recommend
+          from zealfie.products.catalog import load_catalog_from_text
+          from zealfie.releases.model import ArtifactEntry, HostTarget, ReleaseManifest
+          from zealfie.releases.selector import ArtifactSelectionError, select_artifact
+          from zealfie.runtime.model import RuntimeState, RuntimeStatus
+
+          target = HostTarget.from_current_host()
+          assert target.platform_tag.startswith("macosx_"), target.platform_tag
+
+          # (a) recommend() must fail closed on macOS: never OFFER_SETUP /
+          # ALREADY_READY / BLOCKED — only NOT_APPLICABLE or UNKNOWN.
+          c = HostProber().collect()
+          r = recommend(c)
+          print("capabilities:", c.os_name, c.cpu_arch, "partial:", c.partial, "gpus:", c.gpu_count)
+          print("recommendation:", r.status.value, "-", r.reason)
+          assert r.status.value in ("NOT_APPLICABLE", "UNKNOWN"), r.status.value
+
+          # (b) Plan for a real macosx_* target with a catalog that
+          # declares NO accelerated requirements: the plan must stay
+          # CPU-only — no backend, no added requirements, non-ready
+          # status (enum inspected: NO_ACCELERATED_REQUIREMENTS /
+          # PLAN_READY / BLOCKED / UNKNOWN).
+          catalog_text = """\
+          schema_version = 1
+          [[products]]
+          id = "ci-macos-cpu"
+          display_name = "CI macOS CPU"
+          distribution_name = "ci-macos-cpu"
+          [products.launch]
+          entry_points = [{group = "gui_scripts", name = "ci-macos-cpu"}]
+          """
+          catalog = load_catalog_from_text(catalog_text)
+          runtime_status = RuntimeStatus(
+              state=RuntimeState.READY,
+              runtime_root=Path("/tmp/zealfie-ci-runtime"),
+          )
+          plan = build_accelerated_deployment_plan(
+              catalog=catalog,
+              capabilities=c,
+              recommendation=r,
+              runtime_status=runtime_status,
+              variant_catalog=AcceleratedVariantCatalog(()),
+              keep_products={},
+              platform_tag=target.platform_tag,
+          )
+          print("plan.status:", plan.status.value, "backend:", plan.backend,
+                "added_requirements:", plan.added_requirements)
+          assert plan.backend is None
+          assert plan.added_requirements == ()
+          assert plan.status.value in (
+              AcceleratedPlanStatus.BLOCKED.value,
+              AcceleratedPlanStatus.UNKNOWN.value,
+              AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS.value,
+          ), plan.status.value
+
+          # (c) Artifact-selection guard: a catalog containing only
+          # win_amd64 / linux_x86_64 rows must raise
+          # ArtifactSelectionError (zero compatible) for this host.
+          fake = ReleaseManifest(
+              schema_version=1,
+              component_id="ci-macos-fake",
+              version="1.0.0",
+              artifacts=(
+                  ArtifactEntry(
+                      filename="ci_macos_fake-1.0.0-cp313-cp313-win_amd64.whl",
+                      size=1,
+                      sha256="a" * 64,
+                      python_tag=target.python_tag,
+                      abi_tag="none",
+                      platform_tag="win_amd64",
+                  ),
+                  ArtifactEntry(
+                      filename="ci_macos_fake-1.0.0-cp313-cp313-linux_x86_64.whl",
+                      size=1,
+                      sha256="b" * 64,
+                      python_tag=target.python_tag,
+                      abi_tag="none",
+                      platform_tag="linux_x86_64",
+                  ),
+              ),
+          )
+          try:
+              select_artifact(fake, target)
+          except ArtifactSelectionError as exc:
+              print("ArtifactSelectionError raised as expected:", exc)
+          else:
+              raise SystemExit(
+                  "FAIL: selector accepted a win_amd64/linux_x86_64 "
+                  "catalog for a macosx host"
+              )
+          print("acceleration safety probes PASS")
+          PYEOF
+
+      - id: targeted-pytest
+        name: Targeted pytest
+        env:
+          QT_QPA_PLATFORM: "offscreen"
+        run: |
+          python -m pytest tests/test_startup.py tests/test_technical_subprocess_platform.py tests/test_runtime_layout.py tests/test_mutation_lock.py tests/test_mutation_lock_integration.py tests/test_host_capabilities.py tests/test_acceleration_planning.py tests/test_acceleration_variants.py tests/test_acceleration_compatibility.py tests/test_releases.py -m "not integration and not zealfie_slow"
+
+      - id: step-summary
+        name: Step summary
+        if: always()
+        shell: bash
+        env:
+          OUT_CHECKOUT: "${{ steps.checkout.outcome }}"
+          OUT_SETUP_PYTHON: "${{ steps.setup-python.outcome }}"
+          OUT_HOST_ID: "${{ steps.host-identity.outcome }}"
+          OUT_INSTALL: "${{ steps.install.outcome }}"
+          OUT_SMOKE: "${{ steps.import-smoke.outcome }}"
+          OUT_HOST_TARGET: "${{ steps.host-target-evidence.outcome }}"
+          OUT_RUNTIME_PATH: "${{ steps.runtime-path-evidence.outcome }}"
+          OUT_WITNESS: "${{ steps.posix-lock-witness.outcome }}"
+          OUT_PROBES: "${{ steps.acceleration-safety-probes.outcome }}"
+          OUT_PYTEST: "${{ steps.targeted-pytest.outcome }}"
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            TITLE="macOS ARM64"
+          else
+            TITLE="macOS Intel"
+          fi
+          {
+            echo "## ZeAlfie macOS readiness — ${TITLE}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Runner | ${{ matrix.runner }} |"
+            echo "| Darwin | ${DARWIN_VERSION:-unknown} |"
+            echo "| Architecture | ${{ matrix.arch }} |"
+            echo "| Python | $(python --version 2>&1 || echo 'NOT AVAILABLE') |"
+            echo "| ZeAlfie HEAD | ${{ github.sha }} |"
+            echo "| GPU/CUDA classification | $(python -c 'from zealfie.host.probes import HostProber; from zealfie.host.recommendation import recommend; print(recommend(HostProber().collect()).status.value)' 2>/dev/null || echo 'NOT REACHED') |"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Checkout | ${OUT_CHECKOUT:-NOT REACHED} |"
+            echo "| Setup Python | ${OUT_SETUP_PYTHON:-NOT REACHED} |"
+            echo "| Host identity | ${OUT_HOST_ID:-NOT REACHED} |"
+            echo "| Install | ${OUT_INSTALL:-NOT REACHED} |"
+            echo "| Import/CLI smoke | ${OUT_SMOKE:-NOT REACHED} |"
+            echo "| Host target | ${OUT_HOST_TARGET:-NOT REACHED} |"
+            echo "| Runtime path | ${OUT_RUNTIME_PATH:-NOT REACHED} |"
+            echo "| POSIX lock witness (same-root) | ${OUT_WITNESS:-NOT REACHED} |"
+            echo "| POSIX lock witness (crash-release) | ${OUT_WITNESS:-NOT REACHED} |"
+            echo "| POSIX lock witness (different-root) | ${OUT_WITNESS:-NOT REACHED} |"
+            echo "| Acceleration probes | ${OUT_PROBES:-NOT REACHED} |"
+            echo "| Targeted pytest | ${OUT_PYTEST:-NOT REACHED} |"
+          } >> "$GITHUB_STEP_SUMMARY"
