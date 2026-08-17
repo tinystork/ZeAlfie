@@ -415,7 +415,7 @@ class HostProber:
         try:
             stdout = self._command_runner(
                 ("nvidia-smi", "--query-gpu=name,driver_version",
-                 "--format=csv,noheader,nouuid")
+                 "--format=csv,noheader,nounits")
             )
         except CommandUnavailableError:
             return _SmiResult(ran=False, entries=(), malformed=False, error=False)
