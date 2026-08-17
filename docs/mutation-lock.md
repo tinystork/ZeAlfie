@@ -157,13 +157,22 @@ the current context — raising `RuntimeMutationLeaseRequired` otherwise
   `RuntimeMutationLockError` *before* creating any file or directory,
   and no mutation is allowed without a lease (fail closed).
 
-Real-Windows behavior remains a **HUMAN_GATE witness**
-(`tests/witness/windows_lock_witness.py`): the Windows backend is
-exercised only by synthetic decision-logic tests (fake `msvcrt`) on
-Linux.  It has **not** been validated on a real Windows host — that
-witness must be run by a human on real Windows before any claim of
-Windows production readiness.  Linux is the only platform exercised by
-the full test suite.
+## Real platform witness status (mutation lock)
+
+The lock primitive is witness-proven on real hosts for every supported
+backend:
+
+| Platform | Primitive | Real witness | Evidence |
+|---|---|---|---|
+| Linux (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` | **PASS** | `tests/witness/posix_lock_ci_witness.py` on real Linux hosts: E2 same-root exclusion, E3 SIGKILL crash release, E4 different-root independence |
+| macOS (POSIX) | same primitive | **PASS — real GitHub-hosted Darwin witness (2026-08-17)** | `posix_lock_ci_witness.py` on real GitHub-hosted runners `macos-15` (arm64) and `macos-15-intel` (x86_64), workflow run 32035282141 (HEAD 8e2432e): E2/E3/E4 all PASS |
+| Windows | `msvcrt.locking(LK_NBLCK)` byte-range lock | **PASS — real witness W1 (2026-08-17)** | `tests/witness/windows_lock_witness.py` run by a human on real Windows: same-root BUSY, force-kill crash release without lock-file deletion, different-root concurrency, case normalization |
+
+What this does **not** claim: the macOS witness qualifies the **core
+runtime and POSIX mutation lock** on real Darwin hosts only.  GUI
+behaviour, `.app` packaging, codesigning / notarization, Metal/GPU
+acceleration, and end-to-end product usage on macOS remain separate
+**HUMAN / FUTURE GATES** and are not covered by this evidence.
 
 ## Relationship with the other safety layers
 

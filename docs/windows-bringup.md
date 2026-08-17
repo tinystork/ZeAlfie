@@ -3,8 +3,11 @@
 Status: **closed** — merged to `main` (see final status table).
 W1 (mutation lock primitive), W2 (fresh CPU chain) and W3 (GPU compute)
 are all **real-witness PASS** on a genuine Windows machine
-(2026-08-17).  Real macOS execution remains a **HUMAN GATE** — nothing
-in this document claims macOS-validated status.
+(2026-08-17).  macOS core runtime / POSIX lock execution is a **real
+GitHub-hosted Darwin witness PASS** (ARM64 + Intel, 2026-08-17,
+workflow run 32035282141) — see `docs/mutation-lock.md`.  macOS GUI,
+packaging, notarization, Metal/GPU and end-to-end product usage remain
+**HUMAN GATES**.
 
 ## Real Windows witness evidence (2026-08-17)
 
@@ -93,7 +96,7 @@ The witness proved **real compute**, not merely detection.
 | Platform | Primitive | Status |
 |---|---|---|
 | Linux (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` | implemented, **witness-proven on Linux** |
-| macOS (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` (same primitive) | implemented; **real witness = HUMAN GATE** |
+| macOS (POSIX) | `fcntl.flock(LOCK_EX \| LOCK_NB)` (same primitive) | implemented; **real witness PASS — GitHub-hosted Darwin (ARM64 + Intel, 2026-08-17)** — core runtime / POSIX lock only |
 | Windows (`os.name == "nt"`) | `msvcrt.locking(LK_NBLCK)` byte-range lock on `[0,1)` | implemented; **real witness PASS (W1, 2026-08-17)** |
 | any other platform | no backend | fail closed (`RuntimeMutationLockError`) |
 
@@ -150,8 +153,10 @@ changes; cp313 for cupy-cuda12x, py3 for the nvidia-*-cu12 packages).
 ## Witness instructions (historical — W1/W2/W3 executed and PASSED, 2026-08-17)
 
 The instructions below are kept verbatim as the reproducible protocol
-used for the real Windows witnesses.  W1/W2/W3 are now **closed**; the
-only remaining platform gate is a real macOS execution.
+used for the real Windows witnesses.  W1/W2/W3 are now **closed**; real
+macOS execution is witness-proven for the core runtime and POSIX lock
+(GitHub-hosted Darwin, 2026-08-17).  Remaining macOS gates are
+product-level (GUI, packaging, notarization, Metal/GPU).
 
 ### W1 — Windows mutation lock (executed → PASS)
 
@@ -247,5 +252,5 @@ runtime preserved; rollback path unchanged.
 | Fresh Windows CPU chain | **PASS (real witness, 2026-08-17)** |
 | Windows technical-subprocess console UX | FIXED (CREATE_NO_WINDOW helper; real-window verification = follow-up) |
 | Windows nvidia-smi format + probe encoding | FIXED (24026d9) + regression tests |
-| macOS readiness | **AUDITED — synthetic tests only** (real macOS = HUMAN GATE) |
+| macOS readiness | **PASS — real GitHub-hosted macOS runners** (`macos-15` arm64 + `macos-15-intel` x86_64, 2026-08-17, run 32035282141): install / import / CLI, host target, runtime path, acceleration fail-closed, POSIX lock witness E2/E3/E4, targeted pytest. GUI / packaging / notarization / Metal-GPU / end-to-end = **HUMAN GATE** |
 | Diagnostic log discoverability | FOLLOW-UP (no persistent log file today — loggers write to stderr; a logging subsystem is out of scope for this mission) |
