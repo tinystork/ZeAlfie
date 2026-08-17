@@ -27,6 +27,13 @@ No pip, no subprocess, no installation: acquisition only deposits
 verified wheels.  ``file://`` URLs are supported so tests can exercise
 the exact production path hermetically; ``http(s)://`` is the
 production transport.
+
+ZA-M1-3A.3 LOT C.3: an optional shared artifact cache
+(:class:`~zealfie.runtime.artifact_cache.ArtifactCacheStore`) reuses the
+exact manifest-verified wheels of a previously deployed variant instead
+of re-downloading them — reuse is gated on the same sha256/size/filename/
+identity re-verification as a download, so a cache miss or a tampered
+cache entry falls back to the normal fail-closed download path.
 """
 
 from __future__ import annotations
@@ -51,6 +58,10 @@ from zealfie.acceleration.deployment import (
     AcceleratedAcquisitionError,
     AcceleratedDeploymentPlan,
     AcquiredAcceleratedVariant,
+)
+from zealfie.runtime.artifact_cache import (
+    ArtifactCacheStore,
+    materialize_cached,
 )
 from zealfie.acceleration.models import KNOWN_BACKENDS
 from zealfie.acceleration.variants import (
@@ -545,6 +556,7 @@ class ManifestAcceleratedArtifactAcquirer:
         retries: int = 2,
         retry_delay: float = 0.5,
         urlopen: Callable | None = None,
+        cache: ArtifactCacheStore | None = None,
     ) -> None:
         self._manifest = manifest or default_accelerated_artifact_manifest()
         host = HostTarget.from_current_host()
@@ -558,6 +570,11 @@ class ManifestAcceleratedArtifactAcquirer:
         self._retries = max(0, int(retries))
         self._retry_delay = float(retry_delay)
         self._urlopen = urlopen or urllib.request.urlopen
+        # ZA-M1-3A.3 LOT C.3: shared verified artifact cache.  Reuse is
+        # gated on the manifest identity (sha256 + size + filename +
+        # distribution/version) — the cache never selects or trusts by
+        # presence alone.
+        self._cache = cache
 
     # -- acquire -------------------------------------------------------------
 
@@ -681,7 +698,32 @@ class ManifestAcceleratedArtifactAcquirer:
                     f"{size} sha256 {digest}"
                 )
             return dest
+        # ZA-M1-3A.3 LOT C.3: shared cache reuse before any download.
+        # ``resolve_accelerated`` re-verifies the cached file byte-for-byte
+        # against the manifest entry (sha256, size, filename, wheel
+        # identity).  A miss/mismatch falls through to the normal download
+        # path; a copy failure does too (fail-closed, honest transport
+        # error instead of a silently missing artifact).
+        if self._cache is not None:
+            cached = self._cache.resolve_accelerated(
+                sha256=entry.sha256,
+                distribution=entry.distribution,
+                version=entry.version,
+                filename=entry.filename,
+                size=entry.size,
+            )
+            if cached is not None:
+                if materialize_cached(cached, dest):
+                    return dest
         self._download(entry, dest, cancel_check=cancel_check)
+        if self._cache is not None:
+            # Fill is best-effort and never raises.
+            self._cache.put(
+                dest,
+                kind="accelerated",
+                distribution=entry.distribution,
+                version=entry.version,
+            )
         return dest
 
     def _download(
@@ -802,13 +844,18 @@ def default_manifest_variant_catalog() -> AcceleratedVariantCatalog:
     )
 
 
-def default_manifest_artifact_acquirer() -> ManifestAcceleratedArtifactAcquirer:
+def default_manifest_artifact_acquirer(
+    cache: ArtifactCacheStore | None = None,
+) -> ManifestAcceleratedArtifactAcquirer:
     """Return the manifest-backed production acquirer.
 
-    The explicit fail-closed
+    *cache* optionally wires the shared verified artifact cache
+    (ZA-M1-3A.3 LOT C.3): same-manifest re-deployments reuse exact cached
+    wheels instead of re-downloading them.  The explicit fail-closed
     :func:`~zealfie.acceleration.deployment.default_accelerated_artifact_acquirer`
     (always raises) remains available when no source is configured at all.
     """
     return ManifestAcceleratedArtifactAcquirer(
-        default_accelerated_artifact_manifest()
+        default_accelerated_artifact_manifest(),
+        cache=cache,
     )
