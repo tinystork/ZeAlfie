@@ -33,11 +33,11 @@ jobs:
     steps:
       - id: checkout
         name: Checkout
-        uses: "actions/checkout@v7"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - id: setup-python
         name: Setup Python 3.13
-        uses: "actions/setup-python@v7"
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -64,8 +64,7 @@ jobs:
         run: |
           python -c "import zealfie; print('zealfie import PASS')"
           python -c "import zealfie.runtime; print('zealfie.runtime import PASS')"
-          zealfie --help > "$RUNNER_TEMP/zealfie_help.txt"
-          echo "zealfie --help exit=$? (PASS)"
+          zealfie --help > "$RUNNER_TEMP/zealfie_help.txt" && echo "zealfie --help PASS"
           head -n 20 "$RUNNER_TEMP/zealfie_help.txt"
 
       - id: host-target-evidence
@@ -105,8 +104,9 @@ jobs:
           target = HostTarget.from_current_host()
           assert target.platform_tag.startswith("macosx_"), target.platform_tag
 
-          # (a) recommend() must fail closed on macOS: never OFFER_SETUP /
-          # ALREADY_READY / BLOCKED — only NOT_APPLICABLE or UNKNOWN.
+          # (a) On these GPU-less GitHub macOS runners, recommend() must
+          # return NOT_APPLICABLE or UNKNOWN — never OFFER_SETUP /
+          # ALREADY_READY / BLOCKED with CUDA evidence.
           c = HostProber().collect()
           r = recommend(c)
           print("capabilities:", c.os_name, c.cpu_arch, "partial:", c.partial, "gpus:", c.gpu_count)
@@ -219,6 +219,7 @@ jobs:
           fi
           {
             echo "## ZeAlfie macOS readiness — ${TITLE}"
+            echo "**Bounded runtime readiness evidence (install / import / host-target / runtime-path / POSIX lock witness / acceleration safety / targeted tests). NOT a product-readiness certification — GUI, packaging, notarization, GPU/Metal remain out of scope.**"
             echo ""
             echo "| Field | Value |"
             echo "| --- | --- |"

@@ -419,7 +419,10 @@ def _drive() -> int:
             ("E3_CRASH_RELEASE", _scenario_e3_crash_release, (root1,)),
             ("E4_DIFFERENT_ROOT_INDEPENDENCE", _scenario_e4_different_roots, (root1, root2)),
         ):
-            ok, detail = runner(*args, timeout)
+            try:
+                ok, detail = runner(*args, timeout)
+            except Exception as exc:
+                ok, detail = False, f"{type(exc).__name__}: {exc}"
             results.append((label, ok, detail))
             if ok:
                 print(f"{label} PASS", flush=True)
