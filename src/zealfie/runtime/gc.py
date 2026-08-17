@@ -7,16 +7,16 @@ runtime.  Design inputs are the Phase A slot-lifecycle audit
 
 * ``state/active.json`` is the single activation authority (active +
   previous).  Both fields are HARD-protected.
-* ``state/product-provenance.json`` is the KEEP authority → its slot keys
-  are protected (AUTHORITY).
-* ``state/installed-lock.json`` is observational multi-slot history →
-  fail-closed KEEP of its slot keys (OBSERVATIONAL).
-* ``state/accelerated-metadata.json`` is observational WRITE-ONLY (no
-  production reader).  A slot referenced **only** there is a proven
-  non-protective reference: the slot may be pruned and its metadata entry
-  purged atomically (``PRUNABLE_CLEAN_METADATA`` /
-  ``CLEAN_ACCELERATED_METADATA``).  Referenced there **and** anywhere
-  else → KEEP (the strongest reference wins).
+* ``state/product-provenance.json``, ``state/installed-lock.json`` and
+  ``state/accelerated-metadata.json`` are observational per-slot
+  history (ZA-M1-3A.3).  In steady-state operation only ACTIVE +
+  PREVIOUS persist: a slot directory outside {active, previous} that is
+  referenced by **any** combination of these stores is
+  ``PRUNABLE_CLEAN_METADATA`` — the slot directory and every
+  referencing store entry are pruned together, with each store purged
+  atomically and the metadata purge performed strictly **before** the
+  directory removal (so an interrupted apply never leaves a store
+  pointing at a deleted slot → no ``REPAIR_REQUIRED``).
 * A slot directory on disk referenced by **no** record → ``PRUNABLE``.
 
 Fail-closed rules (all produce ``GcStatus.BLOCKED`` and never propose
@@ -93,7 +93,35 @@ _RECORD_FILENAMES: tuple[str, ...] = (
     _ACCELERATED_METADATA_FILENAME,
 )
 
-METADATA_ACTION_CLEAN_ACCELERATED = "CLEAN_ACCELERATED_METADATA"
+# Metadata-cleanup actions (ZA-M1-3A.3): one per observational store.
+# A PRUNABLE_CLEAN_METADATA slot carries one CLEAN_* action per store
+# that references it.
+CLEAN_ACCELERATED_METADATA = "CLEAN_ACCELERATED_METADATA"
+CLEAN_INSTALLED_LOCK = "CLEAN_INSTALLED_LOCK"
+CLEAN_PRODUCT_PROVENANCE = "CLEAN_PRODUCT_PROVENANCE"
+
+# Legacy name (ZA-M1-2K) kept as an alias for callers/tests.
+METADATA_ACTION_CLEAN_ACCELERATED = CLEAN_ACCELERATED_METADATA
+
+# Inter-store purge order (deterministic; documented in
+# :func:`_purge_slot_metadata_entries`).  The order is safe at every
+# intermediate point: the slot directory still exists until ALL stores
+# have been purged, so "metadata → existing directory" never breaks.
+_METADATA_CLEAN_ORDER: tuple[str, ...] = (
+    CLEAN_INSTALLED_LOCK,
+    CLEAN_PRODUCT_PROVENANCE,
+    CLEAN_ACCELERATED_METADATA,
+)
+
+_CLEAN_ACTION_TO_FILENAME: dict[str, str] = {
+    CLEAN_INSTALLED_LOCK: _INSTALLED_LOCK_FILENAME,
+    CLEAN_PRODUCT_PROVENANCE: _PROVENANCE_FILENAME,
+    CLEAN_ACCELERATED_METADATA: _ACCELERATED_METADATA_FILENAME,
+}
+_STORE_FILENAME_TO_CLEAN_ACTION: dict[str, str] = {
+    filename: action
+    for action, filename in _CLEAN_ACTION_TO_FILENAME.items()
+}
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +134,11 @@ class SlotCategory(StrEnum):
 
     ACTIVE = "ACTIVE"
     PREVIOUS = "PREVIOUS"
+    # Legacy member (ZA-M1-2K): the planner no longer produces
+    # REFERENCED — historical store references now classify as
+    # PRUNABLE_CLEAN_METADATA (ZA-M1-3A.3).  Kept for API
+    # compatibility with existing consumers; never emitted by
+    # build_gc_plan.
     REFERENCED = "REFERENCED"
     PRUNABLE = "PRUNABLE"
     PRUNABLE_CLEAN_METADATA = "PRUNABLE_CLEAN_METADATA"
@@ -139,8 +172,21 @@ class GcSlotEntry:
     category: SlotCategory
     reason: str
     references: tuple[str, ...] = ()
-    metadata_action: str | None = None
+    metadata_actions: tuple[str, ...] = ()
     estimated_bytes: int = 0
+
+    @property
+    def metadata_action(self) -> str | None:
+        """Legacy single-store accessor (ZA-M1-2K).
+
+        Returns the sole metadata-cleanup action when exactly one store
+        references the slot, ``None`` otherwise (zero stores, or
+        several stores — the legacy scalar cannot express multi-store
+        cleanup).  New code should read :attr:`metadata_actions`.
+        """
+        if len(self.metadata_actions) == 1:
+            return self.metadata_actions[0]
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +233,7 @@ class _SlotDeleteError(Exception):
 
 
 class _MetadataPurgeError(Exception):
-    """Raised when the accelerated-metadata purge must be refused."""
+    """Raised when an observational-store metadata purge must be refused."""
 
 
 # ---------------------------------------------------------------------------
@@ -536,17 +582,19 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
             refs = (_ACTIVE_FILENAME,)
         elif slot_id in store_slot_refs:
             ref_names = tuple(sorted(store_slot_refs[slot_id]))
-            if ref_names == (_ACCELERATED_METADATA_FILENAME,):
-                category = SlotCategory.PRUNABLE_CLEAN_METADATA
-                reason = (
-                    "referenced only by the observational "
-                    "accelerated-metadata.json record"
-                )
-                refs = ref_names
-            else:
-                category = SlotCategory.REFERENCED
-                reason = f"referenced by {', '.join(ref_names)}"
-                refs = ref_names
+            actions = tuple(
+                action
+                for action in _METADATA_CLEAN_ORDER
+                if action
+                in {_STORE_FILENAME_TO_CLEAN_ACTION[n] for n in ref_names}
+            )
+            category = SlotCategory.PRUNABLE_CLEAN_METADATA
+            reason = (
+                "historical slot (outside active/previous) referenced "
+                f"by {', '.join(ref_names)}; its metadata entries are "
+                "purged before the slot directory is removed"
+            )
+            refs = ref_names
         else:
             category = SlotCategory.PRUNABLE
             reason = "not referenced by any state record"
@@ -558,10 +606,10 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
                 category=category,
                 reason=reason,
                 references=refs,
-                metadata_action=(
-                    METADATA_ACTION_CLEAN_ACCELERATED
+                metadata_actions=(
+                    actions
                     if category is SlotCategory.PRUNABLE_CLEAN_METADATA
-                    else None
+                    else ()
                 ),
                 estimated_bytes=estimated,
             )
@@ -586,7 +634,7 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
                             "is performed"
                         ),
                         references=entry.references,
-                        metadata_action=None,
+                        metadata_actions=(),
                         estimated_bytes=entry.estimated_bytes,
                     )
                 )
@@ -681,76 +729,102 @@ def _compute_state_fingerprint(
 
 
 # ---------------------------------------------------------------------------
-# Metadata purge (accelerated-metadata.json only)
+# Metadata purge (per-store, fail-closed) — ZA-M1-3A.3
 # ---------------------------------------------------------------------------
 
 
-def _purge_accelerated_metadata_entries(
+def _load_store_payload(
     state_dir: Path,
-    slots_root: Path,
-    purge_ids: Sequence[str],
-) -> None:
-    """Remove *purge_ids* from ``accelerated-metadata.json`` atomically.
+    store_filename: str,
+) -> tuple[dict, dict]:
+    """Read + structurally validate one observational store file.
 
-    Read-modify-write: the current file is re-read, the named slots are
-    removed, **everything else is preserved**, and the file is written
-    atomically (``mkstemp`` in ``state_dir`` + ``fsync`` + ``os.replace``,
-    the same pattern as :mod:`zealfie.runtime.state`).
-
-    Refuses (raises :class:`_MetadataPurgeError`) when:
-
-    * the file is unreadable, invalid JSON, wrong schema, or malformed;
-    * a purge target slot reappeared on disk since the plan (the entry is
-      live again — fail closed, never purge a live reference);
-    * a purge target is no longer present in the file (the file changed
-      since the plan was built).
-
-    Never touches ``active.json``, ``installed-lock.json``, or
-    ``product-provenance.json``.
+    Returns ``(payload, slots)`` — the full JSON object and its
+    ``slots`` mapping.  Raises :class:`_MetadataPurgeError` (fail
+    closed, no write) when the file is unreadable, invalid JSON, not a
+    JSON object, carries an unexpected ``schema_version``, or has no
+    ``slots`` object.
     """
-    path = Path(state_dir) / _ACCELERATED_METADATA_FILENAME
+    if store_filename not in _STORE_FILENAME_TO_CLEAN_ACTION:
+        raise _MetadataPurgeError(
+            f"unknown observational store {store_filename!r}; refusing "
+            f"metadata purge"
+        )
+    path = Path(state_dir) / store_filename
     try:
         raw = path.read_bytes()
     except OSError as exc:
         raise _MetadataPurgeError(
-            f"cannot read {_ACCELERATED_METADATA_FILENAME}: {exc}"
+            f"cannot read {store_filename}: {exc}"
         ) from exc
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise _MetadataPurgeError(
-            f"{_ACCELERATED_METADATA_FILENAME} is invalid JSON: {exc}"
+            f"{store_filename} is invalid JSON: {exc}"
         ) from exc
     if (
         not isinstance(payload, dict)
         or payload.get("schema_version") != _SCHEMA_VERSION
     ):
         raise _MetadataPurgeError(
-            f"{_ACCELERATED_METADATA_FILENAME} is corrupt or has an "
-            f"unexpected schema; refusing to modify it"
+            f"{store_filename} is corrupt or has an unexpected schema; "
+            f"refusing to modify it"
         )
     slots = payload.get("slots")
     if not isinstance(slots, dict):
         raise _MetadataPurgeError(
-            f"{_ACCELERATED_METADATA_FILENAME} has no 'slots' object; "
-            f"refusing to modify it"
+            f"{store_filename} has no 'slots' object; refusing to modify it"
         )
+    return payload, slots
 
+
+def _validate_purge_targets(
+    slots_root: Path,
+    slots: dict,
+    purge_ids: Sequence[str],
+) -> None:
+    """Fail-closed pre-write validation of *purge_ids* (no write).
+
+    Raises :class:`_MetadataPurgeError` when:
+
+    * a purge target is absent from ``slots/`` on disk (under the
+      ZA-M1-3A.3 apply order the metadata purge runs BEFORE the
+      directory removal, so the directory must still exist; if it does
+      not, the state changed under us);
+    * a purge target is not present in the store (the file changed
+      since the plan was built).
+    """
     for slot_id in purge_ids:
         validate_slot_id(slot_id)  # defence in depth
-        if _validate_slot_entry(slots_root, slot_id) is not None:
+        if _validate_slot_entry(slots_root, slot_id) is None:
             raise _MetadataPurgeError(
-                f"slot {slot_id!r} reappeared on disk since the plan was "
-                f"built; refusing metadata purge"
+                f"slot {slot_id!r} is absent from slots/ (state changed "
+                f"since the plan was built); refusing metadata purge"
             )
         if slot_id not in slots:
             raise _MetadataPurgeError(
-                f"{_ACCELERATED_METADATA_FILENAME} changed since the plan "
-                f"was built (entry for {slot_id!r} is missing); refusing "
-                f"metadata purge"
+                f"the store changed since the plan was built (entry for "
+                f"{slot_id!r} is missing); refusing metadata purge"
             )
 
-    remaining = {k: v for k, v in slots.items() if k not in set(purge_ids)}
+
+def _write_store_payload(
+    state_dir: Path,
+    store_filename: str,
+    payload: dict,
+    slots: dict,
+    purge_ids: Sequence[str],
+) -> None:
+    """Atomically rewrite one store without *purge_ids*.
+
+    Everything except the named slots is preserved.  The file is
+    written atomically (``mkstemp`` in ``state_dir`` + ``fsync`` +
+    ``os.replace``, the same pattern as :mod:`zealfie.runtime.state`).
+    A no-op when no target is present.
+    """
+    purge_set = set(purge_ids)
+    remaining = {k: v for k, v in slots.items() if k not in purge_set}
     if len(remaining) == len(slots):
         return  # nothing to purge
 
@@ -758,10 +832,11 @@ def _purge_accelerated_metadata_entries(
     new_payload["slots"] = remaining
     text = json.dumps(new_payload, indent=2, sort_keys=True) + "\n"
 
+    path = Path(state_dir) / store_filename
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         suffix=".json",
-        prefix=".accelerated-metadata-",
+        prefix=f".{Path(store_filename).stem}-",
         dir=str(path.parent),
     )
     try:
@@ -771,6 +846,96 @@ def _purge_accelerated_metadata_entries(
         os.close(fd)
 
     os.replace(tmp_name, str(path))
+
+
+def _purge_store_slot_entries(
+    state_dir: Path,
+    slots_root: Path,
+    store_filename: str,
+    purge_ids: Sequence[str],
+) -> None:
+    """Remove *purge_ids* from one observational store atomically.
+
+    Generic per-store read-modify-write (ZA-M1-3A.3): the current file
+    is re-read, the named slots are removed, **everything else is
+    preserved**, and the file is written atomically.  Works for
+    ``installed-lock.json``, ``product-provenance.json`` and
+    ``accelerated-metadata.json`` (all three share the
+    ``schema_version: 1`` / ``slots`` object shape).
+
+    Fail-closed refusals (raise :class:`_MetadataPurgeError`, no write):
+    see :func:`_load_store_payload` and :func:`_validate_purge_targets`.
+
+    Never touches ``active.json``.
+    """
+    payload, slots = _load_store_payload(state_dir, store_filename)
+    _validate_purge_targets(slots_root, slots, purge_ids)
+    _write_store_payload(state_dir, store_filename, payload, slots, purge_ids)
+
+
+def _purge_slot_metadata_entries(
+    state_dir: Path,
+    slots_root: Path,
+    slot_id: str,
+    actions: Sequence[str],
+) -> None:
+    """Purge *slot_id* from every store named by *actions* (ZA-M1-3A.3).
+
+    Per-slot orchestrator around :func:`_purge_store_slot_entries`,
+    with a strict two-phase discipline.
+
+    **Inter-store order** (documented choice): the stores are purged in
+    the fixed deterministic order ``installed-lock.json`` →
+    ``product-provenance.json`` → ``accelerated-metadata.json``
+    (``_METADATA_CLEAN_ORDER``, the same record order the state
+    fingerprint uses).  The order is chosen for determinism; it is
+    *safe* at every intermediate point because the slot directory
+    still exists until ALL of its stores have been purged — the
+    invariant "metadata → existing directory" holds across every
+    intermediate state, so an interrupted apply can never produce a
+    ``REPAIR_REQUIRED`` orphan reference.
+
+    **Phase 1 — validation (no writes):** every store named by
+    *actions* is read and validated (readable, valid JSON, correct
+    schema, target present in the file, target still on disk).  Any
+    failure raises :class:`_MetadataPurgeError` **before any store is
+    modified** — a refused purge never leaves a partial per-store
+    purge for the slot.
+
+    **Phase 2 — writes:** each validated store is rewritten without
+    the slot, atomically per store (mkstemp + fsync + ``os.replace``).
+    A write-phase failure may leave *earlier* stores of this slot
+    already purged (per-store atomicity is never broken); the caller
+    preserves the slot directory in that case, which keeps the state
+    consistent (metadata never points at a deleted directory) and
+    self-healing (the next plan re-classifies the directory as
+    ``PRUNABLE``).
+
+    Never touches ``active.json``.
+    """
+    unknown = [a for a in actions if a not in _METADATA_CLEAN_ORDER]
+    if unknown:
+        raise _MetadataPurgeError(
+            f"unknown metadata action(s) {unknown!r}; refusing purge"
+        )
+    store_filenames = [
+        _CLEAN_ACTION_TO_FILENAME[action]
+        for action in _METADATA_CLEAN_ORDER
+        if action in actions
+    ]
+
+    # Phase 1: validate every store BEFORE writing any of them.
+    loaded: list[tuple[str, dict, dict]] = []
+    for store_filename in store_filenames:
+        payload, slots = _load_store_payload(state_dir, store_filename)
+        _validate_purge_targets(slots_root, slots, (slot_id,))
+        loaded.append((store_filename, payload, slots))
+
+    # Phase 2: write each store atomically (per-store atomicity).
+    for store_filename, payload, slots in loaded:
+        _write_store_payload(
+            state_dir, store_filename, payload, slots, (slot_id,)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -788,21 +953,25 @@ def apply_gc_plan(runtime_root: Path, plan: GcPlan) -> GcResult:
     3. fresh fingerprint != plan fingerprint → refuse ``STALE_PLAN``
        (``stale=True``), **no deletion**;
     4. supplied plan not ``READY`` → refuse;
-    5. delete only slots categorised ``PRUNABLE`` /
+    5. process every slot categorised ``PRUNABLE`` /
        ``PRUNABLE_CLEAN_METADATA`` **in both** fresh and supplied plan,
-       sorted by slot id, each re-validated path-safely immediately
-       before ``rmtree``; active/previous of the fresh plan are
-       re-checked per slot (defence in depth — a forged plan cannot
-       delete them); per-slot errors are recorded and the remaining
-       slots are still processed;
-    6. after successful deletions of ``PRUNABLE_CLEAN_METADATA`` slots,
-       purge their entries from ``accelerated-metadata.json`` (read-
-       modify-write, atomic).  If that file changed since the plan
-       (purge refused for the file), the disk deletions remain valid
-       (the global stale-check already passed) — documented choice.
+       sorted by slot id.  For ``PRUNABLE_CLEAN_METADATA`` slots the
+       metadata purge — every store named by the fresh entry's
+       ``metadata_actions``, in the documented inter-store order —
+       runs strictly **BEFORE** the directory removal; when any store
+       purge for a slot fails, the slot directory is **not** removed
+       this round and the error is recorded (metadata never points at
+       a deleted directory → never ``REPAIR_REQUIRED``);
+    6. every deletion is re-validated path-safely immediately before
+       ``rmtree``; active/previous of the fresh plan are re-checked
+       per slot (defence in depth — a forged plan cannot delete
+       them); per-slot errors are recorded and the remaining slots
+       are still processed;
+    7. a failed directory removal after a successful metadata purge
+       leaves an unreferenced directory on disk — self-healing
+       (``PRUNABLE`` on the next plan), never ``REPAIR_REQUIRED``.
 
-    Never touches ``active.json``, ``installed-lock.json`` or
-    ``product-provenance.json``.
+    Never touches ``active.json``.
 
     ZA-M1-2L (D1): the whole apply window — the fresh re-plan and state
     fingerprint revalidation, every slot deletion, and the accelerated-
@@ -825,21 +994,25 @@ def _apply_gc_plan_locked(runtime_root: Path, plan: GcPlan) -> GcResult:
     3. fresh fingerprint != plan fingerprint → refuse ``STALE_PLAN``
        (``stale=True``), **no deletion**;
     4. supplied plan not ``READY`` → refuse;
-    5. delete only slots categorised ``PRUNABLE`` /
+    5. process every slot categorised ``PRUNABLE`` /
        ``PRUNABLE_CLEAN_METADATA`` **in both** fresh and supplied plan,
-       sorted by slot id, each re-validated path-safely immediately
-       before ``rmtree``; active/previous of the fresh plan are
-       re-checked per slot (defence in depth — a forged plan cannot
-       delete them); per-slot errors are recorded and the remaining
-       slots are still processed;
-    6. after successful deletions of ``PRUNABLE_CLEAN_METADATA`` slots,
-       purge their entries from ``accelerated-metadata.json`` (read-
-       modify-write, atomic).  If that file changed since the plan
-       (purge refused for the file), the disk deletions remain valid
-       (the global stale-check already passed) — documented choice.
+       sorted by slot id.  For ``PRUNABLE_CLEAN_METADATA`` slots the
+       metadata purge — every store named by the fresh entry's
+       ``metadata_actions``, in the documented inter-store order —
+       runs strictly **BEFORE** the directory removal; when any store
+       purge for a slot fails, the slot directory is **not** removed
+       this round and the error is recorded (metadata never points at
+       a deleted directory → never ``REPAIR_REQUIRED``);
+    6. every deletion is re-validated path-safely immediately before
+       ``rmtree``; active/previous of the fresh plan are re-checked
+       per slot (defence in depth — a forged plan cannot delete
+       them); per-slot errors are recorded and the remaining slots
+       are still processed;
+    7. a failed directory removal after a successful metadata purge
+       leaves an unreferenced directory on disk — self-healing
+       (``PRUNABLE`` on the next plan), never ``REPAIR_REQUIRED``.
 
-    Never touches ``active.json``, ``installed-lock.json`` or
-    ``product-provenance.json``.
+    Never touches ``active.json``.
     """
     root = Path(runtime_root).resolve()
     state_dir = root / "state"
@@ -916,32 +1089,31 @@ def _apply_gc_plan_locked(runtime_root: Path, plan: GcPlan) -> GcResult:
                 f"(defence in depth)"
             )
             continue
+        fresh_entry = fresh_by_id[slot_id]
+        actions = fresh_entry.metadata_actions
+        if actions:
+            # Metadata purge FIRST (every referencing store, ordered);
+            # only when every store purge succeeded is the directory
+            # removed.  A refused purge preserves the directory this
+            # round — metadata never outlives the directory it points
+            # at (no REPAIR_REQUIRED).
+            try:
+                _purge_slot_metadata_entries(
+                    state_dir, slots_root, slot_id, actions
+                )
+            except Exception as exc:
+                errors.append(
+                    f"metadata purge for slot {slot_id!r} refused: {exc}; "
+                    f"slot directory preserved this round"
+                )
+                continue
         try:
             _safe_delete_slot(slots_root, slot_id)
         except Exception as exc:
             errors.append(f"failed to delete slot {slot_id!r}: {exc}")
             continue
         deleted.append(slot_id)
-        reclaimed += fresh_by_id[slot_id].estimated_bytes
-
-    # -- metadata hygiene: purge accelerated-metadata entries of the slots
-    #    that were deleted with CLEAN_ACCELERATED_METADATA in the FRESH plan
-    #    (fresh is authoritative, not the supplied plan).
-    purge_ids = [
-        slot_id
-        for slot_id in deleted
-        if fresh_by_id[slot_id].metadata_action
-        == METADATA_ACTION_CLEAN_ACCELERATED
-    ]
-    if purge_ids:
-        try:
-            _purge_accelerated_metadata_entries(
-                state_dir, slots_root, purge_ids
-            )
-        except Exception as exc:
-            # Disk deletions remain valid (the global stale-check passed);
-            # the metadata file is left untouched.  Documented choice.
-            errors.append(f"accelerated metadata purge refused: {exc}")
+        reclaimed += fresh_entry.estimated_bytes
 
     preserved = [
         slot_id

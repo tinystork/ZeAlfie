@@ -1038,8 +1038,10 @@ def _format_gc_plan(plan: GcPlan) -> str:
             lines.append(f"    Reason: {entry.reason}")
             lines.append(f"    References: {refs}")
             lines.append(f"    Estimated bytes: {entry.estimated_bytes}")
-            if entry.metadata_action:
-                lines.append(f"    Metadata action: {entry.metadata_action}")
+            if entry.metadata_actions:
+                lines.append(
+                    f"    Metadata actions: {', '.join(entry.metadata_actions)}"
+                )
     else:
         lines.append("Slots: none")
     lines.append("")
