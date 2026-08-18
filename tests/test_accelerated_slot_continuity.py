@@ -86,7 +86,6 @@ from zealfie.runtime import (
     RuntimeLayout,
     SharedRuntime,
 )
-from zealfie.runtime.model import DeploymentResult
 from zealfie.runtime.probe import probe_runtime_distribution
 from zealfie.runtime.provenance import (
     ProductProvenance,
@@ -98,17 +97,6 @@ SHA_A = "d4a0f1e2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8"
 SHA_B = "e5b1f2a3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9"
 _EP_A = (EntryPointContract("console_scripts", "zewitness"),)
 _EP_B = (EntryPointContract("console_scripts", "zewitness2"),)
-
-
-@pytest.fixture(scope="session")
-def fake_accel_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    # Build fake-accel 1.0.0 once per session (same fixture as the
-    # accelerated service tests).
-    from zealfie.building import build_wheel
-
-    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "fake_accel"
-    output = tmp_path_factory.mktemp("shared-fake-accel-continuity")
-    return build_wheel(fixture_dir, output_dir=output)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +357,8 @@ def _make_ready_service(
 
 @pytest.mark.zealfie_slow
 def test_accelerated_slot_continuity_full_flow(
-    tmp_path, witness_v1, witness_second, fake_accel_wheel, monkeypatch,
+    tmp_path, witness_v1, witness_second, witness_third, fake_accel_wheel,
+    monkeypatch,
 ):
     """The complete ZA-M1-3A.2 regression scenario.
 
@@ -447,6 +436,8 @@ def test_accelerated_slot_continuity_full_flow(
     assert final.active_slot_id != active_before
     assert result.active_slot_id == final.active_slot_id
     assert result.previous_slot_id == active_before
+    # Selection is untouched by the accelerated mutation (products unchanged).
+    assert store.path.read_bytes() == selection_before
 
     # ---- 4. The NEW slot carries provenance: A+B with the SAME SHAs ----
     active_prov = dict(service.active_provenance())
@@ -494,9 +485,11 @@ def test_accelerated_slot_continuity_full_flow(
     assert update.installed_commit_sha == SHA_A
 
     # ---- 7. A THIRD product install rebuilds the full state from the
-    # NEW provenance (keep machinery sees A+B at their exact SHAs) ------
+    # NEW provenance AND preserves the accelerated closure (ZA-M1-3A.3a).
+    # The REAL service path runs (no fake DeploymentResult): the active
+    # slot carries a validated accelerated runtime, so the candidate is
+    # rebuilt with the SAME accelerated variant — never a CPU downgrade.
     keep_calls: list[tuple[str, str]] = []
-    prepared_calls: list[list[str]] = []
 
     def _fake_keep(product_id, provenance, *, fetcher, work_root,
                    progress_callback=None):
@@ -512,7 +505,7 @@ def test_accelerated_slot_continuity_full_flow(
     def _fake_target(product_id, policy, *, resolver, fetcher, work_root,
                      progress_callback=None):
         return _ppa(
-            product_id, witness_second,
+            product_id, witness_third,
             repo="ZeThird", version="1.0.0", commit_sha=SHA_B,
         )
 
@@ -520,15 +513,9 @@ def test_accelerated_slot_continuity_full_flow(
     monkeypatch.setattr(
         service, "_prepare_target_product_artifact", _fake_target
     )
-    monkeypatch.setattr(
-        service,
-        "install_prepared_product_deployment",
-        lambda prepared_artifacts, *, dependency_wheelhouse=None,
-        probe_distribution=None, progress_callback=None: (
-            prepared_calls.append([pa.product_id for pa in prepared_artifacts])
-            or DeploymentResult(success=True, active_slot_id="rt-third")
-        ),
-    )
+
+    active_before_third = runtime.status().active_slot_id
+    assert active_before_third == final.active_slot_id  # GPU slot from step 3
 
     third_result = service.install_product(
         "zethird",
@@ -536,25 +523,63 @@ def test_accelerated_slot_continuity_full_flow(
         fetcher=lambda owner, repo, sha: b"",
         work_root=tmp_path / "third-work",
         dependency_wheelhouse=_empty_wheelhouse(tmp_path),
+        accelerated_acquirer=_SingleWheelAcquirer(fake_accel_wheel),
     )
-    assert third_result.success is True
+    assert third_result.success is True, (
+        f"third install failed: {third_result.reason}"
+    )
+
     # KEEP = A+B re-materialized at the EXACT SHAs carried by the NEW
-    # slot's provenance (never re-resolved, never invented), then the
-    # third product.
+    # slot's provenance (never re-resolved, never invented).
     assert keep_calls == [("zewitness", SHA_A), ("zewitness2", SHA_B)]
-    assert prepared_calls[0] == ["zewitness", "zewitness2", "zethird"]
     assert keep_calls[0][1] == active_prov["zewitness"].commit_sha
     assert keep_calls[1][1] == active_prov["zewitness2"].commit_sha
 
-    # ---- C: the active slot's accelerated runtime is validated --------
+    # ---- rt-C is REAL: a genuinely new active slot ---------------------
+    rt_c = third_result.active_slot_id
+    assert rt_c is not None
+    assert runtime.status().active_slot_id == rt_c
+    assert rt_c != active_before_third
+    assert rt_c != active_before
+
+    # ---- provenance active = {A, B, third} with SHAs A/B preserved -----
+    third_prov = dict(service.active_provenance())
+    assert set(third_prov) == {"zewitness", "zewitness2", "zethird"}
+    assert third_prov["zewitness"].commit_sha == SHA_A
+    assert third_prov["zewitness2"].commit_sha == SHA_B
+
+    # ---- accelerated metadata keyed on the NEW slot, same variant ------
+    meta_c = metadata_store.load_slot(rt_c)
+    assert meta_c is not None
+    assert meta_c.backend == "NVIDIA_CUDA"
+    assert meta_c.variants == (
+        ("fake-accel", "1.0.0", _sha256(fake_accel_wheel)),
+    )
+
+    # ---- installed lock for rt-C contains fake-accel + A/B/third -------
+    lock_c = installed_store.load_slot(rt_c)
+    assert lock_c is not None
+    assert "fake-accel" in lock_c.dependencies
+    accel_dep_c = lock_c.dependencies["fake-accel"]
+    assert accel_dep_c.version == "1.0.0"
+    assert accel_dep_c.primary is False
+    assert "zealfie-witness" in accel_dep_c.required_by
+    for dist in ("zealfie-witness", "zealfie-witness2", "zealfie-third"):
+        assert dist in lock_c.dependencies, dist
+
+    # ---- C: the active slot's accelerated runtime is still validated --
     assert service.acceleration_runtime_ready() is True
     ready_rec = service.get_acceleration_recommendation(_caps())
     assert ready_rec.status is RecommendationStatus.ALREADY_READY
     assert ready_rec.backend == "NVIDIA_CUDA"
 
-    # ---- Selection unchanged by the accelerated mutation ----------------
-    assert store.path.read_bytes() == selection_before
-    new_python = _slot_python(layout.slot_path(final.active_slot_id))
+    # ---- selection now includes the third product ----------------------
+    assert store.selected_product_ids == (
+        "zethird", "zewitness", "zewitness2",
+    )
+
+    # ---- the NEW slot really carries the accelerated wheel -------------
+    new_python = _slot_python(layout.slot_path(rt_c))
     probe = probe_runtime_distribution(str(new_python), "fake-accel")
     assert probe["installed"] is True
     assert probe["version"] == "1.0.0"

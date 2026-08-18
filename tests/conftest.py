@@ -42,6 +42,23 @@ def witness_second_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return build_wheel(d, output_dir=t)
 
 
+@pytest.fixture(scope="session")
+def witness_third_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build zealfie-third wheel once per session (GPU continuity tests)."""
+    d = Path(__file__).resolve().parent / "fixtures" / "witness_third"
+    t = tmp_path_factory.mktemp("shared-witness-third")
+    return build_wheel(d, output_dir=t)
+
+
+@pytest.fixture(scope="session")
+def fake_accel_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build fake-accel 1.0.0 once per session (shared by the accelerated
+    service and GPU continuity tests)."""
+    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "fake_accel"
+    output = tmp_path_factory.mktemp("shared-fake-accel")
+    return build_wheel(fixture_dir, output_dir=output)
+
+
 # ---------------------------------------------------------------------------
 # Aliases so existing test parameter names continue to work.
 # ---------------------------------------------------------------------------
@@ -63,6 +80,12 @@ def witness_v2(witness_v2_wheel: Path) -> Path:
 def witness_second(witness_second_wheel: Path) -> Path:
     """Alias: witness_second (same as witness_second_wheel)."""
     return witness_second_wheel
+
+
+@pytest.fixture(scope="session")
+def witness_third(witness_third_wheel: Path) -> Path:
+    """Alias: witness_third (same as witness_third_wheel)."""
+    return witness_third_wheel
 
 
 @pytest.fixture(scope="session")
