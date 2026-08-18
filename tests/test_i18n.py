@@ -20,6 +20,7 @@ from zealfie.i18n import (
     set_language,
     tr,
     translate,
+    translate_product_description,
 )
 
 
@@ -192,3 +193,44 @@ def test_effective_language_module_function_is_usable():
     # The module-level convenience function exists and returns a Language.
     result = effective_language()
     assert isinstance(result, Language)
+
+# ---------------------------------------------------------------------------
+# 8 — translate_product_description (FR-only product descriptions)
+# ---------------------------------------------------------------------------
+
+
+def test_translate_product_description_fr_hit():
+    set_language(Language.FR)
+    assert (
+        translate_product_description("zesolver", "EN default")
+        == FR["product.description.zesolver"]
+    )
+    assert "Solveur optique" in translate_product_description("zesolver", "EN default")
+
+
+def test_translate_product_description_fr_miss_falls_back():
+    set_language(Language.FR)
+    assert translate_product_description("no_such_product", "EN default") == "EN default"
+
+
+def test_translate_product_description_non_fr_returns_default():
+    # Any non-FR language (here EN) returns the English catalog default.
+    set_language(Language.EN)
+    assert translate_product_description("zesolver", "EN default") == "EN default"
+
+
+def test_translate_product_description_never_leaks_raw_key():
+    set_language(Language.FR)
+    out = translate_product_description("no_such_product", "EN default")
+    assert "product.description" not in out
+    set_language(Language.EN)
+    out = translate_product_description("zesolver", "EN default")
+    assert "product.description" not in out
+
+
+def test_translate_product_description_never_raises():
+    set_language(Language.FR)
+    # Empty product_id and empty default must not raise.
+    assert translate_product_description("", "") == ""
+    assert translate_product_description("zesolver", "") == FR["product.description.zesolver"]
+

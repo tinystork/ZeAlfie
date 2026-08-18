@@ -42,7 +42,7 @@ from .presentation import (
     state_label,
     update_status_label,
 )
-from zealfie.i18n import translate
+from zealfie.i18n import translate, translate_product_description
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,9 @@ class ProductCard(QFrame):
         layout.addWidget(name_label)
 
         # --- Description ---
-        desc_text = self._descriptor.description or ""
+        desc_text = translate_product_description(
+            self._descriptor.product_id, self._descriptor.description or ""
+        )
         desc_label = QLabel(desc_text if desc_text else "")
         desc_label.setWordWrap(True)
         if desc_text:

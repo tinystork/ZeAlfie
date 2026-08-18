@@ -82,6 +82,7 @@ class ZeAlfieMainWindow(QMainWindow):
         self._cards_container: QWidget | None = None
         self._acceleration_panel: AccelerationPanel | None = None
         self._language_actions: dict = {}
+        self._language_menu = None
 
         # M1-2D.5: global install coordination
         self._install_active: bool = False
@@ -205,16 +206,17 @@ class ZeAlfieMainWindow(QMainWindow):
         status_bar.addWidget(self._status_label)
         self.setStatusBar(status_bar)
 
-        # --- Refresh action (menu + toolbar) ---
+        # --- Refresh action (toolbar only — single, non-redundant) ---
         self._refresh_action = QAction("&Refresh", self)
         self._refresh_action.setShortcut("F5")
         self._refresh_action.triggered.connect(self._refresh)
-        menu = self.menuBar().addMenu("&Shell")
-        menu.addAction(self._refresh_action)
-        self._build_language_menu(menu)
 
         toolbar = self.addToolBar('Shell')
         toolbar.addAction(self._refresh_action)
+
+        # --- Top-level language menu (immediately identifiable) ---
+        self._language_menu = self.menuBar().addMenu(translate("menu.language"))
+        self._build_language_menu(self._language_menu)
 
         # --- Populate cards from catalog ---
         self._populate_cards()
@@ -353,15 +355,14 @@ class ZeAlfieMainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_language_menu(self, menu) -> None:
-        """Add a Language submenu with English / Français actions."""
-        lang_menu = menu.addMenu("&Language")
+        """Add the checkable English / Français actions to *menu*."""
         for lang, label in ((Language.EN, "English"), (Language.FR, "Français")):
             action = QAction(label, self, checkable=True)
             action.setChecked(get_language() is lang)
             action.triggered.connect(
                 lambda checked=False, l=lang: self._on_language_selected(l)
             )
-            lang_menu.addAction(action)
+            menu.addAction(action)
             self._language_actions[lang] = action
 
     def _on_language_selected(self, lang: Language) -> None:
@@ -382,6 +383,8 @@ class ZeAlfieMainWindow(QMainWindow):
         re-probe host capabilities.
         """
         self.setWindowTitle(translate("app.title"))
+        if self._language_menu is not None:
+            self._language_menu.setTitle(translate("menu.language"))
         if self._subtitle_label is not None:
             self._subtitle_label.setText(translate("app.subtitle"))
         if self._known_limitation_label is not None:

@@ -22,6 +22,8 @@ EN: dict[str, str] = {
         "KNOWN UX LIMITATION: running product installations cannot yet "
         "be cancelled."
     ),
+    # -- Menu bar ---------------------------------------------------------
+    "menu.language": "Language",
     # -- Status bar / lifecycle wording ----------------------------------
     "status.starting": "Starting\u2026",
     "status.installing": "Installing {name}\u2026",
@@ -168,6 +170,8 @@ FR: dict[str, str] = {
         "LIMITATION UX CONNUE : les installations de produits en cours ne "
         "peuvent pas encore être annulées."
     ),
+    # -- Menu bar ---------------------------------------------------------
+    "menu.language": "Langue",
     # -- Status bar / lifecycle wording ----------------------------------
     "status.starting": "Démarrage\u2026",
     "status.installing": "Installation de {name}\u2026",
@@ -314,4 +318,22 @@ FR: dict[str, str] = {
     "plan.actions_none": "Actions planifiées : aucune enregistrée",
     "plan.host_prereqs": "Prérequis hôte :",
     "plan.no_changes_yet": "Aucun changement n'a encore été effectué.",
+    # -- Product descriptions (FR only; EN lives in manifests/products.toml) ---
+    "product.description.zesolver": (
+        "Solveur optique pour l'astrophotographie haute résolution — "
+        "résolution sur plaque, résolution à l'aveugle et analyse de "
+        "champs d'étoiles."
+    ),
+    "product.description.zemosaic": (
+        "Planificateur et composeur de mosaïques — assemblage, alignement "
+        "et fusion d'images du ciel profond multi-panneaux."
+    ),
+    "product.description.zeseestarstacker": (
+        "Empilement d'étoiles en un clic pour les utilisateurs de "
+        "Seestar S50 — calibration, alignement et empilement automatiques."
+    ),
+    "product.description.zeanalyser": (
+        "Boîte à outils d'analyse d'images approfondie — FWHM, excentricité, "
+        "SNR et statistiques de session."
+    ),
 }

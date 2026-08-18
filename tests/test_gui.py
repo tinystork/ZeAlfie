@@ -1313,7 +1313,7 @@ class TestInstallWiringThroughMainWindow:
 
 
 class TestLanguageSelection:
-    """Minimal wiring test for the Shell > Language submenu."""
+    """Minimal wiring test for the top-level Language menu."""
 
     @pytest.fixture(autouse=True)
     def _qapp(self, qapp):
@@ -1364,3 +1364,182 @@ class TestLanguageSelection:
             window.close()
             window.deleteLater()
             qapp.processEvents()
+
+# ===========================================================================
+# M1-4.1 UX polish — top-level language menu, single refresh, FR descriptions
+# ===========================================================================
+
+
+class TestM141LanguageMenuTopLevel:
+    """The language selector is a top-level menu, not nested in a Shell menu."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qapp):
+        return qapp
+
+    @pytest.fixture(autouse=True)
+    def _reset_language(self):
+        from zealfie.i18n import reset_language
+
+        reset_language()
+        yield
+        reset_language()
+
+    def test_language_menu_is_top_level(self, qapp):
+        from zealfie.i18n import Language
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        window = ZeAlfieMainWindow(service=_create_standard_fake_service())
+        try:
+            menu_bar = window.menuBar()
+            top_titles = [a.text() for a in menu_bar.actions()]
+
+            # No "Shell" menu exists (top-level or otherwise).
+            assert "Shell" not in top_titles
+            assert "&Shell" not in top_titles
+
+            # The language menu is a direct top-level child of the menu bar.
+            assert window._language_menu is not None
+            assert window._language_menu.parent() is menu_bar
+            assert "Language" in top_titles
+
+            # It holds exactly the two checkable actions.
+            labels = [a.text() for a in window._language_menu.actions()]
+            assert labels == ["English", "Français"]
+            assert window._language_actions[Language.EN].isCheckable() is True
+            assert window._language_actions[Language.FR].isCheckable() is True
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    def test_single_refresh_action_in_toolbar_only(self, qapp):
+        from PySide6.QtGui import QAction
+
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        window = ZeAlfieMainWindow(service=_create_standard_fake_service())
+        try:
+            # Exactly one Refresh action exists anywhere in the window.
+            refresh_actions = [
+                a for a in window.findChildren(QAction) if "Refresh" in a.text()
+            ]
+            assert len(refresh_actions) == 1
+            assert refresh_actions[0] is window._refresh_action
+
+            # No menu contains a Refresh action.
+            for top in window.menuBar().actions():
+                menu = top.menu()
+                if menu is not None:
+                    for a in menu.actions():
+                        assert "Refresh" not in a.text()
+
+            # The F5 shortcut is preserved on the toolbar action.
+            assert window._refresh_action.shortcut().toString() == "F5"
+
+            # _set_global_install_lock still disables it during installs.
+            window._set_global_install_lock(True)
+            assert window._refresh_action.isEnabled() is False
+            window._set_global_install_lock(False)
+            assert window._refresh_action.isEnabled() is True
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    def test_language_switch_retitles_top_level_menu(self, qapp, monkeypatch):
+        from zealfie.i18n import Language
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        class _FakeStore:
+            def __init__(self, path=None):
+                pass
+
+            def save(self, lang):
+                pass
+
+        monkeypatch.setattr(
+            "zealfie.gui.main_window.LanguageStore", _FakeStore
+        )
+
+        window = ZeAlfieMainWindow(service=_create_standard_fake_service())
+        try:
+            assert window._language_menu.title() == "Language"
+            window._language_actions[Language.FR].trigger()
+            assert window._language_menu.title() == "Langue"
+            window._language_actions[Language.EN].trigger()
+            assert window._language_menu.title() == "Language"
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+
+class TestM141ProductDescriptionTranslation:
+    """Product cards translate descriptions via the i18n layer (FR only)."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qapp):
+        return qapp
+
+    @pytest.fixture(autouse=True)
+    def _reset_language(self):
+        from zealfie.i18n import reset_language
+
+        reset_language()
+        yield
+        reset_language()
+
+    @staticmethod
+    def _make_card(product_id: str, description: str):
+        from zealfie.gui.product_card import ProductCard
+
+        descriptor = _make_descriptor(
+            product_id, product_id.title(), description
+        )
+        service = FakeService(descriptors=(descriptor,))
+        return ProductCard(descriptor=descriptor, state=None, service=service)
+
+    @staticmethod
+    def _desc_text(card):
+        from PySide6.QtWidgets import QLabel
+
+        label = card.findChild(QLabel, "descLabel")
+        assert label is not None
+        return label.text()
+
+    def test_english_description_in_en(self, qapp):
+        card = self._make_card("zesolver", "Optical solver EN.")
+        try:
+            assert self._desc_text(card) == "Optical solver EN."
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_french_description_in_fr(self, qapp):
+        from zealfie.i18n import FR, Language, set_language
+
+        set_language(Language.FR)
+        card = self._make_card("zesolver", "Optical solver EN.")
+        try:
+            assert self._desc_text(card) == FR["product.description.zesolver"]
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+
+    def test_missing_fr_key_falls_back_to_english(self, qapp):
+        from zealfie.i18n import Language, set_language
+
+        set_language(Language.FR)
+        card = self._make_card("no_such_product", "Only English.")
+        try:
+            text = self._desc_text(card)
+            assert text == "Only English."
+            assert "product.description" not in text
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
+

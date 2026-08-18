@@ -81,6 +81,23 @@ def translate(key: str, **kwargs) -> str:
 tr = translate
 
 
+def translate_product_description(product_id: str, english_default: str) -> str:
+    """Return the localized product description.
+
+    English product descriptions live only in ``manifests/products.toml``
+    (canonical catalog data), so they are deliberately NOT duplicated in the
+    EN catalogue.  When the current language is French and a
+    ``product.description.<product_id>`` key exists in the FR catalogue,
+    return that translation; otherwise return *english_default* unchanged.
+
+    Never raises and never leaks a raw translation key.
+    """
+    key = f"product.description.{product_id}"
+    if get_language() is Language.FR and key in FR:
+        return FR[key]
+    return english_default
+
+
 # Imported last: these submodules import ``Language`` back from this package,
 # so they must be loaded after ``Language`` is defined above.
 from .locale import detect_locale  # noqa: E402
@@ -94,6 +111,7 @@ __all__ = [
     "reset_language",
     "translate",
     "tr",
+    "translate_product_description",
     "detect_locale",
     "LanguageStore",
     "effective_language",
