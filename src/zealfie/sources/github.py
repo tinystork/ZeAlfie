@@ -9,6 +9,12 @@ limit but is never required.
 All network objects accept injectable *timeout*, *user_agent*, and
 *_opener* constructor arguments so tests can mock ``urllib`` without
 ever touching the real GitHub API.
+
+ZA-M1-4 LOT C: transports now use the shared
+:class:`~zealfie.net.NetworkReasonCode` classifier, attach a
+``reason_code`` + ``proxy_hint`` to raised errors, and apply bounded
+transient-only retry (2 retries) around each ``opener.open`` call.  TLS
+verification stays ON; tokens are never leaked into messages.
 """
 
 from __future__ import annotations
@@ -20,6 +26,12 @@ import re
 import urllib.request
 from urllib.error import HTTPError, URLError
 
+from zealfie.net import (
+    build_default_opener,
+    classify_exception,
+    proxy_hint_for,
+    retry_transient,
+)
 from zealfie.sources import SourceResolutionError
 from zealfie.sources.acquisition import AcquisitionError
 
@@ -29,6 +41,8 @@ from zealfie.sources.acquisition import AcquisitionError
 
 _DEFAULT_TIMEOUT: float = 30.0  # seconds
 _DEFAULT_USER_AGENT: str = "ZeAlfie/0.0 (github.com/tinystork/ZeAlfie)"
+_DEFAULT_RETRIES: int = 2
+_DEFAULT_RETRY_DELAY: float = 0.5
 _GITHUB_API_BASE: str = "https://api.github.com"
 
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -74,8 +88,12 @@ class GitHubSourceRefResolver:
 
         _opener:
             Inject a custom ``urllib.request.OpenerDirector`` for
-            testing.  When ``None`` a default ``build_opener()`` is
-            used.
+            testing.  When ``None`` the canonical default opener
+            (proxy-aware, TLS-verified) is used.
+
+        retries / retry_delay:
+            Bounded transient-only retry policy (default 2 retries,
+            0.5s delay).  Permanent failures are never retried.
     """
 
     def __init__(
@@ -84,10 +102,14 @@ class GitHubSourceRefResolver:
         timeout: float = _DEFAULT_TIMEOUT,
         user_agent: str = _DEFAULT_USER_AGENT,
         _opener: urllib.request.OpenerDirector | None = None,
+        retries: int = _DEFAULT_RETRIES,
+        retry_delay: float = _DEFAULT_RETRY_DELAY,
     ) -> None:
         self._timeout = timeout
         self._user_agent = user_agent
         self._opener = _opener
+        self._retries = retries
+        self._retry_delay = retry_delay
 
     def __call__(self, owner: str, repo: str, ref: str) -> str:
         """Resolve *ref* to a 40-character hex commit SHA.
@@ -113,18 +135,12 @@ class GitHubSourceRefResolver:
         url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{ref}"
         try:
             data = self._get_json(url)
-        except HTTPError as exc:
+        except (HTTPError, URLError, OSError, http.client.HTTPException) as exc:
+            reason_code, reason_msg = classify_exception(exc)
+            hint = proxy_hint_for(reason_code)
+            message = f"{reason_msg} resolving {owner}/{repo}@{ref}"
             raise SourceResolutionError(
-                f"GitHub API returned HTTP {exc.code} for "
-                f"{owner}/{repo}@{ref}"
-            ) from exc
-        except (URLError, OSError) as exc:
-            raise SourceResolutionError(
-                f"network error resolving {owner}/{repo}@{ref}: {exc}"
-            ) from exc
-        except http.client.HTTPException as exc:
-            raise SourceResolutionError(
-                f"HTTP protocol error resolving {owner}/{repo}@{ref}: {exc}"
+                message, reason_code=reason_code, proxy_hint=hint
             ) from exc
 
         sha = str(data.get("sha", "")).strip().lower()
@@ -150,9 +166,14 @@ class GitHubSourceRefResolver:
         opener = (
             self._opener
             if self._opener is not None
-            else urllib.request.build_opener()
+            else build_default_opener(timeout=self._timeout)
         )
-        with opener.open(req, timeout=self._timeout) as resp:
+        resp = retry_transient(
+            lambda: opener.open(req, timeout=self._timeout),
+            retries=self._retries,
+            delay=self._retry_delay,
+        )
+        with resp:
             body = resp.read()
         try:
             text = body.decode("utf-8")
@@ -189,10 +210,14 @@ class GitHubArchiveFetcher:
         timeout: float = _DEFAULT_TIMEOUT,
         user_agent: str = _DEFAULT_USER_AGENT,
         _opener: urllib.request.OpenerDirector | None = None,
+        retries: int = _DEFAULT_RETRIES,
+        retry_delay: float = _DEFAULT_RETRY_DELAY,
     ) -> None:
         self._timeout = timeout
         self._user_agent = user_agent
         self._opener = _opener
+        self._retries = retries
+        self._retry_delay = retry_delay
 
     def __call__(self, owner: str, repo: str, commit_sha: str) -> bytes:
         """Fetch the ZIP archive for *commit_sha* in *owner*/*repo*.
@@ -203,20 +228,12 @@ class GitHubArchiveFetcher:
         url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/zipball/{commit_sha}"
         try:
             data = self._get_bytes(url)
-        except HTTPError as exc:
+        except (HTTPError, URLError, OSError, http.client.HTTPException) as exc:
+            reason_code, reason_msg = classify_exception(exc)
+            hint = proxy_hint_for(reason_code)
+            message = f"{reason_msg} fetching archive for {owner}/{repo}@{commit_sha}"
             raise AcquisitionError(
-                f"GitHub API returned HTTP {exc.code} fetching archive for "
-                f"{owner}/{repo}@{commit_sha}"
-            ) from exc
-        except (URLError, OSError) as exc:
-            raise AcquisitionError(
-                f"network error fetching archive for "
-                f"{owner}/{repo}@{commit_sha}: {exc}"
-            ) from exc
-        except http.client.HTTPException as exc:
-            raise AcquisitionError(
-                f"HTTP protocol error fetching archive for "
-                f"{owner}/{repo}@{commit_sha}: {exc}"
+                message, reason_code=reason_code, proxy_hint=hint
             ) from exc
 
         if not data:
@@ -241,9 +258,14 @@ class GitHubArchiveFetcher:
         opener = (
             self._opener
             if self._opener is not None
-            else urllib.request.build_opener()
+            else build_default_opener(timeout=self._timeout)
         )
-        with opener.open(req, timeout=self._timeout) as resp:
+        resp = retry_transient(
+            lambda: opener.open(req, timeout=self._timeout),
+            retries=self._retries,
+            delay=self._retry_delay,
+        )
+        with resp:
             return resp.read()
 
 

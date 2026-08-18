@@ -288,7 +288,7 @@ class TestResolverErrorHandling:
             OSError(101, "Network is unreachable"),
         )
         resolver = GitHubSourceRefResolver(_opener=opener)
-        with pytest.raises(SourceResolutionError, match="network error"):
+        with pytest.raises(SourceResolutionError, match="network unreachable"):
             resolver("o", "r", "main")
 
     def test_incomplete_read_maps_to_source_resolution_error(self):
@@ -485,7 +485,7 @@ class TestFetcherErrorHandling:
         """OSError becomes AcquisitionError."""
         opener = _make_failing_opener(OSError("broken pipe"))
         fetcher = GitHubArchiveFetcher(_opener=opener)
-        with pytest.raises(AcquisitionError, match="network error"):
+        with pytest.raises(AcquisitionError, match="network unreachable"):
             fetcher("o", "r", "e" * 40)
 
     def test_empty_response_raises_acquisition_error(self):

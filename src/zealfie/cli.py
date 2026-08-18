@@ -73,6 +73,25 @@ from .sources import SourceResolutionError
 from .sources.acquisition import AcquisitionError
 
 
+def _print_network_reason(exc: BaseException) -> None:
+    """Print a reason-code and proxy-hint line for *exc*, if present.
+
+    Never prints secrets: only the machine-readable reason code and the
+    pre-sanitised proxy hint carried on the exception.
+    """
+    reason_code = getattr(exc, "reason_code", None)
+    if reason_code is not None:
+        code = (
+            reason_code.value
+            if hasattr(reason_code, "value")
+            else str(reason_code)
+        )
+        print(f"Reason code: {code}", file=sys.stderr)
+    proxy_hint = getattr(exc, "proxy_hint", None)
+    if proxy_hint:
+        print(f"Proxy hint: {proxy_hint}", file=sys.stderr)
+
+
 def _positive_finite_float(value: str) -> float:
     """Validate a finite, strictly positive float for --timeout.
 
@@ -765,9 +784,11 @@ def _handle_install(args, *, stdout: TextIO) -> int:
         return 7
     except SourceResolutionError as exc:
         print(f"cannot resolve source for {args.product_id!r}: {exc}", file=sys.stderr)
+        _print_network_reason(exc)
         return 8
     except AcquisitionError as exc:
         print(f"cannot fetch source for {args.product_id!r}: {exc}", file=sys.stderr)
+        _print_network_reason(exc)
         return 9
     except ProductDependencyAcquisitionError as exc:
         print(f"cannot acquire dependencies for {args.product_id!r}: {exc}", file=sys.stderr)

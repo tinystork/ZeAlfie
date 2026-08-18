@@ -563,3 +563,23 @@ def test_acquirer_resolves_win_platform_with_override() -> None:
         cublas.sha256
         == "5a796786da89203a0657eda402bcdcec6180254a8ac22d72213abc42069522dc"
     )
+
+
+def test_manifest_rejects_plaintext_http_url() -> None:
+    """Plaintext ``http://`` URLs are rejected (fail-closed; no TLS
+    downgrade).  ``file://`` (hermetic tests) and ``https://`` remain."""
+    text = (
+        "schema_version = 1\n"
+        "[[artifacts]]\n"
+        'distribution = "fake-accel"\n'
+        'version = "1.0.0"\n'
+        'backend = "NVIDIA_CUDA"\n'
+        'platform = "linux_x86_64"\n'
+        'python = "py3"\n'
+        'filename = "fake_accel-1.0.0-py3-none-any.whl"\n'
+        'url = "http://files.example.org/fake_accel-1.0.0-py3-none-any.whl"\n'
+        "size = 123\n"
+        'sha256 = "' + ("a" * 64) + '"\n'
+    )
+    with pytest.raises(InvalidArtifactManifestError, match="scheme"):
+        load_accelerated_artifact_manifest(text)

@@ -21,7 +21,10 @@ import zipfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from zealfie.net import NetworkReasonCode
 
 from zealfie.sources import ResolvedSource
 
@@ -32,7 +35,24 @@ from zealfie.sources import ResolvedSource
 
 
 class AcquisitionError(RuntimeError):
-    """Base class for acquisition errors."""
+    """Base class for acquisition errors.
+
+    Carries an optional machine-readable :attr:`reason_code` (a
+    :class:`~zealfie.net.NetworkReasonCode`) and an optional
+    :attr:`proxy_hint` diagnostic string.  Both default to ``None`` so
+    existing raise sites and callers are unaffected.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: "NetworkReasonCode | None" = None,
+        proxy_hint: str | None = None,
+    ) -> None:
+        self.reason_code = reason_code
+        self.proxy_hint = proxy_hint
+        super().__init__(message)
 
 
 class StagingError(AcquisitionError):

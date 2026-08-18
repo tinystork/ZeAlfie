@@ -23,6 +23,10 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from zealfie.net import NetworkReasonCode
 
 from packaging.metadata import parse_email
 from packaging.utils import canonicalize_name, parse_wheel_filename
@@ -57,10 +61,24 @@ class AcquisitionTransportError(DependencyAcquisitionError):
     description.
     """
 
-    def __init__(self, stage: str, detail: str) -> None:
+    def __init__(
+        self,
+        stage: str,
+        detail: str,
+        *,
+        reason_code: "NetworkReasonCode | None" = None,
+        proxy_hint: str | None = None,
+    ) -> None:
         self.stage = stage
         self.detail = detail
-        super().__init__(f"acquisition transport error ({stage}): {detail}")
+        self.reason_code = reason_code
+        self.proxy_hint = proxy_hint
+        message = f"acquisition transport error ({stage}): {detail}"
+        if reason_code is not None:
+            message += f" [reason code: {reason_code.value}]"
+        if proxy_hint:
+            message += f" [{proxy_hint}]"
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------------

@@ -25,8 +25,8 @@ Contract — the acquirer NEVER selects, guesses, or falls back:
 
 No pip, no subprocess, no installation: acquisition only deposits
 verified wheels.  ``file://`` URLs are supported so tests can exercise
-the exact production path hermetically; ``http(s)://`` is the
-production transport.
+the exact production path hermetically; ``https://`` is the
+production transport (plaintext ``http://`` is rejected).
 
 ZA-M1-3A.3 LOT C.3: an optional shared artifact cache
 (:class:`~zealfie.runtime.artifact_cache.ArtifactCacheStore`) reuses the
@@ -77,7 +77,7 @@ SUPPORTED_ARTIFACT_SCHEMA_VERSION = 1
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _PYTHON_TAG_RE = re.compile(r"^(cp|py)[0-9]+$")
-_URL_SCHEMES = frozenset({"file", "http", "https"})
+_URL_SCHEMES = frozenset({"file", "https"})
 _CHUNK_SIZE = 1 << 20  # 1 MiB
 
 
