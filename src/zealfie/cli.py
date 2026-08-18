@@ -71,6 +71,14 @@ from .runtime import (
 
 from .sources import SourceResolutionError
 from .sources.acquisition import AcquisitionError
+from .selfupdate import (
+    ApplyStatus,
+    SelfUpdateStatus,
+    apply_pending_update,
+    build_self_update_plan,
+    detect_identity,
+    stage_and_persist,
+)
 
 
 def _print_network_reason(exc: BaseException) -> None:
@@ -127,6 +135,14 @@ BUSY_EXIT_ALT = 5
 #: closed).  6 is free in every mutating handler (``launch`` uses 6, but
 #: launch never acquires the lock and the contract is per-handler).
 LOCK_ERROR_EXIT = 6
+
+#: Exit codes for the ``self-update`` subcommands (ZA-M1-4 LOT D).
+#: check: 0 up-to-date/update-available/not-supported, 1 check failed.
+#: stage: 0 staged, 1 check failed, 2 not supported, 3 staging error.
+#: apply: 0 applied, 1 no-pending/failed, 2 not-supported-on-platform, 4 busy.
+SELF_UPDATE_CHECK_FAILED = 1
+SELF_UPDATE_NOT_SUPPORTED = 2
+SELF_UPDATE_STAGE_FAILED = 3
 
 
 def _format_mutation_busy(exc: RuntimeMutationBusyError) -> str:
@@ -255,6 +271,31 @@ def build_parser() -> argparse.ArgumentParser:
              "(fail-closed: no accelerated artifact source is configured; "
              "a real deployment requires explicit authorization)",
     )
+    # -- self-update subcommand (ZA-M1-4 LOT D) -----------------------------
+    self_update_parser = subparsers.add_parser(
+        "self-update",
+        help="check, stage, and apply ZeAlfie self-updates",
+    )
+    self_update_subs = self_update_parser.add_subparsers(dest="self_update_command")
+    self_update_check = self_update_subs.add_parser(
+        "check", help="check for a newer ZeAlfie release (read-only)",
+    )
+    self_update_check.add_argument(
+        "--channel", choices=("stable", "beta"), default="stable", dest="channel",
+        help="release channel to check (default: stable)",
+    )
+    self_update_stage = self_update_subs.add_parser(
+        "stage",
+        help="build, verify, and stage a pending self-update (never installs)",
+    )
+    self_update_stage.add_argument(
+        "--channel", choices=("stable", "beta"), default="stable", dest="channel",
+        help="release channel to stage (default: stable)",
+    )
+    self_update_subs.add_parser(
+        "apply",
+        help="apply the previously staged self-update (standalone activator)",
+    )
     return parser
 
 
@@ -296,6 +337,9 @@ def run(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout) -> in
 
     if args.command == "system":
         return _handle_system(args, stdout=stdout)
+
+    if args.command == "self-update":
+        return _handle_self_update(args, stdout=stdout)
 
     print(startup_message(), file=stdout)
     return 0
@@ -1214,6 +1258,150 @@ def _make_service() -> ZeAlfieService:
         registry=default_registry(),
         runtime=SharedRuntime(default_runtime_layout()),
     )
+
+
+# ---------------------------------------------------------------------------
+# ZA-M1-4 LOT D: self-update command (resolve -> stage -> controlled handoff)
+# ---------------------------------------------------------------------------
+
+
+def _make_self_update_tags_lister():
+    """Return a default :class:`GitHubTagsLister` for self-update."""
+    from .selfupdate.resolver import GitHubTagsLister
+
+    return GitHubTagsLister()
+
+
+def _make_self_update_deps():
+    """Return default self-update deps: (resolver, tags_lister, fetcher, work_root).
+
+    Tests monkeypatch this function to avoid any real network access.
+    """
+    return (
+        _make_source_resolver(),
+        _make_self_update_tags_lister(),
+        _make_source_fetcher(),
+        _make_work_root(),
+    )
+
+
+def _handle_self_update(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie self-update check|stage|apply``."""
+    if args.self_update_command == "check":
+        return _handle_self_update_check(args, stdout=stdout)
+    if args.self_update_command == "stage":
+        return _handle_self_update_stage(args, stdout=stdout)
+    if args.self_update_command == "apply":
+        return _handle_self_update_apply(args, stdout=stdout)
+    print(
+        "self-update requires a subcommand: check, stage, or apply",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _handle_self_update_check(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie self-update check`` - STRICTLY read-only.
+
+    Prints current version, channel, and available version (or the honest
+    status).  Never stages, never mutates.  Exit 0 for up-to-date /
+    update-available / not-supported; 1 on check failure.
+    """
+    resolver, tags_lister, _fetcher, _work_root = _make_self_update_deps()
+    identity = detect_identity()
+    plan = build_self_update_plan(
+        identity, channel=args.channel, resolver=resolver, tags_lister=tags_lister
+    )
+
+    print(f"Current version: {identity.version}", file=stdout)
+    print(f"Channel: {args.channel}", file=stdout)
+
+    if plan.status is SelfUpdateStatus.NOT_SUPPORTED:
+        print(f"Status: NOT_SUPPORTED ({plan.reason})", file=stdout)
+        return 0
+    if plan.status is SelfUpdateStatus.CHECK_FAILED:
+        print(f"Status: CHECK_FAILED ({plan.reason})", file=sys.stderr)
+        _print_network_reason(plan.error)
+        return SELF_UPDATE_CHECK_FAILED
+    if plan.status is SelfUpdateStatus.UP_TO_DATE:
+        print("Status: UP_TO_DATE", file=stdout)
+        print(f"Available version: {plan.resolution.available_version}", file=stdout)
+        return 0
+    print("Status: UPDATE_AVAILABLE", file=stdout)
+    print(f"Available version: {plan.resolution.available_version}", file=stdout)
+    return 0
+
+
+def _handle_self_update_stage(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie self-update stage`` - build + verify + persist marker.
+
+    Never installs.  Exit 0 staged, 1 check failed, 2 not supported, 3
+    staging error.
+    """
+    resolver, tags_lister, fetcher, work_root = _make_self_update_deps()
+    identity = detect_identity()
+    plan = build_self_update_plan(
+        identity, channel=args.channel, resolver=resolver, tags_lister=tags_lister
+    )
+
+    if plan.status is SelfUpdateStatus.NOT_SUPPORTED:
+        print(f"self-update not supported: {plan.reason}", file=sys.stderr)
+        return SELF_UPDATE_NOT_SUPPORTED
+    if plan.status is SelfUpdateStatus.CHECK_FAILED:
+        print(f"self-update check failed: {plan.reason}", file=sys.stderr)
+        _print_network_reason(plan.error)
+        return SELF_UPDATE_CHECK_FAILED
+    if plan.status is SelfUpdateStatus.UP_TO_DATE:
+        print(
+            f"ZeAlfie {identity.version} is already up to date "
+            f"(channel {args.channel}). Nothing to stage.",
+            file=stdout,
+        )
+        return 0
+
+    layout = default_runtime_layout()
+    try:
+        staged = stage_and_persist(
+            plan.resolution,
+            fetcher=fetcher,
+            work_root=work_root,
+            layout=layout,
+        )
+    except Exception as exc:  # noqa: BLE001 - honest staging failure
+        print(f"self-update stage failed: {exc}", file=sys.stderr)
+        _print_network_reason(exc)
+        return SELF_UPDATE_STAGE_FAILED
+
+    print(
+        f"Staged ZeAlfie {staged.wheel_version} "
+        f"(wheel {staged.wheel_path}); run `zealfie self-update apply` "
+        f"when the GUI is not active to install it.",
+        file=stdout,
+    )
+    return 0
+
+
+def _handle_self_update_apply(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie self-update apply`` - run the standalone activator.
+
+    Applies only what was previously staged (never auto-stages).  Refuses on
+    non-Linux and while a mutation is in progress.  Exit 0 applied, 1
+    no-pending/failed, 2 not-supported-on-platform, 4 busy.
+    """
+    layout = default_runtime_layout()
+    result = apply_pending_update(layout=layout, runtime_root=layout.root)
+
+    if result.status is ApplyStatus.APPLIED:
+        print(result.message, file=stdout)
+        return 0
+    if result.status is ApplyStatus.NOT_SUPPORTED_ON_PLATFORM:
+        print(result.message, file=sys.stderr)
+        return SELF_UPDATE_NOT_SUPPORTED
+    if result.status is ApplyStatus.BUSY:
+        print(result.message, file=sys.stderr)
+        return BUSY_EXIT
+    print(result.message, file=sys.stderr)
+    return 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
