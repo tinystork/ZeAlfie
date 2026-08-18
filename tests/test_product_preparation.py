@@ -1884,7 +1884,7 @@ def test_d4e1_success_orchestration_calls_prepare_then_install_prepared(
 
     def _fake_install_prepared(prepared_artifacts, *,
                                dependency_wheelhouse=None,
-                               probe_distribution=None):
+                               probe_distribution=None, accelerated_acquirer=None):
         call_order.append("install_prepared")
         captured_install_args.append({
             "count": len(prepared_artifacts),
@@ -1976,7 +1976,7 @@ def test_d4e2_prepared_install_receives_exact_ppa_from_preparation(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None: (
+               probe_distribution=None, accelerated_acquirer=None: (
             received_artifacts.append(prepared_artifacts)
             or DeploymentResult(success=True, active_slot_id="rt-x")
         ),
@@ -2060,7 +2060,7 @@ def test_d4e3_dependency_wheelhouse_and_probe_passed_through(
                         lambda product_id, *, resolver, fetcher, work_root: fake_ppa)
 
     def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None,
-                      probe_distribution=None):
+                      probe_distribution=None, accelerated_acquirer=None):
         captured_kwargs["dependency_wheelhouse"] = dependency_wheelhouse
         captured_kwargs["probe_distribution"] = probe_distribution
         return DeploymentResult(success=True, active_slot_id="rt-ok")
@@ -2513,7 +2513,7 @@ def test_d4e9_apply_failure_returned_exactly_no_selection_mutation(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None: fail_result,
+               probe_distribution=None, accelerated_acquirer=None: fail_result,
     )
 
     original_content = sel_path.read_text()
@@ -2599,7 +2599,7 @@ def test_d4e10_no_direct_apply_or_transaction_calls(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None: DeploymentResult(
+               probe_distribution=None, accelerated_acquirer=None: DeploymentResult(
                    success=True, active_slot_id="rt-ok",
                ),
     )
@@ -2668,7 +2668,7 @@ def test_d4e10_no_direct_probe_or_pip_calls(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None: DeploymentResult(
+               probe_distribution=None, accelerated_acquirer=None: DeploymentResult(
                    success=True, active_slot_id="rt-ok",
                ),
     )
@@ -2811,7 +2811,7 @@ def test_d4e12_end_to_end_real_prepare_fake_install(
     captured: list = []
 
     def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None,
-                      probe_distribution=None):
+                      probe_distribution=None, accelerated_acquirer=None):
         captured.append(prepared_artifacts)
         return DeploymentResult(success=True, active_slot_id="rt-final")
 
@@ -2967,7 +2967,7 @@ def test_d4e14_install_product_does_not_bootstrap_legacy_selection(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None: DeploymentResult(
+               probe_distribution=None, accelerated_acquirer=None: DeploymentResult(
                    success=True, active_slot_id="rt-ok",
                ),
     )

@@ -277,7 +277,7 @@ def test_a_install_first_product_mono(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-1")
         ),
@@ -330,7 +330,7 @@ def test_b_install_second_product_keeps_first_exact_sha(tmp_path, monkeypatch) -
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-2")
         ),
@@ -386,7 +386,7 @@ def test_c_install_third_product_generic_full_state(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-3")
         ),
@@ -434,7 +434,7 @@ def test_combined_wheelhouse_single_staging(tmp_path, monkeypatch, witness_wheel
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: DeploymentResult(
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: DeploymentResult(
                    success=True, active_slot_id="rt-4",
                ),
     )
@@ -581,7 +581,7 @@ def test_f_keep_does_not_follow_mutable_ref(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: DeploymentResult(
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: DeploymentResult(
                    success=True, active_slot_id="rt-5",
                ),
     )
@@ -640,7 +640,7 @@ def test_g_update_target_only(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-6")
         ),
@@ -740,7 +740,7 @@ def test_p_failed_candidate_leaves_active_untouched(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: DeploymentResult(
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: DeploymentResult(
                    success=False, reason="simulated apply failure",
                ),
     )
@@ -867,7 +867,7 @@ def test_c1_a_first_install_empty_provenance_empty_selection_succeeds(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None, accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-a")
         ),

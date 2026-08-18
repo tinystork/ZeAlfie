@@ -251,7 +251,7 @@ def test_c1_success_acquisition_wheelhouse_passed_to_plan_apply(
 
     def _fake_install_prepared(prepared_artifacts, *,
                                dependency_wheelhouse=None,
-                               probe_distribution=None):
+                               probe_distribution=None, accelerated_acquirer=None):
         install_calls.append({
             "prepared_artifacts": prepared_artifacts,
             "dependency_wheelhouse": dependency_wheelhouse,
@@ -572,7 +572,7 @@ def test_c5_success_staging_cleaned_selection_persisted(
 
     fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-success1")
 
-    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None, accelerated_acquirer=None):
         store.select(ppa.product_id, catalog=catalog)
         return fake_deploy_result
 
@@ -647,7 +647,7 @@ def test_c6_explicit_wheelhouse_bypasses_acquirer(
 
     fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-explicit")
 
-    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None, accelerated_acquirer=None):
         captured_wheelhouse.append(dependency_wheelhouse)
         store.select(ppa.product_id, catalog=catalog)
         return fake_deploy_result
@@ -740,7 +740,7 @@ def test_c7_required_extras_passed_to_acquisition_request(
 
     fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-gui")
 
-    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None, accelerated_acquirer=None):
         store.select(ppa.product_id, catalog=catalog)
         return fake_deploy_result
 
@@ -1022,7 +1022,7 @@ def test_c12_staging_under_work_root_private_and_cleaned(
 
     fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-staging")
 
-    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None, accelerated_acquirer=None):
         store.select(ppa.product_id, catalog=catalog)
         return fake_deploy_result
 
@@ -1199,7 +1199,7 @@ def test_c14_wheelhouse_present_and_contains_content_during_apply(
 
     fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-c14")
 
-    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None, accelerated_acquirer=None):
         # Snapshot wheelhouse state while it should still exist
         wh = Path(dependency_wheelhouse) if dependency_wheelhouse else None
         if wh:
@@ -1281,7 +1281,7 @@ def test_c15_two_sequential_acquires_use_different_staging_dirs(
 
     fake_deploy_result = DeploymentResult(success=True, active_slot_id="rt-c15")
 
-    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None):
+    def _fake_install(prepared_artifacts, *, dependency_wheelhouse=None, probe_distribution=None, accelerated_acquirer=None):
         store.select(ppa.product_id, catalog=catalog)
         return fake_deploy_result
 
