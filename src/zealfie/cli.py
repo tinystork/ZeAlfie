@@ -1385,13 +1385,18 @@ def _handle_self_update_apply(args, *, stdout: TextIO) -> int:
     """Handle ``zealfie self-update apply`` - run the standalone activator.
 
     Applies only what was previously staged (never auto-stages).  Refuses on
-    non-Linux and while a mutation is in progress.  Exit 0 applied, 1
+    non-Linux/non-Windows and while a mutation is in progress.  On Windows
+    the apply is handed off to a detached helper that finishes the update
+    after this process exits.  Exit 0 applied/handoff-started, 1
     no-pending/failed, 2 not-supported-on-platform, 4 busy.
     """
     layout = default_runtime_layout()
     result = apply_pending_update(layout=layout, runtime_root=layout.root)
 
     if result.status is ApplyStatus.APPLIED:
+        print(result.message, file=stdout)
+        return 0
+    if result.status is ApplyStatus.HANDOFF_STARTED:
         print(result.message, file=stdout)
         return 0
     if result.status is ApplyStatus.NOT_SUPPORTED_ON_PLATFORM:

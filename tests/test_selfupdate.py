@@ -380,6 +380,9 @@ def test_apply_success_clears_marker(monkeypatch, tmp_path) -> None:
         return _Proc(0)
 
     monkeypatch.setattr(activator_mod, "_run_pip_install", _fake_pip)
+    # The freshly-installed version is verified to equal the target before
+    # the marker is cleared (ZA-M1-4.1).  Mock the fresh-subprocess check.
+    monkeypatch.setattr(activator_mod, "_verify_installed_version", lambda tv: None)
     result = apply_pending_update(
         layout=layout, runtime_root=tmp_path / "rtroot"
     )
@@ -785,3 +788,377 @@ def test_cli_self_update_requires_subcommand(monkeypatch) -> None:
         assert "requires a subcommand" in err.getvalue()
     finally:
         sys.stderr = backup
+
+
+# ---------------------------------------------------------------------------
+# ZA-M1-4.1: verified-replace core, Windows handoff, helper, no-secret
+# ---------------------------------------------------------------------------
+
+
+def test_apply_missing_wheel_fails_closed(monkeypatch, tmp_path) -> None:
+    """Fail closed when the staged wheel is absent: no install, marker kept."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _pending, wheel = _write_valid_marker(layout, tmp_path)
+    wheel.unlink()
+
+    pip_called: list[Path] = []
+    monkeypatch.setattr(
+        activator_mod,
+        "_run_pip_install",
+        lambda wp: (pip_called.append(Path(wp)) or _Proc(0)),
+    )
+    result = apply_pending_update(
+        layout=layout, runtime_root=tmp_path / "rtroot"
+    )
+    assert result.status is ApplyStatus.FAILED
+    assert "missing" in result.message
+    assert pip_called == []
+    assert pending_marker_path(layout).exists()
+
+
+def test_verify_installed_version_returns_none_on_match(monkeypatch) -> None:
+    class _P:
+        returncode = 0
+        stdout = "0.0.7\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        activator_mod.subprocess, "run", lambda argv, **kw: _P()
+    )
+    assert activator_mod._verify_installed_version("0.0.7") is None
+
+
+def test_verify_installed_version_returns_failed_on_mismatch(monkeypatch) -> None:
+    class _P:
+        returncode = 0
+        stdout = "0.0.6\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        activator_mod.subprocess, "run", lambda argv, **kw: _P()
+    )
+    result = activator_mod._verify_installed_version("0.0.7")
+    assert result is not None
+    assert result.status is ApplyStatus.FAILED
+    assert "does not match" in result.message
+
+
+def test_verify_installed_version_returns_failed_on_subprocess_error(
+    monkeypatch,
+) -> None:
+    class _P:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(
+        activator_mod.subprocess, "run", lambda argv, **kw: _P()
+    )
+    result = activator_mod._verify_installed_version("0.0.7")
+    assert result.status is ApplyStatus.FAILED
+    assert "cannot read the installed ZeAlfie version" in result.message
+
+
+def test_apply_keeps_marker_when_version_verification_fails(
+    monkeypatch, tmp_path
+) -> None:
+    """A version mismatch after install is fail-closed: marker NOT cleared."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_valid_marker(layout, tmp_path)
+
+    monkeypatch.setattr(activator_mod, "_run_pip_install", lambda wp: _Proc(0))
+    monkeypatch.setattr(
+        activator_mod,
+        "_verify_installed_version",
+        lambda tv: activator_mod.SelfUpdateApplyResult(
+            ApplyStatus.FAILED,
+            "version verification failed: installed version '0.0.6' does "
+            "not match the staged target '0.0.7'",
+        ),
+    )
+    result = apply_pending_update(
+        layout=layout, runtime_root=tmp_path / "rtroot"
+    )
+    assert result.status is ApplyStatus.FAILED
+    assert "version verification failed" in result.message
+    assert pending_marker_path(layout).exists()
+
+
+def test_apply_verified_wheel_busy_when_lease_held(monkeypatch, tmp_path) -> None:
+    """The helper core refuses (BUSY) when the mutation lease is held."""
+    from zealfie.runtime.mutation_lock import RuntimeMutationBusyError
+
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    pending, wheel = _write_valid_marker(layout, tmp_path)
+
+    class _BusyLock:
+        def __init__(self, root):
+            pass
+
+        def acquire(self, operation):
+            raise RuntimeMutationBusyError(lock_path=Path("/whatever"))
+
+    monkeypatch.setattr(activator_mod, "RuntimeMutationLock", _BusyLock)
+    pip_called: list[Path] = []
+    monkeypatch.setattr(
+        activator_mod,
+        "_run_pip_install",
+        lambda wp: (pip_called.append(Path(wp)) or _Proc(0)),
+    )
+
+    result = activator_mod._apply_verified_wheel(
+        pending, wheel, tmp_path / "rtroot", layout
+    )
+    assert result.status is ApplyStatus.BUSY
+    assert pip_called == []
+    assert pending_marker_path(layout).exists()
+
+
+def test_run_pip_install_uses_list_argv_no_shell(monkeypatch, tmp_path) -> None:
+    """pip install is invoked with list argv (no shell); space path intact."""
+    import sys
+
+    wheel = tmp_path / "dir with spaces" / "zealfie wheel.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.write_bytes(b"x")
+    captured: dict = {}
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return _Proc(0)
+
+    monkeypatch.setattr(activator_mod.subprocess, "run", _fake_run)
+    activator_mod._run_pip_install(wheel)
+
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == sys.executable
+    assert argv[1:6] == ["-m", "pip", "install", "--no-deps", "--no-index"]
+    assert len(argv) == 7
+    # The space-containing path is a single argv element.
+    assert argv[6] == str(wheel)
+    assert " " in argv[6]
+    # No shell anywhere.
+    assert "shell" not in captured["kwargs"]
+    assert captured["kwargs"].get("shell") is not True
+
+
+def _assert_no_secret(msg: str) -> None:
+    assert "GITHUB_TOKEN" not in msg
+    assert "ghp_" not in msg
+    assert "user:pass" not in msg
+    assert "proxy=" not in msg.lower()
+
+
+def test_no_secret_in_diagnostics(monkeypatch, tmp_path) -> None:
+    """Apply/handoff/helper messages never leak GITHUB_TOKEN / proxy creds."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_valid_marker(layout, tmp_path)
+
+    # Handoff message.
+    monkeypatch.setattr(activator_mod.sys, "platform", "win32")
+    monkeypatch.setattr(
+        activator_mod, "spawn_windows_helper", lambda **kwargs: True
+    )
+    result = apply_pending_update(
+        layout=layout, runtime_root=tmp_path / "rtroot"
+    )
+    assert result.status is ApplyStatus.HANDOFF_STARTED
+    _assert_no_secret(result.message)
+
+    # Spawn-failure message.
+    monkeypatch.setattr(
+        activator_mod, "spawn_windows_helper", lambda **kwargs: False
+    )
+    result = apply_pending_update(
+        layout=layout, runtime_root=tmp_path / "rtroot"
+    )
+    assert result.status is ApplyStatus.FAILED
+    _assert_no_secret(result.message)
+
+    # Version-verification mismatch message (helper/apply diagnostic).
+    monkeypatch.setattr(activator_mod.sys, "platform", "linux")
+    mismatch = activator_mod.SelfUpdateApplyResult(
+        ApplyStatus.FAILED,
+        "version verification failed: installed version '0.0.6' does not "
+        "match the staged target '0.0.7'",
+    )
+    _assert_no_secret(mismatch.message)
+
+
+def test_apply_win32_handoff_spawns_helper(monkeypatch, tmp_path) -> None:
+    """On Windows the activator hands off instead of pip-installing."""
+    import os
+
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_valid_marker(layout, tmp_path)
+
+    spawn_calls: list[tuple] = []
+    pip_called: list[Path] = []
+
+    def _fake_spawn(*, runtime_root, caller_pid, python=None):
+        spawn_calls.append((runtime_root, caller_pid))
+        return True
+
+    monkeypatch.setattr(activator_mod.sys, "platform", "win32")
+    monkeypatch.setattr(activator_mod, "spawn_windows_helper", _fake_spawn)
+    monkeypatch.setattr(
+        activator_mod,
+        "_run_pip_install",
+        lambda wp: (pip_called.append(Path(wp)) or _Proc(0)),
+    )
+
+    result = apply_pending_update(
+        layout=layout, runtime_root=tmp_path / "rtroot"
+    )
+    assert result.status is ApplyStatus.HANDOFF_STARTED
+    assert "handoff started" in result.message
+    assert spawn_calls and spawn_calls[0][0] == Path(tmp_path / "rtroot")
+    assert spawn_calls[0][1] == os.getpid()
+    # The caller did NOT pip-install in-process.
+    assert pip_called == []
+    # The marker is preserved; the helper clears it after the caller exits.
+    assert pending_marker_path(layout).exists()
+
+
+def test_apply_win32_spawn_failure_returns_failed(monkeypatch, tmp_path) -> None:
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_valid_marker(layout, tmp_path)
+
+    monkeypatch.setattr(activator_mod.sys, "platform", "win32")
+    monkeypatch.setattr(
+        activator_mod, "spawn_windows_helper", lambda **kwargs: False
+    )
+    result = apply_pending_update(
+        layout=layout, runtime_root=tmp_path / "rtroot"
+    )
+    assert result.status is ApplyStatus.FAILED
+    assert "failed to spawn" in result.message
+    assert pending_marker_path(layout).exists()
+
+
+def test_helper_waits_for_caller_before_install(monkeypatch, tmp_path) -> None:
+    """The helper waits for the caller to exit BEFORE applying the update."""
+    import zealfie.selfupdate.windows_helper as wh
+
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_valid_marker(layout, tmp_path)
+
+    events: list[str] = []
+
+    def _wait(*args, **kwargs):
+        events.append("wait")
+
+    def _fake_apply(pending, wheel_path, root, layout_):
+        events.append("apply")
+        return activator_mod.SelfUpdateApplyResult(
+            ApplyStatus.APPLIED, "ZeAlfie updated to 0.0.7"
+        )
+
+    monkeypatch.setattr(wh, "wait_for_caller_exit", _wait)
+    monkeypatch.setattr(wh, "_apply_verified_wheel", _fake_apply)
+    monkeypatch.setattr(wh, "_installed_zealfie_version", lambda: "0.0.6")
+
+    code = wh.main(
+        ["--caller-pid", "12345", "--runtime-root", str(tmp_path / "rt")]
+    )
+    assert events == ["wait", "apply"]
+    assert code == 0
+
+
+def test_wait_for_caller_exit_uses_wait_impl() -> None:
+    import zealfie.selfupdate.windows_helper as wh
+
+    seen: list[tuple] = []
+    wh.wait_for_caller_exit(
+        42, timeout_s=1.5, _wait_impl=lambda pid, ts: seen.append((pid, ts))
+    )
+    assert seen == [(42, 1.5)]
+
+
+def test_wait_for_caller_exit_posix_returns_on_missing_pid() -> None:
+    import zealfie.selfupdate.windows_helper as wh
+
+    # A very large pid cannot exist; polling must return without raising.
+    wh._wait_for_caller_exit_posix(999999999, 0.2)
+
+
+def test_spawn_windows_helper_list_argv_no_shell(monkeypatch, tmp_path) -> None:
+    import zealfie.selfupdate.handoff as handoff
+
+    captured: dict = {}
+
+    def _fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+
+        class _P:
+            pass
+
+        return _P()
+
+    monkeypatch.setattr(handoff.subprocess, "Popen", _fake_popen)
+    root = tmp_path / "runtime root with spaces"
+    ok = handoff.spawn_windows_helper(
+        runtime_root=root,
+        caller_pid=777,
+        python="/path/to/python with spaces",
+    )
+    assert ok is True
+
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == "/path/to/python with spaces"
+    assert argv[1:3] == ["-m", "zealfie.selfupdate.windows_helper"]
+    assert argv[3:5] == ["--caller-pid", "777"]
+    assert argv[5:] == ["--runtime-root", str(root)]
+    # Space-containing path is a single argv element.
+    assert argv.index(str(root)) == 6
+    assert " " in argv[6]
+
+    kwargs = captured["kwargs"]
+    assert "shell" not in kwargs
+    assert kwargs.get("shell") is not True
+    # POSIX branch: detached via start_new_session, no creationflags.
+    assert kwargs.get("start_new_session") is True
+    assert "creationflags" not in kwargs
+
+
+def test_spawn_windows_helper_win32_creationflags_guarded(
+    monkeypatch, tmp_path
+) -> None:
+    import zealfie.selfupdate.handoff as handoff
+
+    captured: dict = {}
+
+    def _fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+
+        class _P:
+            pass
+
+        return _P()
+
+    monkeypatch.setattr(handoff.sys, "platform", "win32")
+    monkeypatch.setattr(handoff.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        handoff.subprocess, "DETACHED_PROCESS", 0x00000008, raising=False
+    )
+    monkeypatch.setattr(
+        handoff.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False
+    )
+    monkeypatch.setattr(
+        handoff.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+    )
+
+    ok = handoff.spawn_windows_helper(runtime_root=tmp_path, caller_pid=1)
+    assert ok is True
+
+    kwargs = captured["kwargs"]
+    assert kwargs.get("creationflags") == (
+        0x00000008 | 0x00000200 | 0x08000000
+    )
+    assert kwargs.get("close_fds") is True
+    assert "shell" not in kwargs

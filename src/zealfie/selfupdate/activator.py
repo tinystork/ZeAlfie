@@ -1,4 +1,4 @@
-"""ZeAlfie self-update activator (ZA-M1-4 LOT D §E).
+"""ZeAlfie self-update activator (ZA-M1-4 LOT D §E; ZA-M1-4.1 Windows handoff).
 
 The *standalone* path that actually replaces the installed ZeAlfie wheel.
 The running GUI/CLI process NEVER calls this — it is invoked as a separate
@@ -10,18 +10,26 @@ Fail-closed behaviour:
 * re-verifies the staged wheel byte-for-byte against the recorded SHA-256 +
   size (never trusts the marker alone);
 * refuses while another ZeAlfie mutation holds the runtime mutation lease;
-* performs the replacement only on Linux, via a list-argv
+* on Linux performs the replacement in-process via a list-argv
   ``python -m pip install --no-deps --no-index <wheel>`` subprocess (no
-  shell).  Windows/macOS activators are a documented follow-up and return
-  ``NOT_SUPPORTED_ON_PLATFORM`` honestly;
-* clears the pending marker only on success; on failure leaves it in place
-  (a failed pip install of a pure-Python wheel leaves the current install
-  usable).
+  shell);
+* on Windows hands off to a detached helper process
+  (:mod:`zealfie.selfupdate.handoff` → :mod:`zealfie.selfupdate.windows_helper`)
+  that waits for this process to exit before replacing — the running process
+  never installs over its own environment;
+* macOS and other platforms return ``NOT_SUPPORTED_ON_PLATFORM`` honestly;
+* after a successful pip install, verifies the freshly-installed ZeAlfie
+  version equals the staged target (a fresh subprocess, no shell) before
+  clearing the pending marker;
+* clears the pending marker only on verified success; on failure leaves it
+  in place (a failed pip install of a pure-Python wheel leaves the current
+  install usable).
 """
 
 from __future__ import annotations
 
 import importlib.metadata
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -38,6 +46,7 @@ from zealfie.runtime.mutation_lock import (
     RuntimeMutationLockError,
 )
 
+from .handoff import spawn_windows_helper
 from .state import (
     PendingMarkerError,
     PendingSelfUpdate,
@@ -60,6 +69,7 @@ class ApplyStatus(StrEnum):
     NOT_SUPPORTED_ON_PLATFORM = "NOT_SUPPORTED_ON_PLATFORM"
     REFUSE_DOWNGRADE = "REFUSE_DOWNGRADE"
     BUSY = "BUSY"
+    HANDOFF_STARTED = "HANDOFF_STARTED"
     FAILED = "FAILED"
 
 
@@ -109,6 +119,80 @@ def apply_pending_update(
         if installed_version is not None
         else _installed_zealfie_version()
     )
+    refusal = _refuse_downgrade(pending, installed)
+    if refusal is not None:
+        return refusal
+
+    root = Path(runtime_root) if runtime_root is not None else layout.root
+
+    if sys.platform != "linux" and sys.platform != "win32":
+        return SelfUpdateApplyResult(
+            ApplyStatus.NOT_SUPPORTED_ON_PLATFORM,
+            "self-update replacement is not supported on this platform; "
+            "Linux applies in-process and Windows hands off to a detached "
+            "helper",
+        )
+
+    # Early refusal while another ZeAlfie mutation is in progress (MINOR-4
+    # check-then-act serialization): a held lease refuses before any work.
+    busy = RuntimeMutationLock(root).probe_busy()
+    if busy is not None:
+        operation = busy.get("operation")
+        pid = busy.get("pid")
+        return SelfUpdateApplyResult(
+            ApplyStatus.BUSY,
+            "refusing to apply self-update: another ZeAlfie mutation is in "
+            f"progress (operation={operation}, pid={pid})",
+        )
+
+    if sys.platform == "win32":
+        # External handoff (ZA-M1-4.1): the running process never installs
+        # over its own environment.  Spawn a detached helper that waits for
+        # this process to exit, then applies the verified update.
+        if spawn_windows_helper(runtime_root=root, caller_pid=os.getpid()):
+            return SelfUpdateApplyResult(
+                ApplyStatus.HANDOFF_STARTED,
+                "self-update handoff started; ZeAlfie will finish the update "
+                "after this process exits",
+            )
+        return SelfUpdateApplyResult(
+            ApplyStatus.FAILED,
+            "failed to spawn the Windows self-update helper; the pending "
+            "self-update was not applied",
+        )
+
+    # Linux: in-process verified replacement.
+    wheel_path = Path(pending.wheel_path)
+    return _apply_verified_wheel(pending, wheel_path, root, layout)
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _installed_zealfie_version() -> str:
+    """Detect the installed ZeAlfie version (fallback ``"0.0.0"``).
+
+    Isolated so tests can monkeypatch version detection without touching
+    ``importlib.metadata``.
+    """
+    try:
+        return importlib.metadata.version("zealfie")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0"
+
+
+def _refuse_downgrade(
+    pending: PendingSelfUpdate, installed: str
+) -> SelfUpdateApplyResult | None:
+    """Return a REFUSE_DOWNGRADE result when the target is a downgrade.
+
+    Returns ``None`` to signal "proceed".  A stale marker must never
+    silently downgrade the installed ZeAlfie; unparseable versions fail
+    closed (refuse, never proceed).  Shared by the Linux in-process path
+    and the Windows helper.
+    """
     try:
         target_v = Version(pending.target_version)
         installed_v = Version(installed)
@@ -127,26 +211,21 @@ def apply_pending_update(
             f"version {installed}; a stale marker must never silently "
             "downgrade",
         )
+    return None
 
-    if sys.platform != "linux":
-        return SelfUpdateApplyResult(
-            ApplyStatus.NOT_SUPPORTED_ON_PLATFORM,
-            "self-update replacement is only supported on Linux; "
-            "Windows/macOS activators are not yet implemented",
-        )
 
-    root = runtime_root if runtime_root is not None else layout.root
-    busy = RuntimeMutationLock(root).probe_busy()
-    if busy is not None:
-        operation = busy.get("operation")
-        pid = busy.get("pid")
-        return SelfUpdateApplyResult(
-            ApplyStatus.BUSY,
-            "refusing to apply self-update: another ZeAlfie mutation is in "
-            f"progress (operation={operation}, pid={pid})",
-        )
+def _apply_verified_wheel(
+    pending: PendingSelfUpdate,
+    wheel_path: Path,
+    root: Path,
+    layout: RuntimeLayout,
+) -> SelfUpdateApplyResult:
+    """Re-verify, lock, install, and confirm a staged wheel (shared core).
 
-    wheel_path = Path(pending.wheel_path)
+    Used by both the Linux in-process path and the Windows helper.  The
+    pending marker is cleared only after the installed version is verified
+    to equal ``pending.target_version``.
+    """
     try:
         _verify_staged_wheel(pending, wheel_path)
     except SelfUpdateApplyError as exc:
@@ -182,27 +261,53 @@ def apply_pending_update(
             "the current install was left untouched",
         )
 
+    # Verify the freshly-installed version equals the staged target using a
+    # FRESH subprocess (so the result reflects the on-disk install, not the
+    # currently-imported module).  On mismatch/unparseable, fail closed and
+    # DO NOT clear the marker.
+    verification = _verify_installed_version(pending.target_version)
+    if verification is not None:
+        return verification
+
     clear_pending_marker(layout)
     return SelfUpdateApplyResult(
         ApplyStatus.APPLIED, f"ZeAlfie updated to {pending.target_version}"
     )
 
 
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
+def _verify_installed_version(target_version: str) -> SelfUpdateApplyResult | None:
+    """Verify the installed ZeAlfie version equals *target_version*.
 
-
-def _installed_zealfie_version() -> str:
-    """Detect the installed ZeAlfie version (fallback ``"0.0.0"``).
-
-    Isolated so tests can monkeypatch version detection without touching
-    ``importlib.metadata``.
+    Runs a FRESH subprocess (list argv, no shell).  Returns ``None`` on
+    success; a FAILED result on mismatch/unparseable output (fail closed).
     """
-    try:
-        return importlib.metadata.version("zealfie")
-    except importlib.metadata.PackageNotFoundError:
-        return "0.0.0"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib.metadata; print(importlib.metadata.version('zealfie'))",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        return SelfUpdateApplyResult(
+            ApplyStatus.FAILED,
+            "version verification failed: cannot read the installed ZeAlfie "
+            f"version (exit {proc.returncode}){detail}; the pending marker "
+            "was left in place",
+        )
+    parsed = (proc.stdout or "").strip()
+    if parsed != target_version:
+        return SelfUpdateApplyResult(
+            ApplyStatus.FAILED,
+            "version verification failed: installed version "
+            f"{parsed!r} does not match the staged target "
+            f"{target_version!r}; the pending marker was left in place",
+        )
+    return None
 
 
 def _verify_staged_wheel(pending: PendingSelfUpdate, wheel_path: Path) -> None:
