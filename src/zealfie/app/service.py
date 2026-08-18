@@ -174,6 +174,8 @@ from zealfie.runtime.installed_lock import (
     installed_lock_from_runtime_lock,
 )
 from zealfie.runtime.planning import (
+    ORIGIN_KEEP,
+    ORIGIN_UPDATE,
     DeploymentPlan,
     DesiredComponent,
     DesiredRuntimeState,
@@ -453,6 +455,12 @@ class PreparedProductArtifact:
     wheel_path: Path
     verified_artifact: VerifiedArtifact
     policy: ProductPolicy | None = None
+    # Service-level intent that produced this artifact (ZA-M1-3A.3 LOT E):
+    # "keep" (preserved at exact installed identity), "update" (explicit
+    # update target) or "install" (fresh install, the default).  Drives
+    # honest progress wording only - never resolution or transaction
+    # behaviour.
+    origin: str = "install"
 
 
 # ---------------------------------------------------------------------------
@@ -1684,7 +1692,13 @@ class ZeAlfieService:
         must be part of the base state.
         """
         if full_state_provider is not None:
-            prepared = list(full_state_provider())
+            # Synthetic/hermetic callers supply already-prepared local
+            # artifacts; they carry exact KEEP semantics (never
+            # re-resolved), so mark them for honest progress wording.
+            prepared = [
+                replace(pa, origin=ORIGIN_KEEP)
+                for pa in full_state_provider()
+            ]
         else:
             active = self.active_provenance()
             if not active:
@@ -2120,6 +2134,11 @@ class ZeAlfieService:
         A fresh ``wheel_sha256`` from a rebuild is recorded downstream by
         the existing provenance persistence, so an artifact rebuilt from
         the same source SHA is always described honestly.
+
+        ZA-M1-3A.3 LOT E (update-UX): the returned artifact is marked
+        ``origin="keep"`` so downstream progress wording can distinguish a
+        preserved product from a fresh install; a KEEP product is never
+        labelled "Installing" or "Updating".
         """
         cache = self._artifact_cache
         if cache is not None:
@@ -2157,6 +2176,7 @@ class ZeAlfieService:
                     return replace(
                         prepared,
                         policy=_policy_from_provenance(provenance),
+                        origin=ORIGIN_KEEP,
                     )
 
         prepared = self.prepare_product_artifact_at_commit(
@@ -2178,7 +2198,11 @@ class ZeAlfieService:
             )
         # Propagate known discovery-policy metadata forward (no re-resolution).
         # A pre-Phase-4 provenance record yields None → policy-unknown.
-        return replace(prepared, policy=_policy_from_provenance(provenance))
+        return replace(
+            prepared,
+            policy=_policy_from_provenance(provenance),
+            origin=ORIGIN_KEEP,
+        )
 
     def _prepare_target_product_artifact(
         self,
@@ -3023,6 +3047,18 @@ class ZeAlfieService:
             self._reconstruct_full_desired_product_ids(product_id)
         )
 
+        # --- 0b. Update-vs-install semantics (ZA-M1-3A.3 LOT E) ----------
+        # A target that already carries active provenance is an UPDATE (its
+        # old version is authoritative); a target without provenance is a
+        # fresh INSTALL.  This drives the origin marker and the honest
+        # "Updating <old> -> <new>" message - it never changes resolution,
+        # planning, or transaction behaviour.
+        old_version: str | None = (
+            active_provenance[product_id].version
+            if product_id in active_provenance
+            else None
+        )
+
         # --- 1. Determine whether to auto-acquire dependencies ----------
         auto_acquire = dependency_wheelhouse is None
         auto_staging: Path | None = None
@@ -3047,6 +3083,8 @@ class ZeAlfieService:
                         work_root=work_root,
                         progress_callback=progress_callback,
                     )
+                    if old_version is not None:
+                        pa = replace(pa, origin=ORIGIN_UPDATE)
                 else:
                     pa = self._prepare_keep_product_artifact(
                         pid,
@@ -4533,13 +4571,16 @@ def _desired_state_from_prepared_artifacts(
     Each :class:`DesiredComponent` is built from the
     :class:`VerifiedArtifact` inside the :class:`PreparedProductArtifact`.
     The artifact proof (path, size, SHA256, identity) is preserved — no
-    re-verification occurs at this stage.
+    re-verification occurs at this stage.  The prepared artifact's
+    service-level *origin* (keep/update/install) is carried onto the
+    desired component for honest progress wording (ZA-M1-3A.3 LOT E).
     """
     components = tuple(
         DesiredComponent(
             component_id=pa.verified_artifact.component_id,
             version=pa.verified_artifact.version,
             artifact=pa.verified_artifact,
+            origin=pa.origin,
         )
         for pa in prepared_artifacts
     )

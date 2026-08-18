@@ -70,6 +70,31 @@ class DeploymentReasonCode(StrEnum):
 
 
 # ---------------------------------------------------------------------------
+# Component origin (update-UX semantics - ZA-M1-3A.3 LOT E)
+# ---------------------------------------------------------------------------
+#
+# Each DesiredComponent is materialized into the candidate runtime
+# regardless of the KEEP/INSTALL action computed by the probe, so the
+# plan alone cannot tell a preserved product apart from a fresh install.
+# ``origin`` records the SERVICE-level intent that produced the component:
+#
+# * ``keep``    - the product is preserved at its exact installed identity
+#   (materialized from active provenance, never re-resolved);
+# * ``update``  - the product is the explicit target of an update
+#   (installed provenance exists and a newer source was prepared);
+# * ``install`` - a fresh install (no previous installed identity).
+#
+# Consumers (the deployment engine, progress emission) use this marker to
+# emit honest user-facing wording: a preserved product is never labelled
+# "Installing" or "Updating".
+
+ORIGIN_KEEP = "keep"
+ORIGIN_INSTALL = "install"
+ORIGIN_UPDATE = "update"
+_VALID_ORIGINS = frozenset({ORIGIN_KEEP, ORIGIN_INSTALL, ORIGIN_UPDATE})
+
+
+# ---------------------------------------------------------------------------
 # Desired runtime state
 # ---------------------------------------------------------------------------
 
@@ -80,11 +105,19 @@ class DesiredComponent:
 
     The *artifact* field carries a :class:`VerifiedArtifact` as a
     point-in-time proof; a future application step must revalidate it.
+
+    *origin* (optional, default ``"install"``) records the service-level
+    intent that produced this component - one of ``"keep"``, ``"install"``
+    or ``"update"`` (see the module-level ``ORIGIN_*`` constants).  It is
+    observational metadata for honest progress wording only: it never
+    changes planning, actions, or transaction behaviour, and producers
+    may omit it (backward-compatible ``"install"`` default).
     """
 
     component_id: str
     version: str
     artifact: VerifiedArtifact
+    origin: str = ORIGIN_INSTALL
 
     def __post_init__(self) -> None:
         if not self.component_id or not self.component_id.strip():
@@ -105,6 +138,11 @@ class DesiredComponent:
             raise ValueError(
                 f"version {self.version!r} does not match "
                 f"artifact.wheel_version {self.artifact.wheel_version!r}"
+            )
+        if self.origin not in _VALID_ORIGINS:
+            raise ValueError(
+                f"origin must be one of {sorted(_VALID_ORIGINS)}, "
+                f"got {self.origin!r}"
             )
 
 
