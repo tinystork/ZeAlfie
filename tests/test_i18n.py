@@ -234,3 +234,31 @@ def test_translate_product_description_never_raises():
     assert translate_product_description("", "") == ""
     assert translate_product_description("zesolver", "") == FR["product.description.zesolver"]
 
+
+# ---------------------------------------------------------------------------
+# 9 — Catalog <-> FR catalogue drift guard (M1-4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_descriptions_have_distinct_fr_translations():
+    """Every real catalog product has a distinct, non-empty FR description.
+
+    Guards against catalog drift: a newly-added product that lacks a
+    ``product.description.<id>`` FR key would otherwise silently fall back
+    to its English description when the UI is in French.
+    """
+    from zealfie.products.catalog import default_catalog
+
+    catalog = default_catalog()
+    assert len(catalog) > 0
+    for descriptor in catalog.list():
+        key = f"product.description.{descriptor.product_id}"
+        assert key in FR, (
+            f"missing FR description key {key!r} for product "
+            f"{descriptor.product_id!r}"
+        )
+        fr_value = FR[key]
+        assert fr_value and fr_value.strip(), f"empty FR description for {key!r}"
+        assert fr_value != descriptor.description, (
+            f"FR description for {key!r} equals the English catalog default"
+        )

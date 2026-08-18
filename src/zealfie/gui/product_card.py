@@ -182,14 +182,18 @@ class ProductCard(QFrame):
         layout.addWidget(name_label)
 
         # --- Description ---
+        # Word-wrapped and allowed to size to its full content height.  No
+        # fixed maximum height: the previous 40px cap silently clipped the
+        # ~21-33% longer French descriptions once they wrapped to 3 lines at
+        # narrower widths or larger fonts / high-DPI.  The card lives inside
+        # a scroll area, so a taller card is acceptable (no ellipsis or
+        # clipping is re-introduced).
         desc_text = translate_product_description(
             self._descriptor.product_id, self._descriptor.description or ""
         )
         desc_label = QLabel(desc_text if desc_text else "")
         desc_label.setWordWrap(True)
-        if desc_text:
-            desc_label.setMaximumHeight(40)
-        else:
+        if not desc_text:
             desc_label.setVisible(False)
         desc_label.setObjectName("descLabel")
         layout.addWidget(desc_label)

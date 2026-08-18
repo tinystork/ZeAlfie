@@ -1543,3 +1543,49 @@ class TestM141ProductDescriptionTranslation:
             card.deleteLater()
             qapp.processEvents()
 
+    def test_description_label_does_not_clip_fr_zesolver(self, qapp):
+        """FR zesolver (longest FR description) never clips at 480/580 px.
+
+        The old fixed 40px maximum height silently clipped the longer FR
+        text once it wrapped to 3 lines.  Simulate a larger font / high-DPI
+        (the exact trigger noted in the review) so the condition reproduces
+        deterministically on the offscreen CI platform, then assert the
+        rendered label is tall enough for its wrapped content at both
+        480px and 580px window widths.
+        """
+        from PySide6.QtWidgets import QLabel
+
+        from zealfie.i18n import FR, Language, set_language
+
+        set_language(Language.FR)
+        card = self._make_card(
+            "zesolver",
+            "Optical solver for high-resolution astrophotography — "
+            "plate solve, blind solve, and star field analysis.",
+        )
+        try:
+            label = card.findChild(QLabel, "descLabel")
+            assert label is not None
+            assert label.text() == FR["product.description.zesolver"]
+
+            # Force 3-line wrapping deterministically (larger font / high-DPI).
+            font = label.font()
+            font.setPointSize(font.pointSize() + 4)
+            label.setFont(font)
+
+            for width in (480, 580):
+                card.resize(width, card.sizeHint().height())
+                card.show()
+                qapp.processEvents()
+                needed = label.heightForWidth(label.width())
+                assert needed > 40, (
+                    "precondition failed: FR zesolver should wrap to 3+ lines"
+                )
+                assert label.height() >= needed, (
+                    f"description label clipped at width {width}: "
+                    f"height={label.height()}px < heightForWidth={needed}px"
+                )
+        finally:
+            card.close()
+            card.deleteLater()
+            qapp.processEvents()
