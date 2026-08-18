@@ -37,6 +37,7 @@ from zealfie.dependencies.pip_acquirer import (
     PipWheelhouseAcquirer,
 )
 from zealfie.releases.model import VerifiedArtifact
+from zealfie.runtime.artifact_cache import ArtifactCacheStore
 from zealfie.runtime.layout import RuntimeLayout
 from zealfie.runtime.manager import SharedRuntime
 from zealfie.runtime.model import (
@@ -174,9 +175,18 @@ def test_witness_install_product_real_acquirer_real_apply(
 
     original_acquire = acquirer.acquire
 
-    def _tracking_acquire(request, *, staging_dir=None, timeout_seconds=300):
-        result = original_acquire(request, staging_dir=staging_dir,
-                                  timeout_seconds=timeout_seconds)
+    def _tracking_acquire(
+        request, *, staging_dir=None, timeout_seconds=300,
+        cache: ArtifactCacheStore | None = None,
+        proven_requirements: tuple[tuple[str, str], ...] = (),
+    ):
+        result = original_acquire(
+            request,
+            staging_dir=staging_dir,
+            timeout_seconds=timeout_seconds,
+            cache=cache,
+            proven_requirements=proven_requirements,
+        )
         captured_staging.append(result.staging_wheelhouse)
         return result
 
@@ -310,9 +320,18 @@ def test_witness_staging_cleaned_after_service_returns(
 
     original_acquire = acquirer.acquire
 
-    def _tracking_acquire(request, *, staging_dir=None, timeout_seconds=300):
-        result = original_acquire(request, staging_dir=staging_dir,
-                                  timeout_seconds=timeout_seconds)
+    def _tracking_acquire(
+        request, *, staging_dir=None, timeout_seconds=300,
+        cache: ArtifactCacheStore | None = None,
+        proven_requirements: tuple[tuple[str, str], ...] = (),
+    ):
+        result = original_acquire(
+            request,
+            staging_dir=staging_dir,
+            timeout_seconds=timeout_seconds,
+            cache=cache,
+            proven_requirements=proven_requirements,
+        )
         captured_staging.append(result.staging_wheelhouse)
         return result
 
@@ -366,7 +385,11 @@ def test_witness_acquisition_failure_wraps_error_does_not_mutate_state(
     fake_staging.mkdir(parents=True, exist_ok=True)
 
     class _FailingAcquirer:
-        def acquire(self, request, *, staging_dir=None, timeout_seconds=300):
+        def acquire(
+            self, request, *, staging_dir=None, timeout_seconds=300,
+            cache: ArtifactCacheStore | None = None,
+            proven_requirements: tuple[tuple[str, str], ...] = (),
+        ):
             # A real acquirer could create a staging dir internally
             # before failing.  Place it under tmp_path so it is
             # cleaned by pytest.

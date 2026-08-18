@@ -38,6 +38,7 @@ from zealfie.dependencies.pip_acquirer import (
     PipWheelhouseAcquirer,
 )
 from zealfie.releases.model import VerifiedArtifact
+from zealfie.runtime.artifact_cache import ArtifactCacheStore
 from zealfie.runtime.layout import RuntimeLayout
 from zealfie.runtime.manager import SharedRuntime
 from zealfie.runtime.model import (
@@ -250,9 +251,18 @@ def test_deps_witness_install_product_offline_local_index(
 
     original_acquire = acquirer.acquire
 
-    def _tracking_acquire(request, *, staging_dir=None, timeout_seconds=300):
-        result = original_acquire(request, staging_dir=staging_dir,
-                                  timeout_seconds=timeout_seconds)
+    def _tracking_acquire(
+        request, *, staging_dir=None, timeout_seconds=300,
+        cache: ArtifactCacheStore | None = None,
+        proven_requirements: tuple[tuple[str, str], ...] = (),
+    ):
+        result = original_acquire(
+            request,
+            staging_dir=staging_dir,
+            timeout_seconds=timeout_seconds,
+            cache=cache,
+            proven_requirements=proven_requirements,
+        )
         captured_staging.append(result.staging_wheelhouse)
         return result
 
