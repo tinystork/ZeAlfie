@@ -184,6 +184,10 @@ from zealfie.runtime.planning import (
     build_deployment_plan,
 )
 from zealfie.runtime.probe import probe_runtime_distribution
+from zealfie.runtime.startup_health import (
+    StartupHealthResult,
+    confirm_and_record_startup_health,
+)
 from zealfie.host import (
     AccelerationRecommendation,
     GpuSetupIntent,
@@ -727,6 +731,31 @@ class ZeAlfieService:
             )
         for error in result.errors:
             logger.warning("artifact cache GC: %s", error)
+
+    # ------------------------------------------------------------------
+    # ZA-M1-4 LOT A: fresh-startup runtime health confirmation
+    # ------------------------------------------------------------------
+
+    def confirm_startup_runtime_health(self) -> StartupHealthResult | None:
+        """Confirm the persisted ACTIVE runtime health (ZA-M1-4 LOT A).
+
+        Runs the fresh-startup health checks and, when healthy, records the
+        startup-health confirmation (best-effort, atomic write).  Never
+        raises: any error is logged and ``None`` is returned.  Callers
+        (service bootstrap / GUI) invoke this explicitly -- it is NOT
+        called from ``__init__`` (to avoid surprising test doubles).
+        """
+        layout = getattr(self._runtime, "layout", None)
+        if layout is None:
+            return None
+        try:
+            return confirm_and_record_startup_health(layout.root)
+        except Exception:
+            logger.warning(
+                "startup runtime health confirmation failed (best-effort)",
+                exc_info=True,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # ZA-M1-3A.3 LOT C.2: proven dependency identities + acquisition

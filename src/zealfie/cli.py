@@ -64,6 +64,7 @@ from .runtime import (
     SharedRuntimeError,
     apply_gc_plan,
     build_gc_plan,
+    confirm_and_record_startup_health,
     default_runtime_layout,
     runtime_cache_gc,
 )
@@ -177,6 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_subs.add_parser(
         "gc",
         help="apply safe runtime garbage collection",
+    )
+    runtime_subs.add_parser(
+        "confirm-health",
+        help="confirm the ACTIVE runtime health after a fresh startup",
     )
     runtime_subs.add_parser(
         "gc-cache",
@@ -406,6 +411,9 @@ def _handle_runtime(args, *, stdout: TextIO) -> int:
     if args.runtime_command == "gc-cache":
         return _handle_runtime_gc_cache(args, stdout=stdout)
 
+    if args.runtime_command == "confirm-health":
+        return _handle_runtime_confirm_health(args, stdout=stdout)
+
     # No runtime subcommand given → show help.
     return 0
 
@@ -441,6 +449,37 @@ def _handle_runtime_gc_plan(args, *, stdout: TextIO) -> int:
         )
     print(_format_gc_plan(plan), file=stdout)
     return 0 if plan.status == GcStatus.READY else 1
+
+
+def _handle_runtime_confirm_health(args, *, stdout: TextIO) -> int:
+    """Handle ``zealfie runtime confirm-health`` (ZA-M1-4 LOT A).
+
+    Runs the fresh-startup health confirmation (read-only probes + best
+    effort recording) and prints an honest human-readable summary.  Exit
+    code 0 when healthy, 1 when unhealthy (or when the confirmation cannot
+    be performed).
+    """
+    layout = default_runtime_layout()
+    try:
+        result = confirm_and_record_startup_health(layout.root)
+    except Exception as exc:
+        print(f"startup health confirmation failed: {exc}", file=sys.stderr)
+        return 1
+    if result.healthy:
+        print("Startup health: HEALTHY", file=stdout)
+        if result.active_slot_id:
+            print(f" Active slot: {result.active_slot_id}", file=stdout)
+        if result.records_fingerprint:
+            print(f" Records fingerprint: {result.records_fingerprint}", file=stdout)
+        print("Confirmation recorded.", file=stdout)
+        return 0
+    print("Startup health: UNHEALTHY", file=stdout)
+    if result.active_slot_id:
+        print(f" Active slot: {result.active_slot_id}", file=stdout)
+    print(" Reasons:", file=stdout)
+    for reason in result.reasons:
+        print(f"  - {reason}", file=stdout)
+    return 1
 
 
 def _handle_runtime_gc_cache(args, *, stdout: TextIO) -> int:
@@ -1072,6 +1111,7 @@ def _format_gc_plan(plan: GcPlan) -> str:
             if entry.category in (
                 SlotCategory.PRUNABLE,
                 SlotCategory.PRUNABLE_CLEAN_METADATA,
+                SlotCategory.PREVIOUS_RELEASABLE,
             ):
                 action = "PRUNE"
             elif entry.category in (
@@ -1087,6 +1127,8 @@ def _format_gc_plan(plan: GcPlan) -> str:
             lines.append(f"    Action: {action}")
             lines.append(f"    Category: {entry.category.value}")
             lines.append(f"    Reason: {entry.reason}")
+            if entry.category is SlotCategory.PREVIOUS_RELEASABLE:
+                lines.append("    Releasable (health confirmed)")
             lines.append(f"    References: {refs}")
             lines.append(f"    Estimated bytes: {entry.estimated_bytes}")
             if entry.metadata_actions:

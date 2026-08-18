@@ -162,3 +162,49 @@ def save_active_state(
         os.close(fd)
 
     os.replace(tmp_name, str(pointer_path))
+
+
+def clear_previous_slot(pointer_path: Path) -> None:
+    """Atomically remove ``previous_slot`` from the active pointer.
+
+    Reads the current ``active.json``, validates it is READY (an
+    ``active_slot`` is present and valid), and rewrites it with
+    ``active_slot`` unchanged and NO ``previous_slot`` key (atomic
+    mkstemp + fsync + ``os.replace``, the same pattern as
+    :func:`save_active_state`).
+
+    Raises :class:`ValueError` when the pointer is absent, broken, or
+    otherwise not READY -- the caller must fail closed (preserve the
+    rollback slot) rather than proceeding with a release.
+
+    Used by :func:`zealfie.runtime.gc.apply_gc_plan` when releasing a
+    ``PREVIOUS_RELEASABLE`` rollback slot (ZA-M1-4 LOT A): the pointer is
+    cleared strictly BEFORE the slot directory is removed, so
+    ``active.json`` can never end up pointing at a deleted slot.
+    """
+    layout_root = pointer_path.parent.parent
+    status = load_active_state(pointer_path, layout_root=layout_root)
+    if status.state != RuntimeState.READY or status.active_slot_id is None:
+        raise ValueError(
+            f"cannot clear previous_slot: active state is not READY "
+            f"({status.state.value}: {status.reason})"
+        )
+
+    payload: dict[str, object] = {
+        "schema_version": _CURRENT_SCHEMA_VERSION,
+        "active_slot": status.active_slot_id,
+    }
+    text = json.dumps(payload, indent=2) + "\n"
+
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        suffix=".json", prefix=".active-", dir=str(pointer_path.parent)
+    )
+    try:
+        os.write(fd, text.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    os.replace(tmp_name, str(pointer_path))

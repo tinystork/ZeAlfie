@@ -81,7 +81,18 @@ from .provenance import (
     ProductProvenance,
     ProductProvenanceStore,
 )
-from .state import load_active_state, save_active_state
+from .startup_health import (
+    STARTUP_HEALTH_FILENAME,
+    STARTUP_HEALTH_SCHEMA_VERSION,
+    StartupHealthConfirmation,
+    StartupHealthResult,
+    compute_records_fingerprint,
+    confirm_and_record_startup_health,
+    confirm_startup_health,
+    load_startup_health,
+    record_startup_health,
+)
+from .state import clear_previous_slot, load_active_state, save_active_state
 from .transaction import RuntimeTransaction, generate_slot_id
 
 __all__ = [
@@ -141,6 +152,16 @@ __all__ = [
     "build_cache_gc_plan",
     "build_gc_plan",
     "check_desired_state_conflicts",
+    "clear_previous_slot",
+    "compute_records_fingerprint",
+    "confirm_and_record_startup_health",
+    "confirm_startup_health",
+    "load_startup_health",
+    "record_startup_health",
+    "STARTUP_HEALTH_FILENAME",
+    "STARTUP_HEALTH_SCHEMA_VERSION",
+    "StartupHealthConfirmation",
+    "StartupHealthResult",
     "build_deployment_plan",
     "default_runtime_layout",
     "default_runtime_root",

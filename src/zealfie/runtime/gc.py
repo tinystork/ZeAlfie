@@ -64,7 +64,8 @@ from typing import Sequence
 from .layout import validate_slot_id
 from .model import RuntimeState
 from .mutation_lock import OPERATION_RUNTIME_GC, RuntimeMutationLock
-from .state import load_active_state
+from .state import clear_previous_slot, load_active_state
+from .startup_health import compute_records_fingerprint, load_startup_health
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -134,6 +135,7 @@ class SlotCategory(StrEnum):
 
     ACTIVE = "ACTIVE"
     PREVIOUS = "PREVIOUS"
+    PREVIOUS_RELEASABLE = "PREVIOUS_RELEASABLE"
     # Legacy member (ZA-M1-2K): the planner no longer produces
     # REFERENCED — historical store references now classify as
     # PRUNABLE_CLEAN_METADATA (ZA-M1-3A.3).  Kept for API
@@ -149,6 +151,17 @@ class SlotCategory(StrEnum):
 class GcStatus(StrEnum):
     READY = "READY"
     BLOCKED = "BLOCKED"
+
+
+# Destructive slot categories: the apply engine may delete these (and the
+# planner counts them toward total_recoverable_bytes).  PREVIOUS_RELEASABLE
+# is the ZA-M1-4 LOT A "rollback slot with a verified startup-health
+# confirmation" category.
+_DESTRUCTIVE_CATEGORIES: tuple[SlotCategory, ...] = (
+    SlotCategory.PRUNABLE,
+    SlotCategory.PRUNABLE_CLEAN_METADATA,
+    SlotCategory.PREVIOUS_RELEASABLE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +478,36 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
                 continue
             store_slot_refs.setdefault(key, []).append(name)
 
+    # -- startup-health confirmation (ZA-M1-4 LOT A) --------------------------
+    # active_raw is read here (once) so the confirmation fingerprint can be
+    # matched against the exact bytes the planner already saw.  The
+    # confirmation file itself is NOT part of the state fingerprint.
+    active_raw: bytes | None = None
+    active_path = state_dir / _ACTIVE_FILENAME
+    if active_path.is_file():
+        try:
+            active_raw = active_path.read_bytes()
+        except OSError:
+            active_raw = None
+
+    record_bytes: dict[str, bytes | None] = {
+        _ACTIVE_FILENAME: active_raw,
+        _INSTALLED_LOCK_FILENAME: raw_bytes.get(_INSTALLED_LOCK_FILENAME),
+        _PROVENANCE_FILENAME: raw_bytes.get(_PROVENANCE_FILENAME),
+        _ACCELERATED_METADATA_FILENAME: raw_bytes.get(
+            _ACCELERATED_METADATA_FILENAME
+        ),
+    }
+    confirmation = load_startup_health(state_dir)
+    previous_releasable = (
+        active_status.state == RuntimeState.READY
+        and previous_id is not None
+        and confirmation is not None
+        and confirmation.active_slot_id == active_id
+        and confirmation.records_fingerprint
+        == compute_records_fingerprint(record_bytes)
+    )
+
     # -- slots/ enumeration ---------------------------------------------------
     disk_paths: dict[str, Path] = {}
     disk_invalid: dict[str, str] = {}
@@ -572,14 +615,30 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
             continue
         path = disk_paths[slot_id]
         estimated = _estimate_slot_bytes(path)
+        actions: tuple[str, ...] = ()
         if active_status.state == RuntimeState.READY and slot_id == active_id:
             category = SlotCategory.ACTIVE
             reason = "protected: currently active slot"
             refs = (_ACTIVE_FILENAME,)
         elif active_status.state == RuntimeState.READY and slot_id == previous_id:
-            category = SlotCategory.PREVIOUS
-            reason = "protected: rollback target (previous slot)"
-            refs = (_ACTIVE_FILENAME,)
+            if previous_releasable:
+                ref_names = tuple(sorted(store_slot_refs.get(slot_id, [])))
+                actions = tuple(
+                    action
+                    for action in _METADATA_CLEAN_ORDER
+                    if action
+                    in {_STORE_FILENAME_TO_CLEAN_ACTION[n] for n in ref_names}
+                )
+                category = SlotCategory.PREVIOUS_RELEASABLE
+                reason = (
+                    "rollback target; releasable (ACTIVE startup health "
+                    "confirmed)"
+                )
+                refs = ref_names
+            else:
+                category = SlotCategory.PREVIOUS
+                reason = "protected: rollback target (previous slot)"
+                refs = (_ACTIVE_FILENAME,)
         elif slot_id in store_slot_refs:
             ref_names = tuple(sorted(store_slot_refs[slot_id]))
             actions = tuple(
@@ -608,7 +667,11 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
                 references=refs,
                 metadata_actions=(
                     actions
-                    if category is SlotCategory.PRUNABLE_CLEAN_METADATA
+                    if category
+                    in (
+                        SlotCategory.PRUNABLE_CLEAN_METADATA,
+                        SlotCategory.PREVIOUS_RELEASABLE,
+                    )
                     else ()
                 ),
                 estimated_bytes=estimated,
@@ -620,10 +683,7 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
     if blocked:
         downgraded: list[GcSlotEntry] = []
         for entry in entries:
-            if entry.category in (
-                SlotCategory.PRUNABLE,
-                SlotCategory.PRUNABLE_CLEAN_METADATA,
-            ):
+            if entry.category in _DESTRUCTIVE_CATEGORIES:
                 downgraded.append(
                     GcSlotEntry(
                         slot_id=entry.slot_id,
@@ -645,17 +705,8 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
     total_recoverable = sum(
         entry.estimated_bytes
         for entry in entries
-        if entry.category
-        in (SlotCategory.PRUNABLE, SlotCategory.PRUNABLE_CLEAN_METADATA)
+        if entry.category in _DESTRUCTIVE_CATEGORIES
     )
-
-    active_raw: bytes | None = None
-    active_path = state_dir / _ACTIVE_FILENAME
-    if active_path.is_file():
-        try:
-            active_raw = active_path.read_bytes()
-        except OSError:
-            active_raw = None  # plan is BLOCKED anyway (unreadable pointer)
 
     fingerprint = _compute_state_fingerprint(
         slots_root=slots_root,
@@ -971,7 +1022,9 @@ def apply_gc_plan(runtime_root: Path, plan: GcPlan) -> GcResult:
        leaves an unreferenced directory on disk — self-healing
        (``PRUNABLE`` on the next plan), never ``REPAIR_REQUIRED``.
 
-    Never touches ``active.json``.
+    Except for the PREVIOUS_RELEASABLE release path (ZA-M1-4 LOT A),
+    where ``active.json`` is atomically rewritten to drop ``previous_slot``
+    before the rollback slot is removed, ``active.json`` is never touched.
 
     ZA-M1-2L (D1): the whole apply window — the fresh re-plan and state
     fingerprint revalidation, every slot deletion, and the accelerated-
@@ -1012,7 +1065,9 @@ def _apply_gc_plan_locked(runtime_root: Path, plan: GcPlan) -> GcResult:
        leaves an unreferenced directory on disk — self-healing
        (``PRUNABLE`` on the next plan), never ``REPAIR_REQUIRED``.
 
-    Never touches ``active.json``.
+    Except for the PREVIOUS_RELEASABLE release path (ZA-M1-4 LOT A),
+    where ``active.json`` is atomically rewritten to drop ``previous_slot``
+    before the rollback slot is removed, ``active.json`` is never touched.
     """
     root = Path(runtime_root).resolve()
     state_dir = root / "state"
@@ -1068,7 +1123,11 @@ def _apply_gc_plan_locked(runtime_root: Path, plan: GcPlan) -> GcResult:
 
     fresh_by_id = {entry.slot_id: entry for entry in fresh.slots}
     plan_by_id = {entry.slot_id: entry for entry in plan.slots}
-    destructive = (SlotCategory.PRUNABLE, SlotCategory.PRUNABLE_CLEAN_METADATA)
+    destructive = (
+        SlotCategory.PRUNABLE,
+        SlotCategory.PRUNABLE_CLEAN_METADATA,
+        SlotCategory.PREVIOUS_RELEASABLE,
+    )
     delete_set = {
         slot_id
         for slot_id, entry in fresh_by_id.items()
@@ -1081,15 +1140,65 @@ def _apply_gc_plan_locked(runtime_root: Path, plan: GcPlan) -> GcResult:
     errors: list[str] = []
     reclaimed = 0
     for slot_id in sorted(delete_set):
-        # Defence in depth: never delete active/previous even if the plan
-        # (forged or stale) lies about them.
-        if slot_id in (fresh.active_slot_id, fresh.previous_slot_id):
+        fresh_entry = fresh_by_id[slot_id]
+        # Defence in depth: never delete the active slot; allow deleting
+        # the previous slot ONLY when the fresh plan itself classifies it
+        # PREVIOUS_RELEASABLE (a forged/stale plan that marks PREVIOUS as
+        # destructive without a valid confirmation is never in delete_set
+        # — the fresh plan still classifies it PREVIOUS).
+        if slot_id == fresh.active_slot_id:
             errors.append(
-                f"skipping {slot_id!r}: active/previous guard "
-                f"(defence in depth)"
+                f"skipping {slot_id!r}: active guard (defence in depth)"
             )
             continue
-        fresh_entry = fresh_by_id[slot_id]
+        if (
+            slot_id == fresh.previous_slot_id
+            and fresh_entry.category is not SlotCategory.PREVIOUS_RELEASABLE
+        ):
+            errors.append(
+                f"skipping {slot_id!r}: previous guard (defence in depth; "
+                f"not releasable)"
+            )
+            continue
+
+        if fresh_entry.category is SlotCategory.PREVIOUS_RELEASABLE:
+            # Fail-closed release order (ZA-M1-4 LOT A):
+            #   1. atomically clear previous_slot in active.json,
+            #   2. purge the slot's metadata from the observational stores,
+            #   3. delete the slot directory.
+            # Clearing the pointer FIRST guarantees active.json never points
+            # at a deleted slot: if step 2 or 3 fails, the slot directory
+            # still exists and simply becomes an unreferenced PRUNABLE on the
+            # next plan (self-healing), never REPAIR_REQUIRED.
+            try:
+                clear_previous_slot(state_dir / _ACTIVE_FILENAME)
+            except Exception as exc:
+                errors.append(
+                    f"failed to clear previous_slot for {slot_id!r}: {exc}; "
+                    f"slot preserved this round"
+                )
+                continue
+            actions = fresh_entry.metadata_actions
+            if actions:
+                try:
+                    _purge_slot_metadata_entries(
+                        state_dir, slots_root, slot_id, actions
+                    )
+                except Exception as exc:
+                    errors.append(
+                        f"metadata purge for slot {slot_id!r} refused: "
+                        f"{exc}; slot directory preserved this round"
+                    )
+                    continue
+            try:
+                _safe_delete_slot(slots_root, slot_id)
+            except Exception as exc:
+                errors.append(f"failed to delete slot {slot_id!r}: {exc}")
+                continue
+            deleted.append(slot_id)
+            reclaimed += fresh_entry.estimated_bytes
+            continue
+
         actions = fresh_entry.metadata_actions
         if actions:
             # Metadata purge FIRST (every referencing store, ordered);

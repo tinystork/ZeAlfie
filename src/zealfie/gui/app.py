@@ -34,6 +34,18 @@ def run_gui() -> None:
     app.setOrganizationName("ZeSoftware")
 
     service = ZeAlfieService()
+
+    # ZA-M1-4 LOT A: confirm the persisted ACTIVE runtime health after a
+    # fresh startup.  Best-effort only -- the GUI must never crash if the
+    # confirmation is impossible (no runtime, corrupt state, no Python, …).
+    try:
+        service.confirm_startup_runtime_health()
+    except Exception:
+        logger.warning(
+            "startup runtime health confirmation failed (ignored)",
+            exc_info=True,
+        )
+
     resolver = GitHubSourceRefResolver()
     fetcher = GitHubArchiveFetcher()
     work_root = default_install_work_root()
