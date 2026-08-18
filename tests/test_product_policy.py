@@ -370,7 +370,8 @@ def test_pin_install_prepares_exact_sha_no_resolver(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None,
+               accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-1")
         ),
@@ -432,7 +433,8 @@ def test_follow_install_provenance_records_channel_policy_distinct(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None,
+               accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-1")
         ),
@@ -502,7 +504,8 @@ def test_keep_propagates_policy_never_resolves(
     monkeypatch.setattr(
         service, "install_prepared_product_deployment",
         lambda prepared_artifacts, *, dependency_wheelhouse=None,
-               probe_distribution=None, progress_callback=None: (
+               probe_distribution=None, progress_callback=None,
+               accelerated_acquirer=None: (
             prepared_calls.append(list(prepared_artifacts))
             or DeploymentResult(success=True, active_slot_id="rt-2")
         ),
