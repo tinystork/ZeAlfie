@@ -66,8 +66,8 @@ _INSTALLED_LOCK_FILENAME = "installed-lock.json"
 _PROVENANCE_FILENAME = "product-provenance.json"
 _ACCELERATED_METADATA_FILENAME = "accelerated-metadata.json"
 
-# Fixed order for deterministic fingerprint composition — MUST match the
-# order used by gc.py (``_RECORD_FILENAMES``).
+# Fixed order for deterministic fingerprint composition.  This is the
+# single source of truth; gc.py imports compute_state_fingerprint.
 RECORD_FILENAMES: tuple[str, ...] = (
     _ACTIVE_FILENAME,
     _INSTALLED_LOCK_FILENAME,
@@ -90,8 +90,10 @@ class StartupHealthConfirmation:
     """Persisted proof that one ACTIVE slot passed a fresh startup check.
 
     ``confirmed_at`` is an ISO-8601 UTC string; ``records_fingerprint``
-    is the 64-hex sha256 produced by :func:`compute_records_fingerprint`
-    over the 4 state records at confirmation time.
+    is the 64-hex sha256 produced by :func:`compute_state_fingerprint`
+    over the 4 state records plus the ``slots/`` directory entries at
+    confirmation time (the full GC-relevant state fingerprint, not just
+    the 4 records).
     """
 
     schema_version: int
@@ -111,7 +113,7 @@ class StartupHealthResult:
 
 
 # ---------------------------------------------------------------------------
-# Records fingerprint (shared with gc.py)
+# State fingerprint (single source of truth, shared with gc.py)
 # ---------------------------------------------------------------------------
 
 
@@ -121,9 +123,8 @@ def _records_fingerprint_parts(
     """Build the raw fingerprint parts for the 4 records (fixed order).
 
     For each record: ``b"A"`` when absent/unreadable (``None``), else
-    ``b"F" + sha256(raw)``.  Shared with :func:`compute_records_fingerprint`
-    and imported by :mod:`zealfie.runtime.gc` so the record composition is
-    defined in exactly one place.
+    ``b"F" + sha256(raw)``.  Shared with :func:`compute_state_fingerprint`
+    so the record composition is defined in exactly one place.
     """
     parts: list[bytes] = []
     for name in RECORD_FILENAMES:
@@ -135,16 +136,45 @@ def _records_fingerprint_parts(
     return parts
 
 
-def compute_records_fingerprint(record_bytes: Mapping[str, bytes | None]) -> str:
-    """Deterministic sha256 over the 4 records in fixed order.
+def compute_state_fingerprint(
+    record_bytes: Mapping[str, bytes | None],
+    slots_root: Path,
+) -> str:
+    """Deterministic sha256 fingerprint of the GC-relevant state.
 
     ``record_bytes`` maps the 4 record file names to their raw bytes
-    (or ``None`` when absent/unreadable).  For each record the marker is
-    ``b"A"`` when ``None``, else ``b"F" + sha256(raw)``.  This is the
-    SAME function :mod:`zealfie.runtime.gc` calls, so the persisted
-    confirmation and the GC planner agree exactly.
+    (or ``None`` when absent/unreadable).  Composition (must agree
+    exactly with :mod:`zealfie.runtime.gc`):
+
+    1. the 4 records in fixed order — for each record ``b"A"`` when
+       absent, else ``b"F" + sha256(raw)``;
+    2. then the sorted ``"<name>,<mtime_ns>,<size>"`` entries of
+       ``slots/`` (via ``os.lstat``, ``?`` on lstat failure).
+
+    This is the single source of truth for the state fingerprint, used
+    by both the confirmation (this module) and the GC planner
+    (:mod:`zealfie.runtime.gc`).
     """
-    return hashlib.sha256(b"".join(_records_fingerprint_parts(record_bytes))).hexdigest()
+    parts: list[bytes] = list(_records_fingerprint_parts(record_bytes))
+
+    entry_parts: list[str] = []
+    slots_root = Path(slots_root)
+    if slots_root.is_dir():
+        try:
+            names = sorted(os.listdir(slots_root))
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                st = os.lstat(slots_root / name)
+            except OSError:
+                entry_parts.append(f"{name},?,?")
+                continue
+            entry_parts.append(f"{name},{st.st_mtime_ns},{st.st_size}")
+    for ep in entry_parts:
+        parts.append(ep.encode("utf-8") + b"\n")
+
+    return hashlib.sha256(b"".join(parts)).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +279,9 @@ def confirm_startup_health(runtime_root: Path) -> StartupHealthResult:
     6. no in-progress mutation (``RuntimeMutationLock.probe_busy``).
 
     Returns ``healthy=True`` only when every check passes, with the
-    ``records_fingerprint`` of the 4 records (each read exactly once for
-    the fingerprint).  Otherwise ``healthy=False`` with a precise reason.
+    full state fingerprint (the 4 records + ``slots/``, each read exactly
+    once for the fingerprint).  Otherwise ``healthy=False`` with a precise
+    reason.
     """
     root = Path(runtime_root).resolve()
     state_dir = root / "state"
@@ -416,9 +447,11 @@ def confirm_startup_health(runtime_root: Path) -> StartupHealthResult:
             f"pid={pid}); refusing to confirm startup health",
         )
 
-    # -- all checks passed: fingerprint the 4 records (read exactly once) ----
+    # -- all checks passed: fingerprint the 4 records + slots/ ---------------
     record_raw[_ACTIVE_FILENAME] = (state_dir / _ACTIVE_FILENAME).read_bytes()
-    fingerprint = compute_records_fingerprint(record_raw)
+    fingerprint = compute_state_fingerprint(
+        record_raw, slots_root=root / "slots"
+    )
     return StartupHealthResult(
         healthy=True,
         active_slot_id=active_id,
@@ -468,9 +501,25 @@ def record_startup_health(
 def confirm_and_record_startup_health(runtime_root: Path) -> StartupHealthResult:
     """Run the health checks and, only when healthy, record the confirmation.
 
+    Any pre-existing confirmation is invalidated (best-effort unlink)
+    BEFORE the checks run, so an unhealthy startup can never leave a stale
+    valid confirmation behind.  A crash between the clear and the write
+    leaves NO confirmation, and PREVIOUS stays protected (fail-safe).
+
     The confirmation write is best-effort: a write failure is logged as a
     warning and never raises into the caller (startup must not break).
     """
+    root = Path(runtime_root).resolve()
+    state_dir = root / "state"
+    # Invalidate any pre-existing confirmation BEFORE probing (MF-1): an
+    # unhealthy startup must never leave a stale valid confirmation behind.
+    try:
+        (state_dir / STARTUP_HEALTH_FILENAME).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug(
+            "startup-health invalidation unlink failed (best-effort): %s", exc
+        )
+
     result = confirm_startup_health(runtime_root)
     if (
         result.healthy

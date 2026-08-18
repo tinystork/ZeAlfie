@@ -11,6 +11,14 @@ from .model import ActiveRuntimeState, RuntimeReasonCode, RuntimeState, RuntimeS
 
 _CURRENT_SCHEMA_VERSION = 1
 
+
+def _unlink_best_effort(path: str) -> None:
+    """Best-effort ``os.unlink``; never raises (temp-file cleanup)."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
 # Re-export the canonical slot-id validator for use by other modules.
 from .layout import validate_slot_id  # noqa: E402
 
@@ -173,6 +181,11 @@ def clear_previous_slot(pointer_path: Path) -> None:
     mkstemp + fsync + ``os.replace``, the same pattern as
     :func:`save_active_state`).
 
+    Hardening (MINOR-1): the raw bytes read at the start are re-read
+    immediately before ``os.replace``; if they differ (a non-cooperating
+    writer raced us), a :class:`ValueError` is raised instead of
+    clobbering the writer's update.
+
     Raises :class:`ValueError` when the pointer is absent, broken, or
     otherwise not READY -- the caller must fail closed (preserve the
     rollback slot) rather than proceeding with a release.
@@ -183,6 +196,14 @@ def clear_previous_slot(pointer_path: Path) -> None:
     ``active.json`` can never end up pointing at a deleted slot.
     """
     layout_root = pointer_path.parent.parent
+    try:
+        original_raw = pointer_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(
+            f"cannot clear previous_slot: active state file is "
+            f"unreadable ({exc})"
+        ) from exc
+
     status = load_active_state(pointer_path, layout_root=layout_root)
     if status.state != RuntimeState.READY or status.active_slot_id is None:
         raise ValueError(
@@ -206,5 +227,20 @@ def clear_previous_slot(pointer_path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+    # Re-read immediately before replace (MINOR-1): a non-cooperating
+    # writer may have changed the pointer between the initial read and
+    # now.  If the bytes differ, refuse rather than clobber.
+    try:
+        current_raw = pointer_path.read_bytes()
+    except OSError as exc:
+        _unlink_best_effort(tmp_name)
+        raise ValueError(
+            f"cannot clear previous_slot: active pointer re-read failed "
+            f"during clear: {exc}"
+        ) from exc
+    if current_raw != original_raw:
+        _unlink_best_effort(tmp_name)
+        raise ValueError("active pointer changed during clear; refusing")
 
     os.replace(tmp_name, str(pointer_path))

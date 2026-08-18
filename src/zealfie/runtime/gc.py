@@ -49,7 +49,6 @@ under the canonical ``slots/`` root and rejects any symlink component, and
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -65,7 +64,7 @@ from .layout import validate_slot_id
 from .model import RuntimeState
 from .mutation_lock import OPERATION_RUNTIME_GC, RuntimeMutationLock
 from .state import clear_previous_slot, load_active_state
-from .startup_health import compute_records_fingerprint, load_startup_health
+from .startup_health import compute_state_fingerprint, load_startup_health
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -85,14 +84,6 @@ _ACTIVE_FILENAME = "active.json"
 _INSTALLED_LOCK_FILENAME = "installed-lock.json"
 _PROVENANCE_FILENAME = "product-provenance.json"
 _ACCELERATED_METADATA_FILENAME = "accelerated-metadata.json"
-
-# Order is significant for deterministic fingerprint composition.
-_RECORD_FILENAMES: tuple[str, ...] = (
-    _ACTIVE_FILENAME,
-    _INSTALLED_LOCK_FILENAME,
-    _PROVENANCE_FILENAME,
-    _ACCELERATED_METADATA_FILENAME,
-)
 
 # Metadata-cleanup actions (ZA-M1-3A.3): one per observational store.
 # A PRUNABLE_CLEAN_METADATA slot carries one CLEAN_* action per store
@@ -498,14 +489,14 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
             _ACCELERATED_METADATA_FILENAME
         ),
     }
+    state_fingerprint = compute_state_fingerprint(record_bytes, slots_root)
     confirmation = load_startup_health(state_dir)
     previous_releasable = (
         active_status.state == RuntimeState.READY
         and previous_id is not None
         and confirmation is not None
         and confirmation.active_slot_id == active_id
-        and confirmation.records_fingerprint
-        == compute_records_fingerprint(record_bytes)
+        and confirmation.records_fingerprint == state_fingerprint
     )
 
     # -- slots/ enumeration ---------------------------------------------------
@@ -708,11 +699,7 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
         if entry.category in _DESTRUCTIVE_CATEGORIES
     )
 
-    fingerprint = _compute_state_fingerprint(
-        slots_root=slots_root,
-        raw_bytes=raw_bytes,
-        active_raw=active_raw,
-    )
+    fingerprint = state_fingerprint
 
     return GcPlan(
         runtime_root=root,
@@ -725,58 +712,6 @@ def build_gc_plan(runtime_root: Path) -> GcPlan:
         stale_metadata=tuple(sorted(stale_meta)),
         state_fingerprint=fingerprint,
     )
-
-
-# ---------------------------------------------------------------------------
-# State fingerprint
-# ---------------------------------------------------------------------------
-
-
-def _compute_state_fingerprint(
-    *,
-    slots_root: Path,
-    raw_bytes: dict[str, bytes | None],
-    active_raw: bytes | None,
-) -> str:
-    """Deterministic sha256 fingerprint of the GC-relevant state.
-
-    Composition: for each of the 4 records (fixed order) the sha256 of
-    its raw bytes (marker ``A`` when absent or unreadable),
-    followed by the sorted list of ``"<name>,<mtime_ns>,<size>"`` for
-    every ``slots/`` entry (``lstat``).  Two identical states always
-    produce the same fingerprint; any record byte or slot-entry change
-    (mtime/size) produces a different one.
-    """
-    parts: list[bytes] = []
-    all_raw = dict(raw_bytes)
-    all_raw[_ACTIVE_FILENAME] = active_raw
-    for name in _RECORD_FILENAMES:
-        raw = all_raw.get(name)
-        if raw is None:
-            # Absent or unreadable record → marker (unreadable records
-            # always BLOCK the plan, so the fingerprint only matters for
-            # absent-vs-absent comparisons in practice).
-            parts.append(b"A")
-        else:
-            parts.append(b"F" + hashlib.sha256(raw).digest())
-
-    entry_parts: list[str] = []
-    if slots_root.is_dir():
-        try:
-            names = sorted(os.listdir(slots_root))
-        except OSError:
-            names = []
-        for name in names:
-            try:
-                st = os.lstat(slots_root / name)
-            except OSError:
-                entry_parts.append(f"{name},?,?")
-                continue
-            entry_parts.append(f"{name},{st.st_mtime_ns},{st.st_size}")
-    for ep in entry_parts:
-        parts.append(ep.encode("utf-8") + b"\n")
-
-    return hashlib.sha256(b"".join(parts)).hexdigest()
 
 
 # ---------------------------------------------------------------------------

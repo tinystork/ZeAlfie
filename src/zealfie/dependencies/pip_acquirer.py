@@ -44,6 +44,31 @@ from .acquisition import (
 from .host_tags import default_compatible_tags
 
 
+# Fail-closed index URL scheme allow-list (mirrors the acceleration
+# manifest discipline in zealfie.acceleration.acquisition).  Plaintext
+# ``http://`` is rejected; only ``https://`` and ``file://`` are allowed.
+_ALLOWED_INDEX_SCHEMES = frozenset({"https", "file"})
+
+
+def _validate_index_url(index_url: str) -> str:
+    """Validate the pip index URL scheme (fail-closed).
+
+    Accepts ``https://`` and ``file://``; rejects ``http://`` (plaintext)
+    and any other/absent scheme with :class:`ValueError`.
+    """
+    if not isinstance(index_url, str) or not index_url.strip():
+        raise ValueError("index_url must be a non-empty string")
+    index_url = index_url.strip()
+    scheme = index_url.split(":", 1)[0] if ":" in index_url else ""
+    if scheme.lower() not in _ALLOWED_INDEX_SCHEMES:
+        raise ValueError(
+            f"unsupported index_url scheme {scheme!r} (expected one of "
+            f"{sorted(_ALLOWED_INDEX_SCHEMES)}); plaintext http:// is "
+            "rejected"
+        )
+    return index_url
+
+
 class PipWheelhouseAcquirer:
     """Minimal pip-based dependency acquisition into a local wheelhouse.
 
@@ -70,7 +95,7 @@ class PipWheelhouseAcquirer:
         retries: int = 2,
         retry_delay: float = 0.5,
     ) -> None:
-        self._index_url = index_url
+        self._index_url = _validate_index_url(index_url)
         self._retries = max(0, int(retries))
         self._retry_delay = float(retry_delay)
 

@@ -666,6 +666,67 @@ def test_apply_not_supported_on_non_linux(monkeypatch, tmp_path) -> None:
     assert result.status is ApplyStatus.NOT_SUPPORTED_ON_PLATFORM
 
 
+def _write_marker_with_target(layout: RuntimeLayout, tmp_path: Path, target: str):
+    wheel = tmp_path / "staged.whl"
+    wheel.write_bytes(b"staged wheel bytes")
+    pending = PendingSelfUpdate(
+        target_version=target,
+        channel="stable",
+        commit_sha=SHA_A,
+        wheel_path=str(wheel),
+        wheel_sha256=compute_sha256(wheel),
+        size=wheel.stat().st_size,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    write_pending_marker(layout, pending)
+    return pending
+
+
+def test_apply_refuses_downgrade(monkeypatch, tmp_path) -> None:
+    """MINOR-3: a stale marker whose target_version is lower than the
+    installed version must never silently downgrade; pip is not run."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_marker_with_target(layout, tmp_path, "0.0.5")
+
+    pip_called: list[Path] = []
+    monkeypatch.setattr(
+        activator_mod,
+        "_run_pip_install",
+        lambda wp: (pip_called.append(Path(wp)) or _Proc(0)),
+    )
+    result = apply_pending_update(
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version="0.0.9",
+    )
+    assert result.status is ApplyStatus.REFUSE_DOWNGRADE
+    assert "lower than the installed version" in result.message
+    assert pip_called == []
+    # Refused, not applied: marker preserved.
+    assert load_pending_marker(layout) is not None
+
+
+def test_apply_refuses_unparseable_version(monkeypatch, tmp_path) -> None:
+    """MINOR-3: unparseable versions fail closed (refuse, never proceed)."""
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_marker_with_target(layout, tmp_path, "not-a-version")
+
+    pip_called: list[Path] = []
+    monkeypatch.setattr(
+        activator_mod,
+        "_run_pip_install",
+        lambda wp: (pip_called.append(Path(wp)) or _Proc(0)),
+    )
+    result = apply_pending_update(
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version="0.0.9",
+    )
+    assert result.status is ApplyStatus.REFUSE_DOWNGRADE
+    assert "cannot compare versions" in result.message
+    assert pip_called == []
+
+
 # ---------------------------------------------------------------------------
 # CLI apply wiring
 # ---------------------------------------------------------------------------

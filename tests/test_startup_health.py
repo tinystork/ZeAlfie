@@ -47,7 +47,7 @@ from zealfie.runtime.startup_health import (
     STARTUP_HEALTH_FILENAME,
     STARTUP_HEALTH_SCHEMA_VERSION,
     StartupHealthConfirmation,
-    compute_records_fingerprint,
+    compute_state_fingerprint,
     confirm_and_record_startup_health,
     confirm_startup_health,
     load_startup_health,
@@ -142,7 +142,7 @@ def _records_fingerprint(root: Path) -> str:
     for name in RECORD_NAMES:
         p = state_dir / name
         record_bytes[name] = p.read_bytes() if p.is_file() else None
-    return compute_records_fingerprint(record_bytes)
+    return compute_state_fingerprint(record_bytes, slots_root=root / "slots")
 
 
 def _write_confirmation(
@@ -328,6 +328,51 @@ def test_unhealthy_confirm_does_not_record(tmp_path, monkeypatch):
     result = confirm_and_record_startup_health(root)
     assert result.healthy is False
     assert not (root / "state" / STARTUP_HEALTH_FILENAME).exists()
+
+
+def test_previously_healthy_now_unhealthy_clears_confirmation(tmp_path):
+    """MF-1: a previously valid confirmation is invalidated on every
+    startup attempt, so an unhealthy startup can never leave a stale
+    valid confirmation behind."""
+    root = _minimal_fixture(tmp_path)
+    _write_confirmation(root, ACTIVE)
+    assert (root / "state" / STARTUP_HEALTH_FILENAME).is_file()
+
+    # Make the startup unhealthy: remove the ACTIVE slot's interpreter.
+    _slot_python_path(root / "slots" / ACTIVE).unlink()
+
+    result = confirm_and_record_startup_health(root)
+    assert result.healthy is False
+    # The stale confirmation is GONE (cleared BEFORE the checks ran).
+    assert not (root / "state" / STARTUP_HEALTH_FILENAME).exists()
+
+    plan = build_gc_plan(root)
+    assert plan.status is GcStatus.READY
+    assert _entry(plan, PREVIOUS).category is SlotCategory.PREVIOUS
+    assert _prunable_ids(plan) == set()
+
+
+def test_slot_content_change_invalidates_confirmation(tmp_path):
+    """MF-2: the confirmation fingerprint covers slots/ mtime/size, so
+    mutating the ACTIVE slot (without touching records) invalidates the
+    confirmation and PREVIOUS stays protected."""
+    root = _minimal_fixture(tmp_path)
+    _write_confirmation(root, ACTIVE)
+    assert (root / "state" / STARTUP_HEALTH_FILENAME).is_file()
+
+    # Mutate the ACTIVE slot directory: add a file and force a
+    # deterministic mtime change (coarse-granularity filesystems would
+    # otherwise leave st_mtime_ns unchanged and the test flaky).
+    slot_dir = root / "slots" / ACTIVE
+    (slot_dir / "mutated.bin").write_bytes(b"x")
+    st = os.lstat(slot_dir)
+    os.utime(slot_dir, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    plan = build_gc_plan(root)
+    assert plan.status is GcStatus.READY
+    # Fingerprint mismatch -> PREVIOUS is NOT releasable.
+    assert _entry(plan, PREVIOUS).category is SlotCategory.PREVIOUS
+    assert _prunable_ids(plan) == set()
 
 
 # ---------------------------------------------------------------------------

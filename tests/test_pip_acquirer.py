@@ -894,3 +894,32 @@ class TestInjectableIndexUrl:
         argv_default = m_run2.call_args[0][0]
         idx_d = argv_default.index("--index-url")
         assert argv_default[idx_d + 1] == "https://pypi.org/simple"
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 16. index_url scheme validation (MINOR-2, fail-closed)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestIndexUrlValidation:
+    """index_url scheme is validated fail-closed in the constructor."""
+
+    def test_http_index_url_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unsupported index_url scheme"):
+            PipWheelhouseAcquirer(index_url="http://pypi.org/simple")
+
+    def test_https_index_url_accepted(self) -> None:
+        acquirer = PipWheelhouseAcquirer(index_url="https://pypi.org/simple")
+        assert acquirer._index_url == "https://pypi.org/simple"
+
+    def test_file_index_url_accepted(self) -> None:
+        acquirer = PipWheelhouseAcquirer(index_url="file:///some/local/index/simple")
+        assert acquirer._index_url == "file:///some/local/index/simple"
+
+    def test_empty_index_url_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-empty string"):
+            PipWheelhouseAcquirer(index_url="")
+
+    def test_unknown_scheme_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unsupported index_url scheme"):
+            PipWheelhouseAcquirer(index_url="ftp://example.com/simple")

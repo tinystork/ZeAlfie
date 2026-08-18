@@ -21,14 +21,22 @@ Fail-closed behaviour:
 
 from __future__ import annotations
 
+import importlib.metadata
 import subprocess
 import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 from zealfie.runtime.layout import RuntimeLayout
-from zealfie.runtime.mutation_lock import RuntimeMutationLock
+from zealfie.runtime.mutation_lock import (
+    OPERATION_RUNTIME_APPLY,
+    RuntimeMutationBusyError,
+    RuntimeMutationLock,
+    RuntimeMutationLockError,
+)
 
 from .state import (
     PendingMarkerError,
@@ -50,6 +58,7 @@ class ApplyStatus(StrEnum):
     APPLIED = "APPLIED"
     NO_PENDING = "NO_PENDING"
     NOT_SUPPORTED_ON_PLATFORM = "NOT_SUPPORTED_ON_PLATFORM"
+    REFUSE_DOWNGRADE = "REFUSE_DOWNGRADE"
     BUSY = "BUSY"
     FAILED = "FAILED"
 
@@ -70,11 +79,14 @@ def apply_pending_update(
     *,
     layout: RuntimeLayout,
     runtime_root: Path | str | None = None,
+    installed_version: str | None = None,
 ) -> SelfUpdateApplyResult:
     """Apply a previously staged self-update (standalone activator path).
 
     ``runtime_root`` is the directory the mutation lock guards; it defaults
-    to ``layout.root``.
+    to ``layout.root``.  ``installed_version`` overrides the detected
+    installed ZeAlfie version (used by tests); when ``None`` it is detected
+    via :func:`_installed_zealfie_version`.
     """
     try:
         pending = load_pending_marker(layout)
@@ -87,6 +99,33 @@ def apply_pending_update(
             ApplyStatus.NO_PENDING,
             "no pending self-update is staged; run "
             "`zealfie self-update stage` first",
+        )
+
+    # Downgrade guard (MINOR-3): a stale marker must never silently
+    # downgrade the installed ZeAlfie.  Fail closed on unparseable
+    # versions (refuse, never proceed).
+    installed = (
+        installed_version
+        if installed_version is not None
+        else _installed_zealfie_version()
+    )
+    try:
+        target_v = Version(pending.target_version)
+        installed_v = Version(installed)
+    except InvalidVersion as exc:
+        return SelfUpdateApplyResult(
+            ApplyStatus.REFUSE_DOWNGRADE,
+            "refusing to apply self-update: cannot compare versions "
+            f"(target {pending.target_version!r}, installed "
+            f"{installed!r}): {exc}",
+        )
+    if target_v < installed_v:
+        return SelfUpdateApplyResult(
+            ApplyStatus.REFUSE_DOWNGRADE,
+            "refusing to apply self-update: target version "
+            f"{pending.target_version} is lower than the installed "
+            f"version {installed}; a stale marker must never silently "
+            "downgrade",
         )
 
     if sys.platform != "linux":
@@ -113,7 +152,27 @@ def apply_pending_update(
     except SelfUpdateApplyError as exc:
         return SelfUpdateApplyResult(ApplyStatus.FAILED, str(exc))
 
-    result = _run_pip_install(wheel_path)
+    # Hold the runtime mutation lease across the actual replacement so
+    # the check-then-act is serialized with other ZeAlfie mutations
+    # (MINOR-4).  A held lease refuses with BUSY; a primitive failure
+    # refuses with FAILED (fail closed).
+    try:
+        with RuntimeMutationLock(root).acquire(OPERATION_RUNTIME_APPLY):
+            result = _run_pip_install(wheel_path)
+    except RuntimeMutationBusyError:
+        return SelfUpdateApplyResult(
+            ApplyStatus.BUSY,
+            "refusing to apply self-update: another ZeAlfie mutation "
+            "acquired the runtime mutation lease before the replacement "
+            "could start; no changes were applied",
+        )
+    except RuntimeMutationLockError as exc:
+        return SelfUpdateApplyResult(
+            ApplyStatus.FAILED,
+            "cannot acquire the runtime mutation lease to apply the "
+            f"self-update: {exc}",
+        )
+
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         detail = f": {stderr}" if stderr else ""
@@ -132,6 +191,18 @@ def apply_pending_update(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _installed_zealfie_version() -> str:
+    """Detect the installed ZeAlfie version (fallback ``"0.0.0"``).
+
+    Isolated so tests can monkeypatch version detection without touching
+    ``importlib.metadata``.
+    """
+    try:
+        return importlib.metadata.version("zealfie")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0"
 
 
 def _verify_staged_wheel(pending: PendingSelfUpdate, wheel_path: Path) -> None:
