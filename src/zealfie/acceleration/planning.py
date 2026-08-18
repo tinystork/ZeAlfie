@@ -37,6 +37,7 @@ from zealfie.acceleration.compatibility import (
 )
 from zealfie.acceleration.models import (
     HardwareCompatibility,
+    HardwareCompatibilityReasonCode,
     HardwareCompatibilityStatus,
     ProductAccelerationRequirements,
 )
@@ -674,4 +675,130 @@ def build_accelerated_deployment_plan(
             reason=None,
         ),
         **base,
+    )
+
+
+def build_acceleration_preservation_plan(
+    *,
+    catalog: ProductCatalog,
+    backend: str,
+    variants: tuple[tuple[str, str, str], ...],
+    source_active_slot_id: str | None,
+) -> AcceleratedDeploymentPlan:
+    """Build a PLAN_READY plan that PRESERVES an already-validated
+    accelerated closure across an ordinary product transaction.
+
+    This is the pure planner behind GPU continuity (ZA-M1-3A.3a): when
+    the active slot already carries a validated accelerated runtime, a
+    product install/update must rebuild the candidate runtime with the
+    SAME accelerated variants — never a CPU-only downgrade.  Unlike
+    :func:`build_accelerated_deployment_plan`, which derives variants
+    from a variant catalog against host capabilities, this planner takes
+    the already-validated variants VERBATIM from the active slot's
+    observational metadata and re-declares them as exact ``==``
+    requirements.  No I/O, no host probing, no catalog-variant lookup.
+
+    Fail-closed: a registered variant whose distribution has no
+    declaring catalog product raises :class:`ValueError` — ZeAlfie
+    never invents declaring provenance.
+
+    ``keep_products`` is empty (not consumed by
+    :func:`~zealfie.acceleration.deployment.apply_accelerated_deployment`)
+    and the ``hardware`` verdict is a purely documentary ``SUPPORTED``
+    ("active accelerated closure preserved") — it re-samples nothing
+    from the host and is not consumed by the apply engine.
+    """
+    if not isinstance(backend, str) or not backend.strip():
+        raise ValueError("backend must be a non-empty string")
+    backend = backend.strip()
+
+    if not isinstance(variants, tuple) or not variants:
+        raise ValueError("variants must be a non-empty tuple")
+
+    planned: list[PlannedAcceleratedDependency] = []
+    for variant in variants:
+        if (
+            not isinstance(variant, tuple)
+            or len(variant) != 3
+            or not all(
+                isinstance(part, str) and part.strip() for part in variant
+            )
+        ):
+            raise ValueError(
+                "variants must contain (distribution, version, sha256) "
+                "triples of non-empty strings"
+            )
+        distribution = canonicalize_name(variant[0].strip())
+        version = variant[1].strip()
+        sha256 = variant[2].strip()
+
+        declaring_products: set[str] = set()
+        extras: set[str] = set()
+        for desc in catalog.list():
+            accel = desc.acceleration
+            if accel is None or accel.backend != backend:
+                continue
+            for req in accel.requirements:
+                if req.distribution == distribution:
+                    declaring_products.add(desc.product_id)
+                    extras.update(req.extras)
+
+        if not declaring_products:
+            raise ValueError(
+                f"no catalog product declares accelerated distribution "
+                f"{distribution!r} for backend {backend!r}; refusing to "
+                f"invent declaring provenance"
+            )
+
+        planned.append(
+            PlannedAcceleratedDependency(
+                distribution=distribution,
+                specifier=f"=={version}",
+                extras=tuple(sorted(extras)),
+                declaring_products=tuple(sorted(declaring_products)),
+                variant=AcceleratedVariant(
+                    distribution=distribution,
+                    version=version,
+                    backend=backend,
+                    sha256=sha256,
+                ),
+                variant_status=VariantStatus.SELECTED,
+            )
+        )
+
+    products_concerned = tuple(
+        sorted({pid for entry in planned for pid in entry.declaring_products})
+    )
+
+    impact_lines = tuple(
+        f"Preserve {entry.distribution} =={entry.variant.version}"
+        for entry in sorted(planned, key=lambda e: e.distribution)
+    )
+
+    hardware = HardwareCompatibility(
+        status=HardwareCompatibilityStatus.SUPPORTED,
+        reason_code=HardwareCompatibilityReasonCode.COMPATIBLE.value,
+        reason="active accelerated closure preserved",
+        products_concerned=products_concerned,
+    )
+
+    return AcceleratedDeploymentPlan(
+        status=AcceleratedPlanStatus.PLAN_READY,
+        hardware=hardware,
+        backend=backend,
+        products_concerned=products_concerned,
+        keep_products=(),
+        added_requirements=tuple(
+            sorted(planned, key=lambda e: e.distribution)
+        ),
+        source_runtime_state="READY",
+        source_active_slot_id=source_active_slot_id,
+        source_previous_slot_id=None,
+        target_runtime=(
+            f"new shared runtime slot preserving the accelerated "
+            f"{backend} closure"
+        ),
+        blocked=False,
+        blocked_reason=None,
+        closure_impact=impact_lines,
     )

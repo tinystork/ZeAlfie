@@ -74,6 +74,7 @@ from zealfie.acceleration.planning import (
     PlannedAcceleratedDependency,
     PlannedKeepProduct,
     VariantStatus,
+    build_acceleration_preservation_plan,
     build_accelerated_deployment_plan,
 )
 from zealfie.acceleration.variants import (
@@ -124,6 +125,7 @@ __all__ = [
     "VariantStatus",
     "VersionMismatch",
     "apply_accelerated_deployment",
+    "build_acceleration_preservation_plan",
     "build_accelerated_deployment_plan",
     "default_accelerated_artifact_acquirer",
     "default_accelerated_artifact_manifest",

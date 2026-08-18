@@ -61,12 +61,14 @@ from zealfie.acceleration import (
     AcceleratedDeploymentResult,
     AcceleratedGate,
     AcceleratedPlanStatus,
+    AcceleratedSlotMetadata,
     AcceleratedSlotMetadataStore,
     AcceleratedVariantCatalog,
     CooperativeCancellationError,
     HardwareCompatibilityStatus,
     PlannedKeepProduct,
     apply_accelerated_deployment,
+    build_acceleration_preservation_plan,
     build_accelerated_deployment_plan,
     default_accelerated_gate,
     default_manifest_artifact_acquirer,
@@ -868,37 +870,50 @@ class ZeAlfieService:
         Read-only; any missing, corrupt, or unverifiable state fails
         closed to ``False`` (the GUI then keeps the honest offer).
         """
+        return self._validated_active_accelerated_metadata() is not None
+
+    def _validated_active_accelerated_metadata(
+        self,
+    ) -> AcceleratedSlotMetadata | None:
+        """Return the ACTIVE slot's validated accelerated metadata, or None.
+
+        Exactly the readiness logic (layout/READY/load_slot + per-variant
+        distribution probe), but returns the
+        :class:`~zealfie.acceleration.deployment.AcceleratedSlotMetadata`
+        instead of a bool.  ``None`` whenever the slot is missing, corrupt,
+        or unverifiable — fail-closed, never invents a closure.
+        """
         layout = getattr(self._runtime, "layout", None)
         if layout is None:
-            return False
+            return None
         status = self._runtime.status()
         if status.state is not RuntimeState.READY or status.active_slot_id is None:
-            return False
+            return None
         try:
             metadata = AcceleratedSlotMetadataStore(layout).load_slot(
                 status.active_slot_id
             )
         except Exception:
-            return False
+            return None
         if metadata is None:
-            return False
+            return None
         slot_path = layout.slot_path(status.active_slot_id)
         if sys.platform == "win32":
             python = slot_path / "Scripts" / "python.exe"
         else:
             python = slot_path / "bin" / "python"
         if not python.is_file():
-            return False
+            return None
         for distribution, version, _digest in metadata.variants:
             try:
                 probe = probe_runtime_distribution(str(python), distribution)
             except Exception:
-                return False
+                return None
             if not probe.get("installed"):
-                return False
+                return None
             if probe.get("version") != version:
-                return False
-        return True
+                return None
+        return metadata
 
     def prepare_gpu_setup_intent(
         self,
@@ -2466,7 +2481,9 @@ class ZeAlfieService:
 
         progress_callback=None,
 
-    ) -> DeploymentResult:
+        accelerated_acquirer: AcceleratedArtifactAcquirer | None = None,
+
+    ) -> DeploymentResult | AcceleratedDeploymentResult:
 
         """Apply a prepared product deployment to the shared runtime.
 
@@ -2561,6 +2578,23 @@ class ZeAlfieService:
             boundaries.  Observational only; it never affects behaviour,
 
             results, or error propagation.
+        accelerated_acquirer:
+
+            Optional injected accelerated artifact acquirer for the GPU
+
+            continuity path (ZA-M1-3A.3a).  When the active slot carries
+
+            a validated accelerated runtime, the candidate runtime is
+
+            rebuilt with the SAME accelerated closure through this
+
+            acquirer (``None`` falls back to the manifest-backed
+
+            production acquirer with the shared artifact cache).  When
+
+            the active slot carries no validated accelerated runtime the
+
+            argument is ignored and the plain CPU path applies.
 
 
 
@@ -2568,11 +2602,15 @@ class ZeAlfieService:
 
         -------
 
-        DeploymentResult
+        DeploymentResult or AcceleratedDeploymentResult
 
             *success=True* with the new active slot id on
 
-            successful apply.  *success=False* with a reason
+            successful apply; an ``AcceleratedDeploymentResult`` when
+
+            the active slot's accelerated closure was preserved.
+
+            *success=False* with a reason
 
             string on any failure.
 
@@ -2661,6 +2699,82 @@ class ZeAlfieService:
         if compatibility_report.blocked:
             raise ProductCompatibilityBlockedError(compatibility_report)
         _surface_compatibility_diagnostics(compatibility_report)
+
+
+        # ---- 6c. Accelerated closure preservation (ZA-M1-3A.3a) ------
+        # When the ACTIVE slot already carries a validated accelerated
+        # runtime, an ordinary product transaction must rebuild the
+        # candidate with the SAME accelerated closure — never a silent
+        # CPU-only downgrade.  This reuses the M1-2I engine with a
+        # preservation plan derived verbatim from the active slot's
+        # observational metadata.  Readiness here is a slot-state fact,
+        # never re-derived from host hardware probes.
+        metadata = self._validated_active_accelerated_metadata()
+        if metadata is not None:
+            preserve_plan = build_acceleration_preservation_plan(
+                catalog=self._catalog,
+                backend=metadata.backend,
+                variants=metadata.variants,
+                source_active_slot_id=plan.source_active_slot_id,
+            )
+            effective_acquirer = (
+                accelerated_acquirer
+                if accelerated_acquirer is not None
+                else default_manifest_artifact_acquirer(
+                    cache=self._artifact_cache
+                )
+            )
+            layout = getattr(self._runtime, "layout", None)
+            metadata_store = (
+                AcceleratedSlotMetadataStore(layout)
+                if layout is not None
+                else None
+            )
+            declaring_distributions = {
+                desc.product_id: desc.distribution_name
+                for desc in self._catalog.list()
+            }
+            accel_work = Path(
+                tempfile.mkdtemp(prefix="zealfie-accel-preserve-")
+            )
+            try:
+                acquired = effective_acquirer.acquire(
+                    preserve_plan, accel_work, cancel_check=None,
+                )
+                result = apply_accelerated_deployment(
+                    accelerated_plan=preserve_plan,
+                    deployment_plan=plan,
+                    registry=registry,
+                    runtime=self._runtime,
+                    acquired=acquired,
+                    declaring_distributions=declaring_distributions,
+                    accelerated_gate=None,  # -> default_accelerated_gate()
+                    metadata_store=metadata_store,
+                    progress_callback=progress_callback,
+                )
+            finally:
+                _rmtree_best_effort(accel_work)
+            if result.success:
+                for pa in prepared_artifacts:
+                    self._selection_store.select(
+                        pa.product_id, catalog=self._catalog,
+                    )
+                self._persist_provenance(prepared_artifacts, result)
+                self._persist_installed_lock_for_slot(
+                    result.extended_dependency_lock,
+                    result.active_slot_id,
+                )
+                ready_message = _completion_message(
+                    self._catalog, prepared_artifacts,
+                )
+                _emit_progress(
+                    progress_callback,
+                    InstallPhase.COMPLETED,
+                    PHASE_PERCENT[InstallPhase.COMPLETED],
+                    ready_message,
+                )
+                self._runtime_gc_best_effort()
+            return result
 
 
 
@@ -2871,7 +2985,8 @@ class ZeAlfieService:
         dependency_wheelhouse: Path | None = None,
         probe_distribution=None,
         progress_callback=None,
-    ) -> DeploymentResult:
+        accelerated_acquirer: AcceleratedArtifactAcquirer | None = None,
+    ) -> DeploymentResult | AcceleratedDeploymentResult:
         """Install (or update) a product within the full desired product set.
 
         Full-state orchestration:
@@ -2933,11 +3048,21 @@ class ZeAlfieService:
             prepare / acquire / plan / install / validate / activate /
             complete boundaries.  Observational only; it never affects
             behaviour, results, or error propagation.
+        accelerated_acquirer:
+            Optional injected accelerated artifact acquirer for the GPU
+            continuity path (ZA-M1-3A.3a).  When the active slot carries
+            a validated accelerated runtime, the candidate rebuilds the
+            SAME accelerated closure via this acquirer; ``None`` falls
+            back to the manifest-backed production acquirer (with the
+            shared artifact cache).  Hermetic tests inject a synthetic
+            acquirer here.
 
         Returns
         -------
-        DeploymentResult
-            The exact result from the transactional deployment engine.
+        DeploymentResult or AcceleratedDeploymentResult
+            The exact result from the transactional deployment engine;
+            an ``AcceleratedDeploymentResult`` when the active slot's
+            accelerated closure was preserved (GPU continuity).
 
         Raises
         ------
@@ -2968,6 +3093,7 @@ class ZeAlfieService:
                 dependency_wheelhouse=dependency_wheelhouse,
                 probe_distribution=probe_distribution,
                 progress_callback=progress_callback,
+                accelerated_acquirer=accelerated_acquirer,
             )
         with lock.acquire(OPERATION_PRODUCT_INSTALL):
             return self._install_product(
@@ -2978,6 +3104,7 @@ class ZeAlfieService:
                 dependency_wheelhouse=dependency_wheelhouse,
                 probe_distribution=probe_distribution,
                 progress_callback=progress_callback,
+                accelerated_acquirer=accelerated_acquirer,
             )
 
 
@@ -2991,7 +3118,8 @@ class ZeAlfieService:
         dependency_wheelhouse: Path | None = None,
         probe_distribution=None,
         progress_callback=None,
-    ) -> DeploymentResult:
+        accelerated_acquirer: AcceleratedArtifactAcquirer | None = None,
+    ) -> DeploymentResult | AcceleratedDeploymentResult:
         """Install (or update) a product within the full desired product set.
 
         Full-state orchestration:
@@ -3053,11 +3181,18 @@ class ZeAlfieService:
             prepare / acquire / plan / install / validate / activate /
             complete boundaries.  Observational only; it never affects
             behaviour, results, or error propagation.
+        accelerated_acquirer:
+            Optional injected accelerated artifact acquirer for the GPU
+            continuity path (ZA-M1-3A.3a); threaded unchanged to
+            :meth:`install_prepared_product_deployment`.  ``None`` uses
+            the manifest-backed production acquirer (with cache).
 
         Returns
         -------
-        DeploymentResult
-            The exact result from the transactional deployment engine.
+        DeploymentResult or AcceleratedDeploymentResult
+            The exact result from the transactional deployment engine;
+            an ``AcceleratedDeploymentResult`` when the active slot's
+            accelerated closure was preserved (GPU continuity).
 
         Raises
         ------
@@ -3187,11 +3322,13 @@ class ZeAlfieService:
                     dependency_wheelhouse=dependency_wheelhouse,
                     probe_distribution=probe_distribution,
                     progress_callback=progress_callback,
+                    accelerated_acquirer=accelerated_acquirer,
                 )
             return self.install_prepared_product_deployment(
                 prepared,
                 dependency_wheelhouse=dependency_wheelhouse,
                 probe_distribution=probe_distribution,
+                accelerated_acquirer=accelerated_acquirer,
             )
 
         finally:
@@ -4112,7 +4249,7 @@ class ZeAlfieService:
         dependency_wheelhouse: Path | None = None,
         probe_distribution=None,
         progress_callback=None,
-    ) -> DeploymentResult:
+    ) -> DeploymentResult | AcceleratedDeploymentResult:
         """Update an already-managed installed product, transactionally.
 
         This is a **narrow service-layer convenience/preflight** around the
@@ -4156,7 +4293,7 @@ class ZeAlfieService:
 
         Returns
         -------
-        DeploymentResult
+        DeploymentResult or AcceleratedDeploymentResult
             The exact result from the transactional deployment engine,
             returned verbatim from :meth:`install_product`.
 
@@ -4207,7 +4344,7 @@ class ZeAlfieService:
         dependency_wheelhouse: Path | None = None,
         probe_distribution=None,
         progress_callback=None,
-    ) -> DeploymentResult:
+    ) -> DeploymentResult | AcceleratedDeploymentResult:
         """Update an already-managed installed product, transactionally.
 
         This is a **narrow service-layer convenience/preflight** around the
@@ -4251,7 +4388,7 @@ class ZeAlfieService:
 
         Returns
         -------
-        DeploymentResult
+        DeploymentResult or AcceleratedDeploymentResult
             The exact result from the transactional deployment engine,
             returned verbatim from :meth:`install_product`.
 
