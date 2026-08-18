@@ -254,3 +254,22 @@ runtime preserved; rollback path unchanged.
 | Windows nvidia-smi format + probe encoding | FIXED (24026d9) + regression tests |
 | macOS readiness | **PASS — real GitHub-hosted macOS runners** (`macos-15` arm64 + `macos-15-intel` x86_64, 2026-08-17, run 32035282141): install / import / CLI, host target, runtime path, acceleration fail-closed, POSIX lock witness E2/E3/E4, targeted pytest. GUI / packaging / notarization / Metal-GPU / end-to-end = **HUMAN GATE** |
 | Diagnostic log discoverability | FOLLOW-UP (no persistent log file today — loggers write to stderr; a logging subsystem is out of scope for this mission) |
+
+## M1-4 / M1-4.1 Windows HUMAN_GATE — real witness (2026-08-19, PASS)
+
+Real Windows validation of the M1-4 (hardening/UX/lifecycle) and M1-4.1
+(Windows self-update activator) work:
+
+| Area | Result |
+|---|---|
+| GC transient N-1 (rollback retention) | **PASS** — previous slot released only after fresh-startup health confirmation; ~3.25 GB reclaimed |
+| GPU preserved after GC | **PASS** — accelerated closure + cached GPU artifacts survived slot cleanup |
+| i18n FR/EN persistence | **PASS** — language switch + persisted preference across restart |
+| VPN / GitHub / PyPI downloads | **PASS** — proxy-aware path, reason-code diagnostics, no credential leak |
+| Windows self-update 0.0.6 → 0.0.7b1 | **PASS** — stage + apply handoff; installed version verified == target |
+| corrupted-wheel fail-closed | **PASS** — byte-altered staged wheel refused (SHA-256), marker preserved, install untouched |
+| recovery 0.0.7b1 → 0.0.7b2 | **PASS** — second staged/apply cycle succeeded |
+
+The `msvcrt` mutation-lock backend and the Windows `ctypes` helper wait remain
+hermetically covered (injected seams) in `tests/test_mutation_lock.py` and
+`tests/test_selfupdate.py`.

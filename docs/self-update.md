@@ -142,15 +142,25 @@ installs.  It:
    `wheel_sha256` + `size` (never trusts the marker alone);
 3. refuses while another ZeAlfie mutation holds the runtime mutation lease
    (`RuntimeMutationLock(...).probe_busy()`);
-4. performs the replacement **only on Linux** via a list-argv subprocess
-   (no shell):
+4. performs the replacement (list-argv subprocess, no shell):
+
+   * **Linux** — in-process:
 
    ```
    python -m pip install --no-deps --no-index <wheel_path>
    ```
 
-5. clears the pending marker only on success; on failure leaves the marker
-   in place and reports the honest error.
+   * **Windows** — external handoff (ZA-M1-4.1): spawns a detached helper
+     (`python -m zealfie.selfupdate.windows_helper`) that waits for this
+     process to exit, then re-verifies and installs (never installs over the
+     running process);
+
+   * **macOS** — `NOT_SUPPORTED_ON_PLATFORM` (documented follow-up).
+
+5. after a successful install, verifies the freshly-installed ZeAlfie version
+   equals the staged target (a fresh subprocess), then clears the pending
+   marker only on verified success; on failure leaves the marker in place and
+   reports the honest error.
 
 A failed `pip install` of a pure-Python wheel leaves the current install
 usable — the old version is not removed before the new one is in place, so
@@ -160,10 +170,17 @@ the failure mode is "nothing changed", not "broken".
 
 ## 7. Platform differences
 
-* **Linux** — the activator is implemented (list-argv pip subprocess).
-* **Windows / macOS** — the activator is **not** implemented.  `apply`
-  returns an honest `NOT_SUPPORTED_ON_PLATFORM`; it does **not** fake
-  cross-platform readiness.  These are a documented follow-up.
+* **Linux** — the activator is implemented in-process (list-argv pip
+  subprocess).
+* **Windows** — implemented (ZA-M1-4.1): a detached helper performs the
+  replacement after the caller exits.  The helper waits for the caller with a
+  fail-closed `ctypes` `OpenProcess`/`WaitForSingleObject` wait (a timeout or
+  unconfirmable caller leaves the marker in place and exits non-zero), then
+  re-verifies the wheel, installs, verifies the installed version equals the
+  target, and only then clears the pending marker.  The running process never
+  installs over its own environment.
+* **macOS** — **not** implemented.  `apply` returns
+  `NOT_SUPPORTED_ON_PLATFORM`; it does **not** fake cross-platform readiness.
 
 ---
 
@@ -211,5 +228,21 @@ pip install zealfie   # editable install
 
 * The running process never `pip install`s itself.
 * No auto-apply, no silent self-update.
-* Windows/macOS activators are a follow-up, not faked.
+* The running process never `pip install`s itself (Windows uses a detached helper).
+* macOS activator is a follow-up, not faked.
 * No version bump, no tag, no publish without the human gate.
+
+---
+
+## 12. Witness status
+
+Real Windows HUMAN_GATE (2026-08-19) — **PASS**:
+
+* self-update **0.0.6 → 0.0.7b1** — `stage` then `apply` handoff completed;
+  installed version verified equal to target; pending marker cleared on success.
+* **corrupted-wheel fail-closed** — a byte-altered staged wheel was refused
+  (SHA-256 re-verification), marker preserved, current install untouched.
+* **recovery 0.0.7b1 → 0.0.7b2** — a second staged/apply cycle succeeded.
+
+The Windows `ctypes` wait and `msvcrt` mutation-lock backend are additionally
+covered hermetically (injected seams) in `tests/test_selfupdate.py`.
