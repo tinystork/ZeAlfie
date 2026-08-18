@@ -300,7 +300,7 @@ class TestGpuDetailBoundedLayout:
             panel.set_recommendation(_rec())
             panel._button.click()
             assert panel._install_button.isHidden() is False
-            assert "Installer" in panel._install_button.text()
+            assert "Install" in panel._install_button.text()
         finally:
             panel.close()
             panel.deleteLater()

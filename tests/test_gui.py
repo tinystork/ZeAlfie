@@ -215,7 +215,7 @@ class TestPresentation:
             reason="not installed",
         )
         assert "Not installed" in state_label(s)
-        assert "Installer" in state_label(s)
+        assert "Install" in state_label(s)
 
     def test_state_label_installed_launchable(self):
         s = _make_state(
@@ -223,7 +223,7 @@ class TestPresentation:
             reason="ok",
         )
         assert "Ready" in state_label(s)
-        assert "Lancer" in state_label(s)
+        assert "Launch" in state_label(s)
 
     def test_state_label_installed_not_launchable(self):
         s = _make_state(
@@ -260,11 +260,11 @@ class TestPresentation:
     def test_action_label_launchable(self):
         s = _make_state("test", launchable=True,
                         reason_code=ProductStateReasonCode.INSTALLED_LAUNCHABLE)
-        assert "Lancer" in action_label(s)
+        assert "Launch" in action_label(s)
 
     def test_action_label_not_launchable(self):
         s = _make_state("test", launchable=False)
-        assert "Installer" in action_label(s)
+        assert "Install" in action_label(s)
 
     def test_action_enabled_launchable(self):
         s = _make_state("test", launchable=True,
@@ -451,7 +451,7 @@ class TestGuiSmoke:
         btn = zesolver_card._action_button
         assert btn is not None
         assert btn.isEnabled() is True
-        assert "Lancer" in btn.text()
+        assert "Launch" in btn.text()
 
     def test_launch_wiring_calls_spawn_component(self):
         """Clicking Lancer calls exactly service.spawn_component(product_id)."""
@@ -517,7 +517,7 @@ class TestGuiSmoke:
         # Button should be disabled for non-launchable
         btn = zemosaic_card._action_button
         assert btn is not None
-        assert "Installer" in btn.text()
+        assert "Install" in btn.text()
         # Even if somehow clicked, the handler checks launchable first
         zemosaic_card._on_action_clicked()
         assert "zemosaic" not in service.spawn_calls
@@ -644,7 +644,7 @@ class TestGuiSmoke:
         assert card._state.installed is True
         assert card._state.launchable is False
         assert card._action_button.isEnabled() is False
-        assert "Installer" in card._action_button.text()
+        assert "Install" in card._action_button.text()
 
     def test_status_bar_shows_runtime_state(self):
         """Status bar shows human-readable runtime summary."""
@@ -924,7 +924,7 @@ class TestInstallPresentation:
             reason="not installed",
         )
         assert "Not installed" in state_label(s)
-        assert "Installer" in state_label(s)
+        assert "Install" in state_label(s)
 
     def test_action_enabled_not_installed(self):
         """Not-installed products have the Installer button enabled."""
@@ -961,7 +961,7 @@ class TestInstallPresentation:
                         reason="not installed")
         label = state_label(s)
         assert "next milestone" not in label
-        assert "Installer" in label
+        assert "Install" in label
 
 
 class TestInstallCardSmoke:
@@ -1004,7 +1004,7 @@ class TestInstallCardSmoke:
         try:
             btn = card._action_button
             assert btn.isEnabled() is True
-            assert "Installer" in btn.text()
+            assert "Install" in btn.text()
         finally:
             card.close()
             card.deleteLater()
@@ -1106,23 +1106,23 @@ class TestInstallCardSmoke:
         card.install_requested.connect(lambda pid: sigs.append(pid))
         try:
             btn = card._action_button
-            assert "Installer" in btn.text()
+            assert "Install" in btn.text()
             btn.click()
 
             assert sigs == ["zesolver"]
 
             # Simulate MainWindow calling set_install_in_progress
             card.set_install_in_progress(True)
-            assert "Installation" in btn.text()
+            assert "Installing" in btn.text()
             assert btn.isEnabled() is False
             status = card._status_label.text()
-            assert "Installation de ZeSolver en cours" in status
+            assert "Installing ZeSolver" in status
 
             # Clear state (MainWindow would call refresh_state)
             card.set_install_in_progress(False)
             card.refresh_state(state)
             assert btn.isEnabled() is True
-            assert "Installer" in btn.text()
+            assert "Install" in btn.text()
         finally:
             card.close()
             card.deleteLater()
@@ -1228,7 +1228,7 @@ class TestInstallCardSmoke:
         assert card._state.installed is True
         assert card._state.launchable is False
         assert card._action_button.isEnabled() is False
-        assert "Installer" in card._action_button.text()
+        assert "Install" in card._action_button.text()
     def test_set_install_complete_refresh_required(self, qapp):
         """M1-2D.5: set_install_complete_refresh_required shows safe fallback."""
         from zealfie.gui.product_card import ProductCard
@@ -1305,3 +1305,62 @@ class TestInstallWiringThroughMainWindow:
         assert card._resolver is resolver
         assert card._fetcher is fetcher
         assert card._work_root == work_root
+
+
+# ===========================================================================
+# M1-4 LOT E — runtime language selector (thin GUI wiring)
+# ===========================================================================
+
+
+class TestLanguageSelection:
+    """Minimal wiring test for the Shell > Language submenu."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qapp):
+        return qapp
+
+    @pytest.fixture(autouse=True)
+    def _reset_language(self):
+        from zealfie.i18n import reset_language
+
+        reset_language()
+        yield
+        reset_language()
+
+    def test_language_menu_switches_and_retranslates(self, qapp, monkeypatch):
+        from zealfie.i18n import Language, get_language
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        saved: dict = {}
+
+        class _FakeStore:
+            def __init__(self, path=None):
+                pass
+
+            def save(self, lang):
+                saved["lang"] = lang
+
+        monkeypatch.setattr(
+            "zealfie.gui.main_window.LanguageStore", _FakeStore
+        )
+
+        window = ZeAlfieMainWindow(service=_create_standard_fake_service())
+        try:
+            assert get_language() is Language.EN
+            assert "Astronomy Launcher" in window.windowTitle()
+            assert window._language_actions[Language.FR].isChecked() is False
+
+            window._language_actions[Language.FR].trigger()
+
+            assert get_language() is Language.FR
+            assert saved.get("lang") is Language.FR
+            assert "Lanceur" in window.windowTitle()
+            assert "Astronomy Launcher" not in window.windowTitle()
+
+            window._language_actions[Language.EN].trigger()
+            assert get_language() is Language.EN
+            assert "Astronomy Launcher" in window.windowTitle()
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()

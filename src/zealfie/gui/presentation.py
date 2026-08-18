@@ -1,7 +1,10 @@
 """M1-2C — product state ↔ UI presentation mapping.
 
 Maps :class:`ProductState` enums and fields to human-readable GUI text.
-Never shows raw enum names to users.
+Never shows raw enum names to users.  All user-visible text is localized via
+:func:`zealfie.i18n.translate`; machine phase names / codes that are shown
+as-is (e.g. ``Hardware: SUPPORTED``, ``REQUIRED_HOST``, ``MANAGED_RUNTIME``)
+are left untouched.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from zealfie.app import (
     ProductUpdateResult,
     UpdateStatus,
 )
+from zealfie.i18n import translate
 
 
 # ---------------------------------------------------------------------------
@@ -28,12 +32,12 @@ from zealfie.app import (
 # ---------------------------------------------------------------------------
 
 _STATE_LABELS: dict[ProductStateReasonCode, str] = {
-    ProductStateReasonCode.RUNTIME_ABSENT: "No runtime — deploy a runtime first",
-    ProductStateReasonCode.RUNTIME_BROKEN: "Runtime broken — check or recreate",
-    ProductStateReasonCode.INSTALLED_LAUNCHABLE: "Ready — click Lancer to start",
-    ProductStateReasonCode.INSTALLED_NOT_LAUNCHABLE: "Installed but launch contract missing",
-    ProductStateReasonCode.NOT_INSTALLED: "Not installed — click Installer to fetch and install",
-    ProductStateReasonCode.PROBE_FAILED: "Could not check — probe failed",
+    ProductStateReasonCode.RUNTIME_ABSENT: "state.runtime_absent",
+    ProductStateReasonCode.RUNTIME_BROKEN: "state.runtime_broken",
+    ProductStateReasonCode.INSTALLED_LAUNCHABLE: "state.installed_launchable",
+    ProductStateReasonCode.INSTALLED_NOT_LAUNCHABLE: "state.installed_not_launchable",
+    ProductStateReasonCode.NOT_INSTALLED: "state.not_installed",
+    ProductStateReasonCode.PROBE_FAILED: "state.probe_failed",
 }
 
 
@@ -43,18 +47,18 @@ def state_label(state: ProductState) -> str:
     Never leaks raw enum values.
     Falls back to the reason string if the code is unknown.
     """
-    label = _STATE_LABELS.get(state.reason_code)
-    if label is not None:
-        return label
+    key = _STATE_LABELS.get(state.reason_code)
+    if key is not None:
+        return translate(key)
     # safety fallback — never raw enum
-    return state.reason or "Unknown state"
+    return state.reason or translate("state.unknown")
 
 
 def action_label(state: ProductState) -> str:
     """Return the primary action button label for a product state."""
     if state.launchable:
-        return "🚀 Lancer"
-    return "📦 Installer"
+        return "🚀 " + translate("cards.launch")
+    return "📦 " + translate("cards.install")
 
 
 def action_enabled(state: ProductState) -> bool:
@@ -72,10 +76,10 @@ def action_enabled(state: ProductState) -> bool:
 def action_tooltip(state: ProductState) -> str:
     """Return the tooltip for the primary action button."""
     if state.launchable:
-        return f"Launch {state.display_name}"
+        return translate("action.launch_tooltip", name=state.display_name)
     if state.installed and not state.launchable:
-        return "Launch contract not satisfied — product is installed but cannot be launched"
-    return f"Install {state.display_name}"
+        return translate("action.launch_contract_missing")
+    return translate("action.install_tooltip", name=state.display_name)
 
 
 # ---------------------------------------------------------------------------
@@ -135,21 +139,21 @@ def update_status_label(result: ProductUpdateResult | None) -> str:
     if status is UpdateStatus.NOT_CHECKED:
         return ""
     if status is UpdateStatus.CHECKING:
-        return "Checking for updates\u2026"
+        return translate("update.checking")
     if status is UpdateStatus.UP_TO_DATE:
-        return "Up to date"
+        return translate("update.up_to_date")
     if status is UpdateStatus.UPDATE_AVAILABLE:
         sha = _short_sha(getattr(result, "latest_commit_sha", None))
         if sha:
-            return f"Update available ({sha})"
-        return "Update available"
+            return translate("update.available_sha", sha=sha)
+        return translate("update.available")
     if status is UpdateStatus.CHECK_FAILED:
         error = _short_error(getattr(result, "error", None))
         if error:
-            return f"Update check failed: {error}"
-        return "Update check failed"
+            return translate("update.check_failed_error", error=error)
+        return translate("update.check_failed")
     if status is UpdateStatus.PROVENANCE_UNKNOWN:
-        return "Update status unknown"
+        return translate("update.unknown")
     return ""
 
 # ---------------------------------------------------------------------------
@@ -165,15 +169,17 @@ def runtime_summary(
 ) -> str:
     """Return a one-line runtime status summary for the status bar."""
     if runtime_state_value == "ABSENT":
-        return "Runtime: absent"
+        return translate("runtime.absent")
     if runtime_state_value == "BROKEN":
-        return "Runtime: broken"
+        return translate("runtime.broken")
     if installed_count == 0:
-        return f"Runtime: ready — {total_known} known, none installed"
-    return (
-        f"Runtime: ready — {installed_count}/{total_known} installed"
-        + (f", {managed_count} managed" if managed_count > 0 else "")
+        return translate("runtime.ready_none", total=total_known)
+    text = translate(
+        "runtime.ready", installed=installed_count, total=total_known
     )
+    if managed_count > 0:
+        text += translate("runtime.managed_suffix", managed=managed_count)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -197,42 +203,58 @@ def gpu_plan_preview_lines(plan) -> tuple[str, ...]:
       documented them (never invented), plus the explicit statement
       that nothing has been modified yet.
 
-    Never renders raw enum names or traceback content.
+    Never renders raw enum names or traceback content.  Machine codes shown
+    as-is (e.g. ``Hardware: SUPPORTED``, ``REQUIRED_HOST``) are preserved.
     """
     status = plan.status
     if status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS:
         return (
-            "No product declares GPU acceleration requirements.",
-            "The CPU deployment closure is preserved unchanged.",
+            translate("plan.no_requirements"),
+            translate("plan.cpu_preserved"),
         )
     if status is AcceleratedPlanStatus.UNKNOWN:
         return (
-            "GPU acceleration status could not be determined.",
-            "No accelerated change has been planned.",
+            translate("plan.unknown"),
+            translate("plan.no_change"),
         )
     if status is AcceleratedPlanStatus.BLOCKED:
-        reason = plan.blocked_reason or "no reason recorded"
+        reason = plan.blocked_reason or translate("plan.no_reason")
         return (
-            "GPU acceleration planning is blocked.",
-            f"Reason: {reason}",
+            translate("plan.blocked"),
+            translate("plan.reason", reason=reason),
         )
     # PLAN_READY
     lines = [
-        f"Hardware: {plan.hardware.status.value}",
-        f"Backend: {plan.backend}",
+        translate("plan.hardware", value=plan.hardware.status.value),
+        translate("plan.backend", backend=plan.backend),
     ]
     concerned = ", ".join(plan.products_concerned)
-    lines.append(f"Products concerned: {concerned or 'none'}")
+    lines.append(
+        translate(
+            "plan.products_concerned",
+            list=(concerned or translate("plan.none")),
+        )
+    )
     for keep in plan.keep_products:
-        commit = keep.commit_sha or "unknown"
-        lines.append(f"Keep {keep.product_id} {keep.version} (commit {commit})")
+        commit = keep.commit_sha or translate("plan.unknown_commit")
+        lines.append(
+            translate(
+                "plan.keep",
+                product=keep.product_id,
+                version=keep.version,
+                commit=commit,
+            )
+        )
     if plan.closure_impact:
-        lines.append("Planned actions:")
-        lines.extend(f" - {line}" for line in plan.closure_impact)
+        lines.append(translate("plan.actions"))
+        lines.extend(
+            translate("plan.action_item", line=line)
+            for line in plan.closure_impact
+        )
     else:
-        lines.append("Planned actions: none recorded")
+        lines.append(translate("plan.actions_none"))
     if plan.host_prerequisites is not None:
-        lines.append("Host prerequisites:")
+        lines.append(translate("plan.host_prereqs"))
         for entry in plan.host_prerequisites.required_host:
             observed = (
                 f" (observed {entry.observed})" if entry.observed else ""
@@ -250,7 +272,7 @@ def gpu_plan_preview_lines(plan) -> tuple[str, ...]:
             lines.append(
                 f" - MANAGED_RUNTIME {entry.entry} {entry.requirement}"
             )
-    lines.append("No changes have been made yet.")
+    lines.append(translate("plan.no_changes_yet"))
     return tuple(lines)
 
 
@@ -258,50 +280,43 @@ def gpu_plan_preview_lines(plan) -> tuple[str, ...]:
 # Accelerated deployment progress → UI view (M1-2I / I3)
 # ---------------------------------------------------------------------------
 
-#: Deterministic user-facing label per accelerated deployment phase.
-#: GATE renders like VALIDATE and PERSIST renders like ACTIVATE because
-#: they are sub-steps of the same user-visible moment (the honest check
-#: before activation, and the metadata write inside it).
-_ACCELERATED_PHASE_LABELS: dict[str, str] = {
-    AcceleratedDeploymentPhase.PREPARE.value: "Preparation",
-    AcceleratedDeploymentPhase.ACQUIRE.value: "Download",
-    AcceleratedDeploymentPhase.RESOLVE.value: "Dependency resolution",
-    AcceleratedDeploymentPhase.BUILD.value: "Runtime build",
-    AcceleratedDeploymentPhase.VALIDATE.value: "Validation",
-    AcceleratedDeploymentPhase.GATE.value: "Validation",
-    AcceleratedDeploymentPhase.PERSIST.value: "Activation",
-    AcceleratedDeploymentPhase.ACTIVATE.value: "Activation",
-    AcceleratedDeploymentPhase.COMPLETED.value: "Completed",
+#: i18n key per accelerated deployment phase.  GATE renders like VALIDATE and
+#: PERSIST renders like ACTIVATE because they are sub-steps of the same
+#: user-visible moment (the honest check before activation, and the metadata
+#: write inside it).
+_ACCELERATED_PHASE_KEYS: dict[str, str] = {
+    AcceleratedDeploymentPhase.PREPARE.value: "phase.preparation",
+    AcceleratedDeploymentPhase.ACQUIRE.value: "phase.download",
+    AcceleratedDeploymentPhase.RESOLVE.value: "phase.dependency_resolution",
+    AcceleratedDeploymentPhase.BUILD.value: "phase.runtime_build",
+    AcceleratedDeploymentPhase.VALIDATE.value: "phase.validation",
+    AcceleratedDeploymentPhase.GATE.value: "phase.validation",
+    AcceleratedDeploymentPhase.PERSIST.value: "phase.activation",
+    AcceleratedDeploymentPhase.ACTIVATE.value: "phase.activation",
+    AcceleratedDeploymentPhase.COMPLETED.value: "phase.completed",
 }
 
-#: User-facing label per shared ``InstallPhase`` observation.  Covers all
-#: ten phases: the accelerated path emits PREPARING / ACQUIRING_DEPENDENCIES
-#: / PLANNING_RUNTIME / INSTALLING_RUNTIME / VALIDATING / ACTIVATING /
+#: i18n key per shared ``InstallPhase`` observation.  Covers all ten phases:
+#: the accelerated path emits PREPARING / ACQUIRING_DEPENDENCIES /
+#: PLANNING_RUNTIME / INSTALLING_RUNTIME / VALIDATING / ACTIVATING /
 #: COMPLETED; the remaining three (product-install phases) are mapped
 #: defensively so a mixed event stream still renders honestly.
-_INSTALL_PHASE_LABELS: dict[InstallPhase, str] = {
-    InstallPhase.PREPARING: "Preparation",
-    InstallPhase.RESOLVING_SOURCE: "Download",
-    InstallPhase.DOWNLOADING_SOURCE: "Download",
-    InstallPhase.BUILDING_PRODUCT: "Runtime build",
-    InstallPhase.ACQUIRING_DEPENDENCIES: "Download",
-    InstallPhase.PLANNING_RUNTIME: "Dependency resolution",
-    InstallPhase.INSTALLING_RUNTIME: "Runtime build",
-    InstallPhase.VALIDATING: "Validation",
-    InstallPhase.ACTIVATING: "Activation",
-    InstallPhase.COMPLETED: "Completed",
+_INSTALL_PHASE_KEYS: dict[InstallPhase, str] = {
+    InstallPhase.PREPARING: "phase.preparation",
+    InstallPhase.RESOLVING_SOURCE: "phase.download",
+    InstallPhase.DOWNLOADING_SOURCE: "phase.download",
+    InstallPhase.BUILDING_PRODUCT: "phase.runtime_build",
+    InstallPhase.ACQUIRING_DEPENDENCIES: "phase.download",
+    InstallPhase.PLANNING_RUNTIME: "phase.dependency_resolution",
+    InstallPhase.INSTALLING_RUNTIME: "phase.runtime_build",
+    InstallPhase.VALIDATING: "phase.validation",
+    InstallPhase.ACTIVATING: "phase.activation",
+    InstallPhase.COMPLETED: "phase.completed",
 }
-
-#: The view before any observation: the deployment starts at PREPARE.
-_DEFAULT_ACCELERATED_VIEW: tuple[str, int | None, bool] = (
-    "Preparation",
-    None,
-    False,
-)
 
 
 def accelerated_phase_label(phase) -> str:
-    """Return a deterministic user-facing English label for a phase.
+    """Return a deterministic user-facing label for a phase.
 
     Accepts an
     :class:`~zealfie.acceleration.deployment.AcceleratedDeploymentPhase`
@@ -309,7 +324,10 @@ def accelerated_phase_label(phase) -> str:
     leaks raw enum values; unknown phases fall back to "In progress".
     """
     value = getattr(phase, "value", phase)
-    return _ACCELERATED_PHASE_LABELS.get(str(value), "In progress")
+    key = _ACCELERATED_PHASE_KEYS.get(str(value))
+    if key is None:
+        return translate("phase.in_progress")
+    return translate(key)
 
 
 def accelerated_install_view(events) -> tuple[str, int | None, bool]:
@@ -346,7 +364,7 @@ def accelerated_install_view(events) -> tuple[str, int | None, bool]:
     Invariants: ``percent=100`` is never returned unless ``done``;
     empty input yields ``("Preparation", None, False)``.
     """
-    label, percent, done = _DEFAULT_ACCELERATED_VIEW
+    label, percent, done = translate("phase.preparation"), None, False
     for event in events:
         if isinstance(event, AcceleratedDeploymentResult) or (
             hasattr(event, "success") and hasattr(event, "phase")
@@ -368,7 +386,8 @@ def accelerated_install_view(events) -> tuple[str, int | None, bool]:
 
         phase = getattr(event, "phase", None)
         if isinstance(phase, InstallPhase):
-            label = _INSTALL_PHASE_LABELS.get(phase, "In progress")
+            key = _INSTALL_PHASE_KEYS.get(phase)
+            label = translate(key) if key is not None else translate("phase.in_progress")
             percent = PHASE_PERCENT.get(phase)
             done = phase is InstallPhase.COMPLETED
             continue

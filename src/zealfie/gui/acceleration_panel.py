@@ -48,6 +48,7 @@ from zealfie.gui.presentation import (
     accelerated_phase_label,
     gpu_plan_preview_lines,
 )
+from zealfie.i18n import translate
 from zealfie.host import (
     AccelerationRecommendation,
     HostCapabilities,
@@ -69,33 +70,24 @@ def configure_button_visible(recommendation: AccelerationRecommendation | None) 
 def panel_summary(recommendation: AccelerationRecommendation | None) -> str:
     """Return the user-facing summary for a recommendation."""
     if recommendation is None:
-        return "GPU acceleration status is unknown."
+        return translate("gpu.status_unknown")
     status = recommendation.status
     if status is RecommendationStatus.OFFER_SETUP:
         gpu = _primary_nvidia_gpu(recommendation)
         if gpu is not None and gpu.model:
-            return (
-                f"NVIDIA GPU detected ({gpu.model}), driver available — "
-                "ZeSoftware GPU support: to configure"
-            )
-        return (
-            "NVIDIA GPU detected, driver available — ZeSoftware GPU support: "
-            "to configure"
-        )
+            return translate("gpu.offer_setup_nvidia", model=gpu.model)
+        return translate("gpu.offer_setup")
     if status is RecommendationStatus.ALREADY_READY:
         # ZA-M1-3A.2: ALREADY_READY is a SLOT-STATE verdict (active slot
         # carries valid accelerated-metadata and the recorded closure is
         # verified installed) — never the mere presence of a GPU.  The
         # wording distinguishes it explicitly from the OFFER_SETUP case.
-        return (
-            "GPU acceleration runtime active and validated "
-            "(accelerated closure verified in the active runtime slot)."
-        )
+        return translate("gpu.already_ready")
     if status is RecommendationStatus.BLOCKED:
-        return "NVIDIA GPU detected — compatible driver unavailable."
+        return translate("gpu.blocked")
     if status is RecommendationStatus.NOT_APPLICABLE:
-        return "No supported GPU detected — running in CPU mode."
-    return "GPU acceleration status is unknown."
+        return translate("gpu.not_applicable")
+    return translate("gpu.status_unknown")
 
 
 def panel_detail(recommendation: AccelerationRecommendation | None) -> str:
@@ -179,6 +171,7 @@ class AccelerationPanel(QFrame):
         self._recommendation: AccelerationRecommendation | None = None
         self._capabilities: HostCapabilities | None = None
         self._summary_label: QLabel | None = None
+        self._title_label: QLabel | None = None
         self._detail_label: QLabel | None = None
         self._detail_scroll: QScrollArea | None = None
         self._button: QPushButton | None = None
@@ -205,12 +198,12 @@ class AccelerationPanel(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(4)
 
-        title = QLabel("Acc\u00e9l\u00e9ration mat\u00e9rielle")
-        title_font = title.font()
+        self._title_label = QLabel(translate("gpu.panel_title"))
+        title_font = self._title_label.font()
         title_font.setBold(True)
-        title.setFont(title_font)
-        title.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(title)
+        self._title_label.setFont(title_font)
+        self._title_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self._title_label)
 
         self._summary_label = QLabel()
         self._summary_label.setWordWrap(True)
@@ -242,14 +235,14 @@ class AccelerationPanel(QFrame):
         self._detail_scroll.setVisible(False)
         layout.addWidget(self._detail_scroll)
 
-        self._button = QPushButton("Configurer le GPU")
+        self._button = QPushButton(translate("gpu.configure"))
         self._button.setObjectName("gpuConfigureButton")
         self._button.setMinimumWidth(150)
         self._button.clicked.connect(self._on_configure_clicked)
         self._button.setVisible(False)
         layout.addWidget(self._button)
 
-        self._install_button = QPushButton("Installer")
+        self._install_button = QPushButton(translate("gpu.install"))
         self._install_button.setObjectName("gpuInstallButton")
         self._install_button.setMinimumWidth(150)
         self._install_button.clicked.connect(self._on_install_clicked)
@@ -262,7 +255,7 @@ class AccelerationPanel(QFrame):
         self._progress_label.setVisible(False)
         layout.addWidget(self._progress_label)
 
-        self._cancel_button = QPushButton("Cancel")
+        self._cancel_button = QPushButton(translate("gpu.cancel"))
         self._cancel_button.setObjectName("gpuCancelButton")
         self._cancel_button.setMinimumWidth(150)
         self._cancel_button.clicked.connect(self._on_cancel_clicked)
@@ -345,7 +338,7 @@ class AccelerationPanel(QFrame):
         self._recommendation = None
         self._capabilities = None
         if self._summary_label is not None:
-            self._summary_label.setText("GPU acceleration status is unknown.")
+            self._summary_label.setText(translate("gpu.status_unknown"))
         if self._detail_label is not None:
             self._detail_label.setText(_short(message))
             self._set_detail_visible(True)
@@ -365,17 +358,17 @@ class AccelerationPanel(QFrame):
             return
         prepare = getattr(self._service, "prepare_gpu_setup_intent", None)
         if not callable(prepare):
-            self._show_detail("GPU configuration is not available in this version.")
+            self._show_detail(translate("gpu.configure_unavailable"))
             return
         recommendation = self._recommendation
         if recommendation is None:
-            self._show_detail("GPU acceleration status is unknown.")
+            self._show_detail(translate("gpu.status_unknown"))
             return
         try:
             intent = prepare(recommendation)
         except Exception as exc:
             self._show_detail(
-                f"GPU configuration check failed: {_short(str(exc))}"
+                translate("gpu.configure_check_failed", error=_short(str(exc)))
             )
             return
         # Build the read-only plan ONCE: the same plan feeds the preview
@@ -418,7 +411,7 @@ class AccelerationPanel(QFrame):
         try:
             return builder(**kwargs), None
         except Exception as exc:
-            return None, f"GPU plan preview unavailable: {_short(str(exc))}"
+            return None, translate("gpu.plan_unavailable", error=_short(str(exc)))
 
     def _show_detail(self, message: str) -> None:
         if self._detail_label is not None:
@@ -453,10 +446,7 @@ class AccelerationPanel(QFrame):
             return
         install = getattr(self._service, "install_accelerated_runtime", None)
         if not callable(install):
-            self._show_detail(
-                "Accelerated runtime installation is not available in "
-                "this version."
-            )
+            self._show_detail(translate("gpu.install_unavailable"))
             return
         plan = self._plan
         if plan is None or (
@@ -536,40 +526,47 @@ class AccelerationPanel(QFrame):
         if success:
             # The real end: the backend already reported COMPLETED (100%).
             if self._summary_label is not None:
-                self._summary_label.setText("Accelerated runtime ready")
+                self._summary_label.setText(translate("gpu.ready"))
             slot = getattr(result, "active_slot_id", None)
             if slot:
-                self._show_detail(f"Activated runtime slot: {slot}")
+                self._show_detail(translate("gpu.activated_slot", slot=slot))
             else:
-                self._show_detail("Accelerated runtime is ready.")
+                self._show_detail(translate("gpu.ready_detail"))
             # The plan was consumed by this deployment; no further
             # install offer until an explicit re-preview.
             self._plan = None
             self._update_install_button()
         elif cancelled:
             if self._summary_label is not None:
-                self._summary_label.setText(
-                    "Accelerated runtime installation cancelled"
-                )
+                self._summary_label.setText(translate("gpu.cancelled"))
             preserved = getattr(result, "old_runtime_preserved", None)
             if reason:
                 text = _short(str(reason))
                 if preserved:
-                    text += " The previous runtime was left untouched."
+                    text += " " + translate("gpu.cancelled_preserved")
                 self._show_detail(text)
             else:
-                self._show_detail(
-                    "Cancelled before any change — the previous "
-                    "runtime was left untouched."
-                )
+                self._show_detail(translate("gpu.cancelled_detail"))
             self._update_install_button()  # retry stays available
         else:
             if self._summary_label is not None:
-                self._summary_label.setText(
-                    "Accelerated runtime installation failed"
-                )
-            self._show_detail(_short(str(reason or "unknown error")))
+                self._summary_label.setText(translate("gpu.failed"))
+            self._show_detail(_short(str(reason or translate("gpu.unknown_error"))))
             self._update_install_button()  # retry stays available
+
+    def retranslate(self) -> None:
+        """Re-apply translated strings from the currently stored observation."""
+        if self._title_label is not None:
+            self._title_label.setText(translate("gpu.panel_title"))
+        if self._button is not None:
+            self._button.setText(translate("gpu.configure"))
+        if self._install_button is not None:
+            self._install_button.setText(translate("gpu.install"))
+        if self._cancel_button is not None:
+            self._cancel_button.setText(translate("gpu.cancel"))
+        self.set_recommendation(
+            self._recommendation, capabilities=self._capabilities
+        )
 
     def _cleanup_install_thread(self, thread) -> None:
         """Release references once the worker thread has fully exited.

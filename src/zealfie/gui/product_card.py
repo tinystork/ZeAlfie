@@ -42,6 +42,7 @@ from .presentation import (
     state_label,
     update_status_label,
 )
+from zealfie.i18n import translate
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,7 @@ class ProductCard(QFrame):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.addStretch()
 
-        self._update_button = QPushButton("Mettre à jour")
+        self._update_button = QPushButton(translate("cards.update"))
         self._update_button.setObjectName("updateButton")
         self._update_button.setMinimumWidth(130)
         self._update_button.setVisible(False)
@@ -282,9 +283,9 @@ class ProductCard(QFrame):
             sha = getattr(policy, "pin_sha", None) or ""
             if len(sha) > 7:
                 sha = sha[:7] + "\u2026"
-            return f"Policy: pin ({sha})"
+            return translate("cards.policy_pin", sha=sha)
         channel = getattr(policy, "channel", None) or ""
-        return f"Channel: {channel}" if channel else ""
+        return translate("cards.channel", channel=channel) if channel else ""
 
     def refresh_policy(self) -> None:
         """Re-sync the channel selector and policy label to the service state."""
@@ -321,7 +322,7 @@ class ProductCard(QFrame):
         """Wire the product state observables into the widget."""
         if state is None:
             if self._status_label:
-                self._status_label.setText("Loading\u2026")
+                self._status_label.setText(translate("cards.loading"))
             if self._action_button:
                 self._action_button.setText("\u2026")
                 self._action_button.setEnabled(False)
@@ -350,7 +351,7 @@ class ProductCard(QFrame):
     def _set_installing(self, installing: bool) -> None:
         self._installing = installing
         if not installing and self._update_button is not None:
-            self._update_button.setText("Mettre à jour")
+            self._update_button.setText(translate("cards.update"))
         if self._action_button:
             if self._state is not None:
                 self._action_button.setEnabled(
@@ -398,14 +399,16 @@ class ProductCard(QFrame):
 
         try:
             self._service.spawn_component(pid)
-            self._status_label.setText(f"Launching {self._descriptor.display_name}\u2026")
+            self._status_label.setText(
+                translate("cards.launching", name=self._descriptor.display_name)
+            )
         except Exception as exc:
             logger.error("Spawn of %r failed: %s", pid, exc)
             msg = str(exc)
             # Keep message short and user-friendly
             if len(msg) > 120:
                 msg = msg[:117] + "\u2026"
-            self._status_label.setText(f"Error: {msg}")
+            self._status_label.setText(translate("cards.error_prefix", msg=msg))
             self._last_spawn_error = msg
         finally:
             self._debounce_timer.start(DEBOUNCE_MS)
@@ -419,7 +422,9 @@ class ProductCard(QFrame):
         self._last_spawn_error = None
 
         if self._resolver is None or self._fetcher is None or self._work_root is None:
-            self._status_label.setText("Error: install dependencies not configured")
+            self._status_label.setText(
+                translate("cards.error_prefix", msg=translate("error.install_deps_missing"))
+            )
             logger.error("Install deps not wired for product %r", pid)
             return
 
@@ -437,7 +442,9 @@ class ProductCard(QFrame):
         self._last_spawn_error = None
 
         if self._resolver is None or self._fetcher is None or self._work_root is None:
-            self._status_label.setText("Error: update dependencies not configured")
+            self._status_label.setText(
+                translate("cards.error_prefix", msg=translate("error.update_deps_missing"))
+            )
             logger.error("Update deps not wired for product %r", pid)
             return
 
@@ -452,9 +459,9 @@ class ProductCard(QFrame):
         """Update card UI to reflect install in-progress / idle state."""
         self._set_installing(in_progress)
         if in_progress:
-            self._action_button.setText("Installation\u2026")
+            self._action_button.setText(translate("cards.installing"))
             self._status_label.setText(
-                f"Installation de {self._descriptor.display_name} en cours\u2026"
+                translate("cards.installing_status", name=self._descriptor.display_name)
             )
             if self._progress_bar is not None:
                 self._progress_bar.setValue(0)
@@ -466,9 +473,9 @@ class ProductCard(QFrame):
         self._set_installing(in_progress)
         if in_progress:
             if self._update_button is not None:
-                self._update_button.setText("Mise à jour\u2026")
+                self._update_button.setText(translate("cards.updating"))
             self._status_label.setText(
-                f"Mise à jour de {self._descriptor.display_name} en cours\u2026"
+                translate("cards.updating_status", name=self._descriptor.display_name)
             )
             if self._progress_bar is not None:
                 self._progress_bar.setValue(0)
@@ -498,7 +505,7 @@ class ProductCard(QFrame):
         """Show a user-friendly install error on the card (no traceback)."""
         if len(message) > 120:
             message = message[:117] + "\u2026"
-        self._status_label.setText(f"Install failed: {message}")
+        self._status_label.setText(translate("cards.install_failed", message=message))
         self._last_spawn_error = message
         if self._progress_bar is not None:
             self._progress_bar.setVisible(False)
@@ -508,7 +515,7 @@ class ProductCard(QFrame):
         """Show a user-friendly update error on the card (no traceback)."""
         if len(message) > 120:
             message = message[:117] + "\u2026"
-        self._status_label.setText(f"Update failed: {message}")
+        self._status_label.setText(translate("cards.update_failed", message=message))
         self._last_spawn_error = message
         if self._progress_bar is not None:
             self._progress_bar.setVisible(False)
@@ -521,7 +528,7 @@ class ProductCard(QFrame):
         refresh succeeds.
         """
         self._status_label.setText(
-            f"Installation complete — refresh required"
+            translate("cards.install_complete_refresh_required")
         )
         self._awaiting_install_refresh = True
         # Keep installing flag True so button stays disabled

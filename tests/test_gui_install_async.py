@@ -301,15 +301,15 @@ class TestProductCardInstallRequested:
         try:
             card.set_install_in_progress(True)
             btn = card._action_button
-            assert "Installation" in btn.text()
+            assert "Installing" in btn.text()
             assert btn.isEnabled() is False
             status = card._status_label.text()
-            assert "Installation de ZeSolver en cours" in status
+            assert "Installing ZeSolver" in status
 
             card.set_install_in_progress(False)
             card.refresh_state(state)
             assert btn.isEnabled() is True
-            assert "Installer" in btn.text()
+            assert "Install" in btn.text()
         finally:
             card.close()
             card.deleteLater()
@@ -660,7 +660,7 @@ class TestMainWindowAsyncInstall:
             # Card must show post-install state
             assert card._state.installed is True
             assert card._state.launchable is True
-            assert "Lancer" in card._action_button.text()
+            assert "Launch" in card._action_button.text()
             assert card._action_button.isEnabled() is True
         finally:
             window.close()
@@ -812,7 +812,7 @@ class TestMainWindowAsyncInstall:
             )
             # Button text stays in installation state — honest UX:
             # we don't fabricate a fake "Installer" state.
-            assert "Installation" in card._action_button.text(), (
+            assert "Installing" in card._action_button.text(), (
                 "Button text should reflect installation progress, not fake state"
             )
         finally:
@@ -1001,7 +1001,7 @@ class TestMainWindowAsyncInstall:
 
             # Second install — card needs to be in not-installed state
             card.refresh_state(second_pre_state)
-            assert "Installer" in card._action_button.text()
+            assert "Install" in card._action_button.text()
 
             card._action_button.click()
             ok2 = _wait_for(qapp, lambda: not window.install_active, timeout_ms=3000)

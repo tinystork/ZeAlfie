@@ -324,10 +324,10 @@ class TestProductCardUpdateAction:
             )
             assert not card._update_button.isHidden()
             assert card._update_button.isEnabled()
-            assert "Mettre à jour" in card._update_button.text()
+            assert "Update" in card._update_button.text()
 
             # Primary Lancer remains visible and enabled (separate action).
-            assert "Lancer" in card._action_button.text()
+            assert "Launch" in card._action_button.text()
             assert card._action_button.isEnabled()
 
             card.set_update_status(_result("zesolver", UpdateStatus.UP_TO_DATE))
@@ -452,7 +452,7 @@ class TestMainWindowUpdateAction:
             # Card remains installed + launchable (still Lancer, enabled).
             assert card._state.installed is True
             assert card._state.launchable is True
-            assert "Lancer" in card._action_button.text()
+            assert "Launch" in card._action_button.text()
             assert card._action_button.isEnabled()
 
             # Update display is now Up to date (no direct service script).
@@ -533,7 +533,7 @@ class TestMainWindowUpdateAction:
 
             # Lock released; Lancer still possible (installed + launchable).
             assert card._action_button.isEnabled()
-            assert "Lancer" in card._action_button.text()
+            assert "Launch" in card._action_button.text()
 
             # Update remains available → retry possible.
             assert not card._update_button.isHidden()

@@ -845,7 +845,7 @@ class TestAccelerationPanelInstall:
             panel.set_recommendation(_rec())
             panel._button.click()
             assert panel._install_button.isHidden() is False
-            assert "Installer" in panel._install_button.text()
+            assert "Install" in panel._install_button.text()
             # Preview still shown in the detail label.
             assert "No changes have been made yet." in panel._detail_label.text()
         finally:

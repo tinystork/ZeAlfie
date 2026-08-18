@@ -290,7 +290,7 @@ class TestProductCardUpdateStatus:
             assert btn.text() == before_btn
             assert btn.isEnabled() == before_enabled
             assert status_label.text() == before_status
-            assert "Lancer" in btn.text()
+            assert "Launch" in btn.text()
         finally:
             card.close()
             card.deleteLater()
@@ -466,7 +466,7 @@ class TestMainWindowUpdateChecks:
             assert service.install_calls == []
             assert service.spawn_calls == []
             # The action button is unchanged (still "Lancer" for launchable).
-            assert "Lancer" in window._cards["zesolver"]._action_button.text()
+            assert "Launch" in window._cards["zesolver"]._action_button.text()
         finally:
             window.close()
             window.deleteLater()

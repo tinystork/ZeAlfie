@@ -153,7 +153,7 @@ def test_panel_offering_config_only_when_allowed(qapp):
     try:
         panel.set_recommendation(_rec(RecommendationStatus.OFFER_SETUP, gpus=(_nvidia_gpu(),)))
         assert panel._button.isHidden() is False
-        assert "Configurer le GPU" in panel._button.text()
+        assert "Configure GPU" in panel._button.text()
     finally:
         panel.close()
         panel.deleteLater()

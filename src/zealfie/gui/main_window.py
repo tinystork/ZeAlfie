@@ -32,6 +32,7 @@ from zealfie.app import (
 from zealfie.app.update_checks import CheckFunction
 from zealfie.sources.acquisition import ArchiveFetcher
 from zealfie.sources import SourceRefResolver
+from zealfie.i18n import Language, LanguageStore, get_language, set_language, translate
 
 from .presentation import action_enabled, runtime_summary
 from .product_card import ProductCard
@@ -42,13 +43,8 @@ from .acceleration_panel import AccelerationPanel
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Known UX limitation — shown during active install
+# Known UX limitation — shown during active install (text via i18n)
 # ---------------------------------------------------------------------------
-
-_KNOWN_LIMITATION_TEXT = (
-    "KNOWN UX LIMITATION: running product installations cannot yet be cancelled."
-)
-
 
 class ZeAlfieMainWindow(QMainWindow):
     """ZeAlfie product shell main window.
@@ -82,8 +78,10 @@ class ZeAlfieMainWindow(QMainWindow):
         self._cards: dict[str, ProductCard] = {}
         self._status_label: QLabel | None = None
         self._error_label: QLabel | None = None
+        self._subtitle_label: QLabel | None = None
         self._cards_container: QWidget | None = None
         self._acceleration_panel: AccelerationPanel | None = None
+        self._language_actions: dict = {}
 
         # M1-2D.5: global install coordination
         self._install_active: bool = False
@@ -113,7 +111,7 @@ class ZeAlfieMainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        self.setWindowTitle("ZeAlfie — Astronomy Launcher For Imaging Engines")
+        self.setWindowTitle(translate("app.title"))
         self.resize(580, 500)
 
         # --- Central scroll area ---
@@ -134,9 +132,9 @@ class ZeAlfieMainWindow(QMainWindow):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(title)
 
-        subtitle = QLabel("Astronomy Launcher For Imaging Engines  \U0001f47d")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(subtitle)
+        self._subtitle_label = QLabel(translate("app.subtitle"))
+        self._subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(self._subtitle_label)
 
         central_layout.addLayout(header_layout)
 
@@ -163,7 +161,7 @@ class ZeAlfieMainWindow(QMainWindow):
         central_layout.addWidget(self._error_label)
 
         # --- Known UX limitation label (hidden unless install active) ---
-        self._known_limitation_label = QLabel(_KNOWN_LIMITATION_TEXT)
+        self._known_limitation_label = QLabel(translate("app.known_limitation"))
         self._known_limitation_label.setStyleSheet(
             "color: #e67e22; font-style: italic;"
         )
@@ -202,7 +200,7 @@ class ZeAlfieMainWindow(QMainWindow):
 
         # --- Status bar ---
         status_bar = QStatusBar()
-        self._status_label = QLabel("Starting\u2026")
+        self._status_label = QLabel(translate("status.starting"))
         self._status_label.setObjectName("statusLabel")
         status_bar.addWidget(self._status_label)
         self.setStatusBar(status_bar)
@@ -213,6 +211,7 @@ class ZeAlfieMainWindow(QMainWindow):
         self._refresh_action.triggered.connect(self._refresh)
         menu = self.menuBar().addMenu("&Shell")
         menu.addAction(self._refresh_action)
+        self._build_language_menu(menu)
 
         toolbar = self.addToolBar('Shell')
         toolbar.addAction(self._refresh_action)
@@ -231,7 +230,7 @@ class ZeAlfieMainWindow(QMainWindow):
         except Exception as exc:
             logger.error("list_products failed during startup: %s", exc)
             self._show_startup_error(
-                f"Could not load product catalog: {exc}",
+                translate("error.catalog_load", exc=exc),
             )
             return
 
@@ -273,10 +272,7 @@ class ZeAlfieMainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _refresh(self) -> None:
-        """Collect fresh product state from the service and update cards.
-
-        Calls ``service.collect_product_state()`` — never probes the
-        filesystem or calls subprocess from Qt.
+        """Collect fresh product state and refresh the acceleration panel.
 
         M1-2D.5: Refuses to run while an install is active.
         """
@@ -284,18 +280,23 @@ class ZeAlfieMainWindow(QMainWindow):
             logger.debug("Refresh blocked — install in progress")
             if self._status_label:
                 self._status_label.setText(
-                    "Installation in progress — refresh deferred"
+                    translate("status.refresh_deferred")
                 )
             return
 
+        self._refresh_products()
+        self._refresh_acceleration()
+
+    def _refresh_products(self) -> None:
+        """Collect product state and update cards + status bar (no probing)."""
         logger.debug("Refreshing product state")
         try:
             shell: ProductShellState = self._service.collect_product_state()
         except Exception as exc:
             logger.error("Refresh failed: %s", exc)
-            self._show_startup_error(f"Could not collect product state: {exc}")
+            self._show_startup_error(translate("error.collect_state", exc=exc))
             if self._status_label:
-                self._status_label.setText("Refresh failed")
+                self._status_label.setText(translate("status.refresh_failed"))
             return
 
         # Clear any previous error
@@ -310,10 +311,6 @@ class ZeAlfieMainWindow(QMainWindow):
 
         # Update status bar
         self._update_status_bar(shell)
-
-        # Refresh the hardware acceleration panel from the service's
-        # recommendation (never probes the system from Qt).
-        self._refresh_acceleration()
 
     def _refresh_acceleration(self) -> None:
         """Update the acceleration panel from the service observation.
@@ -350,6 +347,65 @@ class ZeAlfieMainWindow(QMainWindow):
         self._acceleration_panel.set_recommendation(
             recommendation, capabilities=capabilities
         )
+
+    # ------------------------------------------------------------------
+    # Runtime language selection
+    # ------------------------------------------------------------------
+
+    def _build_language_menu(self, menu) -> None:
+        """Add a Language submenu with English / Français actions."""
+        lang_menu = menu.addMenu("&Language")
+        for lang, label in ((Language.EN, "English"), (Language.FR, "Français")):
+            action = QAction(label, self, checkable=True)
+            action.setChecked(get_language() is lang)
+            action.triggered.connect(
+                lambda checked=False, l=lang: self._on_language_selected(l)
+            )
+            lang_menu.addAction(action)
+            self._language_actions[lang] = action
+
+    def _on_language_selected(self, lang: Language) -> None:
+        """Switch the UI language, persist the preference, and re-render."""
+        set_language(lang)
+        try:
+            LanguageStore().save(lang)
+        except Exception as exc:
+            logger.warning("failed to persist language preference: %s", exc)
+        self._retranslate()
+
+    def _retranslate(self) -> None:
+        """Re-apply every translated string and rebuild the cards.
+
+        Re-applies static labels, re-renders the acceleration panel from its
+        stored observation (no re-probe), rebuilds the product cards, and
+        refreshes their state.  Deliberately does not re-run update checks or
+        re-probe host capabilities.
+        """
+        self.setWindowTitle(translate("app.title"))
+        if self._subtitle_label is not None:
+            self._subtitle_label.setText(translate("app.subtitle"))
+        if self._known_limitation_label is not None:
+            self._known_limitation_label.setText(translate("app.known_limitation"))
+        for lang, action in self._language_actions.items():
+            action.setChecked(get_language() is lang)
+        if self._acceleration_panel is not None:
+            self._acceleration_panel.retranslate()
+        self._clear_cards()
+        self._populate_cards()
+        self._refresh_products()
+
+    def _clear_cards(self) -> None:
+        """Remove every product card from the cards layout."""
+        layout = self._cards_layout()
+        if layout is None:
+            self._cards = {}
+            return
+        while layout.count() > 1:
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._cards = {}
 
     # ------------------------------------------------------------------
     # M1-2E LOT E.4: Read-only update checks (informational only)
@@ -484,7 +540,7 @@ class ZeAlfieMainWindow(QMainWindow):
         # Scramble the status bar
         if self._status_label:
             self._status_label.setText(
-                f"Installing {card._descriptor.display_name}\u2026"
+                translate("status.installing", name=card._descriptor.display_name)
             )
 
     def _on_update_requested(self, product_id: str) -> None:
@@ -507,7 +563,7 @@ class ZeAlfieMainWindow(QMainWindow):
             return
 
         if self._resolver is None or self._fetcher is None or self._work_root is None:
-            card.set_update_error("update dependencies not configured")
+            card.set_update_error(translate("error.update_deps_missing"))
             logger.error("Update deps not wired for product %r", product_id)
             return
 
@@ -541,7 +597,7 @@ class ZeAlfieMainWindow(QMainWindow):
 
         if self._status_label:
             self._status_label.setText(
-                f"Mise à jour de {card._descriptor.display_name}\u2026"
+                translate("status.updating", name=card._descriptor.display_name)
             )
 
     def _on_channel_changed(self, product_id: str, channel: str) -> None:
@@ -612,9 +668,9 @@ class ZeAlfieMainWindow(QMainWindow):
         card = self._cards.get(product_id)
         if card:
             if operation == "update":
-                card._status_label.setText("Update complete — refreshing\u2026")
+                card._status_label.setText(translate("status.update_complete_refreshing"))
             else:
-                card._status_label.setText("Installation complete — refreshing\u2026")
+                card._status_label.setText(translate("status.install_complete_refreshing"))
 
         # Refresh to get authoritative state
         try:
@@ -625,7 +681,7 @@ class ZeAlfieMainWindow(QMainWindow):
             for c in self._cards.values():
                 c.set_install_complete_refresh_required()
             if self._status_label:
-                self._status_label.setText("Refresh failed after installation")
+                self._status_label.setText(translate("status.refresh_failed_after_install"))
             return
 
         # Apply new state to all cards
@@ -655,7 +711,9 @@ class ZeAlfieMainWindow(QMainWindow):
 
         if self._status_label:
             self._status_label.setText(
-                "Update failed" if operation == "update" else "Installation failed"
+                translate("status.update_failed")
+                if operation == "update"
+                else translate("status.install_failed")
             )
 
     def _recheck_update(self, product_id: str) -> None:
@@ -718,7 +776,7 @@ class ZeAlfieMainWindow(QMainWindow):
         if self._install_active:
             if self._status_label:
                 self._status_label.setText(
-                    "Installation in progress — please wait for it to finish."
+                    translate("status.install_in_progress_wait")
                 )
             event.ignore()
             return

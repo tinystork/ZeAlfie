@@ -12,6 +12,7 @@ import sys
 from zealfie.app import ZeAlfieService
 from zealfie.sources.github import GitHubArchiveFetcher, GitHubSourceRefResolver
 from zealfie.app.install_defaults import default_install_work_root
+from zealfie.i18n import effective_language, set_language
 
 from .main_window import ZeAlfieMainWindow
 
@@ -57,6 +58,11 @@ def run_gui() -> None:
     check_fn = lambda product_id: service.check_product_update(
         product_id, resolver=resolver
     )
+
+    # M1-4 LOT E: apply the persisted preference (or first-run locale
+    # inference) before building the UI so the shell renders in the right
+    # language from the start.
+    set_language(effective_language())
 
     window = ZeAlfieMainWindow(
         service=service,
