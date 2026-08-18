@@ -759,7 +759,7 @@ class ZeAlfieService:
         staging_dir: Path,
         *,
         proven: tuple[tuple[str, str], ...],
-    ) -> None:
+    ) -> bool:
         """Acquire dependencies for one prepared product wheel.
 
         When a shared artifact cache is available AND the active installed
@@ -767,25 +767,33 @@ class ZeAlfieService:
         identities from the cache (fail-closed, digest-verified) instead of
         the network; otherwise the call is byte-identical to the
         pre-cache behaviour.
+
+        Returns ``True`` when the acquirer reported that the wheelhouse was
+        seeded from the verified artifact cache (observational, ZA-M1-3A.3
+        LOT E) - the caller may surface an honest "reusing cached
+        dependencies" message.  Test doubles that return ``None`` yield
+        ``False``.
         """
         desc = self._catalog.get(prepared_artifact.product_id)
         req = build_acquisition_request(
             prepared_artifact.wheel_path,
             active_extras=frozenset(desc.required_extras),
         )
+        result: DependencyAcquisitionResult | None
         if self._artifact_cache is not None:
             # Pass the cache whenever it exists: with a proven closure the
             # acquirer may satisfy identities locally (0 network for hits);
             # without one it still FEEDS the verified result into the cache
             # so the next transaction can reuse it.
-            self._acquirer.acquire(
+            result = self._acquirer.acquire(
                 req,
                 staging_dir=staging_dir,
                 cache=self._artifact_cache,
                 proven_requirements=proven,
             )
         else:
-            self._acquirer.acquire(req, staging_dir=staging_dir)
+            result = self._acquirer.acquire(req, staging_dir=staging_dir)
+        return bool(getattr(result, "seeded_from_cache", False))
 
     # ------------------------------------------------------------------
     # M1-2G: Host acceleration discovery (read-only)
@@ -1495,9 +1503,20 @@ class ZeAlfieService:
                     )
                     auto_staging = _private_acquisition_staging(work_root)
                     proven = self._proven_dependency_requirements()
+                    reused = False
                     for pa in prepared:
-                        self._acquire_product_dependencies(
-                            pa, auto_staging, proven=proven,
+                        reused = (
+                            self._acquire_product_dependencies(
+                                pa, auto_staging, proven=proven,
+                            )
+                            or reused
+                        )
+                    if reused:
+                        _emit_progress(
+                            progress_callback,
+                            InstallPhase.ACQUIRING_DEPENDENCIES,
+                            PHASE_PERCENT[InstallPhase.ACQUIRING_DEPENDENCIES],
+                            "Reusing cached dependencies",
                         )
                     dependency_wheelhouse = auto_staging
                 _emit_progress(
@@ -2136,10 +2155,13 @@ class ZeAlfieService:
         the same source SHA is always described honestly.
 
         ZA-M1-3A.3 LOT E (update-UX): the returned artifact is marked
-        ``origin="keep"`` so downstream progress wording can distinguish a
-        preserved product from a fresh install; a KEEP product is never
+        ``origin="keep"`` and an honest progress message is emitted —
+        ``Preserving <display> <version>`` when the cache served the exact
+        wheel, ``Reacquiring <display> <version> for runtime rebuild`` when
+        the exact-SHA rebuild path had to run.  A KEEP product is never
         labelled "Installing" or "Updating".
         """
+        display = _product_display_name(self._catalog, product_id)
         cache = self._artifact_cache
         if cache is not None:
             cached_wheel = cache.cached_path_for_digest(
@@ -2173,6 +2195,12 @@ class ZeAlfieService:
                     # Propagate known discovery-policy metadata forward
                     # (no re-resolution).  A pre-Phase-4 provenance record
                     # yields None → policy-unknown.
+                    _emit_progress(
+                        progress_callback,
+                        InstallPhase.PREPARING,
+                        PHASE_PERCENT[InstallPhase.PREPARING],
+                        f"Preserving {display} {provenance.version}",
+                    )
                     return replace(
                         prepared,
                         policy=_policy_from_provenance(provenance),
@@ -2198,6 +2226,12 @@ class ZeAlfieService:
             )
         # Propagate known discovery-policy metadata forward (no re-resolution).
         # A pre-Phase-4 provenance record yields None → policy-unknown.
+        _emit_progress(
+            progress_callback,
+            InstallPhase.BUILDING_PRODUCT,
+            PHASE_PERCENT[InstallPhase.BUILDING_PRODUCT],
+            f"Reacquiring {display} {provenance.version} for runtime rebuild",
+        )
         return replace(
             prepared,
             policy=_policy_from_provenance(provenance),
@@ -3073,6 +3107,7 @@ class ZeAlfieService:
         try:
             # --- 2. Prepare artifacts for ALL desired products -----------
             prepared: list[PreparedProductArtifact] = []
+            update_target: PreparedProductArtifact | None = None
             for pid in desired_ids:
                 if pid == product_id:
                     pa = self._prepare_target_product_artifact(
@@ -3085,6 +3120,7 @@ class ZeAlfieService:
                     )
                     if old_version is not None:
                         pa = replace(pa, origin=ORIGIN_UPDATE)
+                        update_target = pa
                 else:
                     pa = self._prepare_keep_product_artifact(
                         pid,
@@ -3094,6 +3130,22 @@ class ZeAlfieService:
                         progress_callback=progress_callback,
                     )
                 prepared.append(pa)
+
+            # --- 2b. Honest update message once old AND new are known ---
+            # Emitted right after the target artifact is prepared (the new
+            # version only exists then).  BUILDING_PRODUCT keeps the
+            # progress contract monotone: PREPARING/RESOLVING_SOURCE
+            # percents would regress after the target's build emissions.
+            if update_target is not None and old_version is not None:
+                _emit_progress(
+                    progress_callback,
+                    InstallPhase.BUILDING_PRODUCT,
+                    PHASE_PERCENT[InstallPhase.BUILDING_PRODUCT],
+                    (
+                        f"Updating {_product_display_name(self._catalog, product_id)} "
+                        f"{old_version} -> {update_target.verified_artifact.version}"
+                    ),
+                )
 
             # --- 3. Auto-acquire ONE combined dependency wheelhouse ------
             if auto_acquire:
@@ -3106,9 +3158,20 @@ class ZeAlfieService:
                     )
                     auto_staging = _private_acquisition_staging(work_root)
                     proven = self._proven_dependency_requirements()
+                    reused = False
                     for pa in prepared:
-                        self._acquire_product_dependencies(
-                            pa, auto_staging, proven=proven,
+                        reused = (
+                            self._acquire_product_dependencies(
+                                pa, auto_staging, proven=proven,
+                            )
+                            or reused
+                        )
+                    if reused:
+                        _emit_progress(
+                            progress_callback,
+                            InstallPhase.ACQUIRING_DEPENDENCIES,
+                            PHASE_PERCENT[InstallPhase.ACQUIRING_DEPENDENCIES],
+                            "Reusing cached dependencies",
                         )
                     dependency_wheelhouse = auto_staging
                 except (FileNotFoundError, MetadataError, ExtraNotFound,

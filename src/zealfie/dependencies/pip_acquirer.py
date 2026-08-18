@@ -197,6 +197,7 @@ class PipWheelhouseAcquirer:
             return DependencyAcquisitionResult(
                 staging_wheelhouse=staging_dir,
                 acquired=acquired,
+                seeded_from_cache=seed_dir is not None,
             )
 
         except Exception:

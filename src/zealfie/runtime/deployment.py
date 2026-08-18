@@ -43,7 +43,10 @@ from .model import (
     RuntimeState,
 )
 from .planning import (
+    ORIGIN_KEEP,
+    ORIGIN_UPDATE,
     DeploymentPlan,
+    DeploymentStep,
     DesiredComponent,
     PlanningError,
     check_desired_state_conflicts,
@@ -318,14 +321,17 @@ def _apply_deployment_plan_locked(
     install_names = dep_names + [dc.component_id for dc in plan.desired_state.components]
     install_counter = {"i": 0}
 
-    def _emit_install(name):
+    def _emit_install_message(message: str) -> None:
         total = len(install_names)
         if total > 0:
             pct = interpolate_percent(install_counter["i"], total)
         else:
             pct = PHASE_PERCENT[InstallPhase.INSTALLING_RUNTIME]
         install_counter["i"] += 1
-        _emit(InstallPhase.INSTALLING_RUNTIME, pct, f"Installing {name}\u2026")
+        _emit(InstallPhase.INSTALLING_RUNTIME, pct, message)
+
+    def _emit_install(name):
+        _emit_install_message(f"Installing {name}\u2026")
 
     # ---- 1. Preflight: blocked plan ----------------------------------------
     if plan.blocked:
@@ -439,6 +445,7 @@ def _apply_deployment_plan_locked(
     # regardless of KEEP/INSTALL action.  Each artifact is TOCTOU-revalidated
     # immediately before pip handoff.
     definitions: list[ComponentDefinition] = []
+    steps_by_id = {s.component_id: s for s in plan.steps}
 
     for desired in plan.desired_state.components:
         # Resolve definition from registry.
@@ -469,7 +476,13 @@ def _apply_deployment_plan_locked(
             return fail
 
         # Install the component wheel into the candidate.
-        _emit_install(desired.component_id)
+        _emit_install_message(
+            _component_install_message(
+                desired,
+                definition,
+                steps_by_id.get(desired.component_id),
+            )
+        )
         result = runtime.install_local_wheel(
             fresh_artifact.path,
             slot_id=txn.candidate_slot_id,
@@ -574,6 +587,43 @@ def _apply_deployment_plan_locked(
         active_slot_id=act_status.active_slot_id,
         previous_slot_id=act_status.previous_slot_id,
     )
+
+
+def _component_install_message(
+    desired: DesiredComponent,
+    definition: ComponentDefinition | None,
+    step: DeploymentStep | None,
+) -> str:
+    """Return the honest per-component install-loop message.
+
+    The wording is driven by the component's service-level *origin*
+    (ZA-M1-3A.3 LOT E): a preserved product is never labelled
+    "Installing" or "Updating".
+
+    * ``keep``    -> ``Preserving <display> <version>``
+    * ``update``  -> ``Updating <display> <old> -> <new>`` when the
+      planned step observed the previously installed version, otherwise
+      ``Updating <display> <version>``
+    * ``install`` -> ``Installing <display> <version>``
+
+    ``display`` is the catalog display name when available, falling back
+    to the component id.  The message never affects behaviour - it is
+    progress observation only.
+    """
+    display = (
+        definition.display_name
+        if definition is not None and definition.display_name
+        else desired.component_id
+    )
+    version = desired.version
+    if desired.origin == ORIGIN_KEEP:
+        return f"Preserving {display} {version}"
+    if desired.origin == ORIGIN_UPDATE:
+        current = step.current_version if step is not None else None
+        if current and current != version:
+            return f"Updating {display} {current} -> {version}"
+        return f"Updating {display} {version}"
+    return f"Installing {display} {version}"
 
 
 def _revalidate_artifact(

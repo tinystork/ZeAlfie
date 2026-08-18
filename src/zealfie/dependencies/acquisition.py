@@ -214,6 +214,11 @@ class DependencyAcquisitionResult:
 
     staging_wheelhouse: Path
     acquired: tuple[AcquiredWheel, ...]
+    # ZA-M1-3A.3 LOT E: True when the wheelhouse was seeded from the shared
+    # verified artifact cache (find-links candidates from proven
+    # identities).  Observational only - the seeded candidates are never
+    # an authority for what was actually installed.
+    seeded_from_cache: bool = False
 
 
 # ---------------------------------------------------------------------------
