@@ -1227,18 +1227,29 @@ def _embed_panel(panel, width: int = 520, height: int = 500) -> QWidget:
 
 
 def _assert_no_overlap_no_clip(panel: AccelerationPanel) -> None:
-    """The detail text must fully fit its label and never overlap the
-    action buttons; the buttons must be fully inside the panel frame."""
+    """The detail area is bounded and scrollable, the wrapped text stays
+    fully inspectable (scrollable — never truncated to the viewport), and
+    the action buttons never overlap the detail area nor get clipped by
+    the panel frame."""
     detail = panel._detail_label
+    scroll = panel._detail_scroll
     assert detail.isHidden() is False
-    detail_rect = detail.geometry()
-    needed = detail.heightForWidth(detail_rect.width())
-    # The wrapped text must fit the label (no truncation/clipping).
-    assert detail_rect.height() >= needed, (
-        f"detail label {detail_rect.height()}px tall but its wrapped "
+    assert scroll is not None and scroll.isHidden() is False
+    # The scroll container is bounded: it never exceeds its maximum.
+    assert scroll.maximumHeight() > 0
+    assert scroll.height() <= scroll.maximumHeight() + 2, (
+        f"detail scroll area {scroll.height()}px exceeds its "
+        f"maximum {scroll.maximumHeight()}px"
+    )
+    # The wrapped text is still fully inspectable: the label keeps its
+    # full content height (scrollable), never truncated to the viewport.
+    needed = detail.heightForWidth(detail.width())
+    assert detail.height() >= needed - 1, (
+        f"detail label {detail.height()}px tall but its wrapped "
         f"text needs {needed}px"
     )
-    prev_bottom = detail_rect.bottom()
+    # Buttons sit below the bounded detail area (panel coordinates).
+    detail_bottom = scroll.geometry().bottom()
     for button in (
         panel._button,
         panel._install_button,
@@ -1247,16 +1258,13 @@ def _assert_no_overlap_no_clip(panel: AccelerationPanel) -> None:
         if button is None or button.isHidden():
             continue
         rect = button.geometry()
-        # Button starts below the previous item (small tolerance for the
-        # layout spacing / frame margins).
-        assert rect.top() >= prev_bottom - 2, (
-            f"{button.objectName()} overlaps the detail text: "
-            f"top={rect.top()} previous_bottom={prev_bottom}"
+        assert rect.top() >= detail_bottom - 2, (
+            f"{button.objectName()} overlaps the detail area: "
+            f"top={rect.top()} detail_bottom={detail_bottom}"
         )
         assert panel.rect().contains(rect), (
             f"{button.objectName()} is clipped by the panel frame"
         )
-        prev_bottom = rect.bottom()
 
 
 class TestAccelerationPanelSizing:
@@ -1279,13 +1287,24 @@ class TestAccelerationPanelSizing:
             panel.deleteLater()
             qapp.processEvents()
 
-    def test_no_fixed_or_maximum_heights_anywhere(self, qapp):
+    def test_only_detail_scroll_is_height_bounded(self, qapp):
         from zealfie.gui.acceleration_panel import AccelerationPanel
 
         panel = AccelerationPanel(service=_FakePanelService(plan=_ready_plan()))
         try:
             panel.set_recommendation(_rec())
             panel._button.click()
+            # The bounded/scrollable detail container is the ONLY widget
+            # with a maximum height (M1-4 LOT B); every other widget stays
+            # unclipped so the panel never grows unbounded yet the
+            # summary/buttons/labels can still lay out naturally.
+            scroll = panel._detail_scroll
+            assert scroll is not None
+            assert isinstance(scroll, QScrollArea)
+            assert scroll.maximumHeight() == 180, (
+                "the detail scroll area must be height-bounded"
+            )
+            assert scroll.minimumHeight() == 0
             widgets = (
                 panel,
                 panel._summary_label,
@@ -1373,7 +1392,7 @@ class TestAccelerationPanelSizing:
             # (PLAN_READY preview) and must be inside the panel.
             assert panel._install_button.isHidden() is False
             assert panel._button.geometry().top() >= (
-                panel._detail_label.geometry().bottom() - 2
+                panel._detail_scroll.geometry().bottom() - 2
             )
         finally:
             host.close()

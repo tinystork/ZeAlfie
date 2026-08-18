@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -179,6 +180,7 @@ class AccelerationPanel(QFrame):
         self._capabilities: HostCapabilities | None = None
         self._summary_label: QLabel | None = None
         self._detail_label: QLabel | None = None
+        self._detail_scroll: QScrollArea | None = None
         self._button: QPushButton | None = None
         self._install_button: QPushButton | None = None
         self._cancel_button: QPushButton | None = None
@@ -214,10 +216,31 @@ class AccelerationPanel(QFrame):
         self._summary_label.setWordWrap(True)
         layout.addWidget(self._summary_label)
 
+        # M1-4 LOT B: the GPU plan preview is word-wrapped text that can
+        # grow arbitrarily long.  Render it inside a bounded, scrollable
+        # container so a long preview never expands the whole shell (and
+        # never pushes the product cards below the visible area).  The
+        # label keeps its word-wrap semantics and the existing 1600-char
+        # truncation discipline in :meth:`_show_detail`.
         self._detail_label = QLabel()
         self._detail_label.setWordWrap(True)
-        self._detail_label.setVisible(False)
-        layout.addWidget(self._detail_label)
+
+        self._detail_scroll = QScrollArea()
+        self._detail_scroll.setObjectName("gpuDetailScrollArea")
+        self._detail_scroll.setWidgetResizable(True)
+        self._detail_scroll.setMaximumHeight(180)
+        self._detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._detail_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        # The scroll container must never try to expand vertically to
+        # fill extra space — only the (bounded) content height.
+        self._detail_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        self._detail_scroll.setWidget(self._detail_label)
+        self._detail_scroll.setVisible(False)
+        layout.addWidget(self._detail_scroll)
 
         self._button = QPushButton("Configurer le GPU")
         self._button.setObjectName("gpuConfigureButton")
@@ -273,6 +296,11 @@ class AccelerationPanel(QFrame):
                 sh.setHeight(max(sh.height(), layout.totalHeightForWidth(width)))
         return sh
 
+    def _set_detail_visible(self, visible: bool) -> None:
+        """Show/hide the bounded detail container (not just the label)."""
+        if self._detail_scroll is not None:
+            self._detail_scroll.setVisible(visible)
+
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
@@ -303,7 +331,7 @@ class AccelerationPanel(QFrame):
             self._summary_label.setText(summary)
         if self._detail_label is not None:
             self._detail_label.setText(detail)
-            self._detail_label.setVisible(bool(detail))
+            self._set_detail_visible(bool(detail))
         if self._button is not None:
             self._button.setVisible(configure_button_visible(recommendation))
         self._update_install_button()
@@ -320,7 +348,7 @@ class AccelerationPanel(QFrame):
             self._summary_label.setText("GPU acceleration status is unknown.")
         if self._detail_label is not None:
             self._detail_label.setText(_short(message))
-            self._detail_label.setVisible(True)
+            self._set_detail_visible(True)
         if self._button is not None:
             self._button.setVisible(False)
         if not self._install_active:
@@ -395,7 +423,7 @@ class AccelerationPanel(QFrame):
     def _show_detail(self, message: str) -> None:
         if self._detail_label is not None:
             self._detail_label.setText(_short_multiline(message, limit=1600))
-            self._detail_label.setVisible(True)
+            self._set_detail_visible(True)
 
     # ------------------------------------------------------------------
     # M1-2I (I3): real install — preview → [Installer] → progression → result
