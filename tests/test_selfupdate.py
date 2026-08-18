@@ -1039,7 +1039,12 @@ def test_apply_win32_spawn_failure_returns_failed(monkeypatch, tmp_path) -> None
 
 
 def test_helper_waits_for_caller_before_install(monkeypatch, tmp_path) -> None:
-    """The helper waits for the caller to exit BEFORE applying the update."""
+    """The helper calls the injected wait seam BEFORE applying the update.
+
+    This proves call ordering and the fail-closed return-value contract: the
+    seam must return True (caller confirmed exited) for the apply to proceed.
+    It does not exercise real Windows handle waiting.
+    """
     import zealfie.selfupdate.windows_helper as wh
 
     layout = RuntimeLayout(root=tmp_path / "rt")
@@ -1049,6 +1054,7 @@ def test_helper_waits_for_caller_before_install(monkeypatch, tmp_path) -> None:
 
     def _wait(*args, **kwargs):
         events.append("wait")
+        return True
 
     def _fake_apply(pending, wheel_path, root, layout_):
         events.append("apply")
@@ -1071,17 +1077,21 @@ def test_wait_for_caller_exit_uses_wait_impl() -> None:
     import zealfie.selfupdate.windows_helper as wh
 
     seen: list[tuple] = []
-    wh.wait_for_caller_exit(
-        42, timeout_s=1.5, _wait_impl=lambda pid, ts: seen.append((pid, ts))
+    result = wh.wait_for_caller_exit(
+        42,
+        timeout_s=1.5,
+        _wait_impl=lambda pid, ts: seen.append((pid, ts)) or True,
     )
     assert seen == [(42, 1.5)]
+    assert result is True
 
 
 def test_wait_for_caller_exit_posix_returns_on_missing_pid() -> None:
     import zealfie.selfupdate.windows_helper as wh
 
-    # A very large pid cannot exist; polling must return without raising.
-    wh._wait_for_caller_exit_posix(999999999, 0.2)
+    # A very large pid cannot exist; polling must return without raising and
+    # report the caller as confirmed exited.
+    assert wh._wait_for_caller_exit_posix(999999999, 0.2) is True
 
 
 def test_spawn_windows_helper_list_argv_no_shell(monkeypatch, tmp_path) -> None:
@@ -1162,3 +1172,155 @@ def test_spawn_windows_helper_win32_creationflags_guarded(
     )
     assert kwargs.get("close_fds") is True
     assert "shell" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# ZA-M1-4.1 corrective: fail-closed Windows caller wait
+# ---------------------------------------------------------------------------
+
+
+class _FakeKernel32Fn:
+    """Minimal ctypes-function stand-in: callable + settable restype/argtypes."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+
+def _fake_kernel32(handle, wait_rc, last_error=0):
+    class _K:
+        pass
+
+    k = _K()
+    k.OpenProcess = _FakeKernel32Fn(lambda access, inherit, pid: handle)
+    k.WaitForSingleObject = _FakeKernel32Fn(lambda h, ms: wait_rc)
+    k.CloseHandle = _FakeKernel32Fn(lambda h: None)
+    k.GetLastError = _FakeKernel32Fn(lambda: last_error)
+    return k
+
+
+def test_wait_windows_return_code_semantics() -> None:
+    import ctypes
+
+    import zealfie.selfupdate.windows_helper as wh
+
+    sentinel = 0x1234
+
+    # WAIT_OBJECT_0 (0) -> confirmed exited.
+    k = _fake_kernel32(handle=sentinel, wait_rc=0x00000000)
+    assert wh._wait_for_caller_exit_windows(123, 1.0, _kernel32=k) is True
+    # 64-bit HANDLE-safe signature was set on the (fake) kernel32 functions.
+    assert k.OpenProcess.restype is ctypes.c_void_p
+    assert k.WaitForSingleObject.restype is ctypes.c_uint32
+    assert k.CloseHandle.argtypes == [ctypes.c_void_p]
+    assert k.GetLastError.restype is ctypes.c_uint32
+
+    # WAIT_TIMEOUT (0x102) -> not confirmed.
+    assert (
+        wh._wait_for_caller_exit_windows(
+            123, 1.0, _kernel32=_fake_kernel32(handle=sentinel, wait_rc=0x00000102)
+        )
+        is False
+    )
+
+    # WAIT_FAILED (0xFFFFFFFF) -> not confirmed.
+    assert (
+        wh._wait_for_caller_exit_windows(
+            123, 1.0, _kernel32=_fake_kernel32(handle=sentinel, wait_rc=0xFFFFFFFF)
+        )
+        is False
+    )
+
+    # Null handle + ERROR_INVALID_PARAMETER (0x57) -> caller gone -> confirmed.
+    assert (
+        wh._wait_for_caller_exit_windows(
+            123, 1.0, _kernel32=_fake_kernel32(handle=None, wait_rc=0, last_error=0x57)
+        )
+        is True
+    )
+
+    # Null handle + any other error -> cannot confirm -> fail closed.
+    assert (
+        wh._wait_for_caller_exit_windows(
+            123, 1.0, _kernel32=_fake_kernel32(handle=None, wait_rc=0, last_error=5)
+        )
+        is False
+    )
+
+
+def test_helper_aborts_when_wait_not_confirmed(monkeypatch, tmp_path) -> None:
+    """Fail-closed: an unconfirmed caller exit must NOT apply (marker kept)."""
+    import sys
+
+    import zealfie.selfupdate.windows_helper as wh
+
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_valid_marker(layout, tmp_path)
+
+    applied: list[object] = []
+
+    def _fake_apply(pending, wheel_path, root, layout_):
+        applied.append(pending)
+        return activator_mod.SelfUpdateApplyResult(
+            ApplyStatus.APPLIED, "should not happen"
+        )
+
+    monkeypatch.setattr(wh, "wait_for_caller_exit", lambda *a, **k: False)
+    monkeypatch.setattr(wh, "_apply_verified_wheel", _fake_apply)
+
+    backup = sys.stderr
+    try:
+        sys.stderr = err = StringIO()
+        code = wh.main(
+            ["--caller-pid", "12345", "--runtime-root", str(tmp_path / "rt")]
+        )
+    finally:
+        sys.stderr = backup
+
+    assert code != 0
+    assert applied == []
+    assert "did not confirm exit" in err.getvalue()
+    assert pending_marker_path(layout).exists()
+
+
+def test_helper_proceeds_when_caller_confirmed_exited(monkeypatch, tmp_path) -> None:
+    """Fail-closed happy path: confirmed exit -> helper applies and returns 0."""
+    import zealfie.selfupdate.windows_helper as wh
+
+    layout = RuntimeLayout(root=tmp_path / "rt")
+    _write_valid_marker(layout, tmp_path)
+
+    events: list[str] = []
+
+    def _fake_apply(pending, wheel_path, root, layout_):
+        events.append("apply")
+        return activator_mod.SelfUpdateApplyResult(
+            ApplyStatus.APPLIED, "ZeAlfie updated to 0.0.7"
+        )
+
+    monkeypatch.setattr(wh, "wait_for_caller_exit", lambda *a, **k: True)
+    monkeypatch.setattr(wh, "_apply_verified_wheel", _fake_apply)
+    monkeypatch.setattr(wh, "_installed_zealfie_version", lambda: "0.0.6")
+
+    code = wh.main(
+        ["--caller-pid", "12345", "--runtime-root", str(tmp_path / "rt")]
+    )
+    assert code == 0
+    assert events == ["apply"]
+
+
+def test_verify_installed_version_timeout_fails_closed(monkeypatch) -> None:
+    """A hung verifier subprocess must not block the apply: timeout -> FAILED."""
+    import subprocess as sp
+
+    def _timeout(argv, **kwargs):
+        raise sp.TimeoutExpired(cmd=argv, timeout=60)
+
+    monkeypatch.setattr(activator_mod.subprocess, "run", _timeout)
+    result = activator_mod._verify_installed_version("0.0.7")
+    assert result is not None
+    assert result.status is ApplyStatus.FAILED
+    assert "timed out" in result.message
+    assert "marker left in place" in result.message

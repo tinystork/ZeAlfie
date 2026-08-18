@@ -280,16 +280,26 @@ def _verify_installed_version(target_version: str) -> SelfUpdateApplyResult | No
 
     Runs a FRESH subprocess (list argv, no shell).  Returns ``None`` on
     success; a FAILED result on mismatch/unparseable output (fail closed).
+    The subprocess is bounded by a timeout so a hung verifier never blocks
+    the apply; a timeout fails closed (marker left in place).
     """
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import importlib.metadata; print(importlib.metadata.version('zealfie'))",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib.metadata; "
+                "print(importlib.metadata.version('zealfie'))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return SelfUpdateApplyResult(
+            ApplyStatus.FAILED,
+            "version verification timed out; marker left in place",
+        )
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         detail = f": {stderr}" if stderr else ""
