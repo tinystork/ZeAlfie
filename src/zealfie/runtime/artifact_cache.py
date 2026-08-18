@@ -645,9 +645,12 @@ def runtime_cache_gc(runtime_root: Path | str) -> CacheGcResult:
 
     Fail-closed: when any existing state store is unreadable or corrupt,
     the protected set cannot be established and NOTHING is deleted (the
-    result carries the blocking reason in ``errors``).  Runs under the
-    runtime mutation lease (``OPERATION_RUNTIME_GC``) so an in-flight
-    transaction's freshly-cached artifacts can never be collected; raises
+    result carries the blocking reason in ``errors``).  The protected set
+    is collected AND the deletion is planned/applied under the SAME
+    runtime mutation lease (``OPERATION_RUNTIME_GC``), so an in-flight
+    transaction's freshly-cached artifacts can never be collected (the
+    transaction holds the lease between caching and its provenance
+    commit, which closes the collect/delete TOCTOU window); raises
     :class:`~zealfie.runtime.mutation_lock.RuntimeMutationBusyError` when
     another writer holds the lease.
     """
@@ -656,17 +659,17 @@ def runtime_cache_gc(runtime_root: Path | str) -> CacheGcResult:
     cache_root = root / "cache" / "artifacts"
     if not cache_root.is_dir():
         return CacheGcResult(deleted=(), reclaimed_bytes=0)
-    protected_digests, protected_dependency_ids, blocking = (
-        _collect_state_protected_refs(layout.state_dir)
-    )
-    if blocking:
-        return CacheGcResult(
-            deleted=(),
-            reclaimed_bytes=0,
-            errors=("blocked: " + "; ".join(blocking),),
-        )
     lock = RuntimeMutationLock(root)
     with lock.acquire(OPERATION_RUNTIME_GC):
+        protected_digests, protected_dependency_ids, blocking = (
+            _collect_state_protected_refs(layout.state_dir)
+        )
+        if blocking:
+            return CacheGcResult(
+                deleted=(),
+                reclaimed_bytes=0,
+                errors=("blocked: " + "; ".join(blocking),),
+            )
         plan = build_cache_gc_plan(
             cache_root,
             protected_digests=protected_digests,

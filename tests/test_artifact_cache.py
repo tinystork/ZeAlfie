@@ -433,6 +433,61 @@ def test_runtime_cache_gc_blocks_all_deletion_on_corrupt_state(
     assert _sha256(orphan) in store.load_index()
 
 
+def test_runtime_cache_gc_collects_and_deletes_under_one_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (Nono S7): protected-set collection and deletion run
+    under the SAME runtime-gc mutation lease.
+
+    Before the fix, ``runtime_cache_gc`` collected the protected set
+    BEFORE acquiring the lease: a transaction committing between the
+    collection and the lock could see its freshly-cached, provenance-
+    referenced artifacts deleted (TOCTOU).  The contract is asserted
+    deterministically via spies on the collect/apply boundaries — no
+    sleeps, no races.
+    """
+    import zealfie.runtime.artifact_cache as ac_mod
+    from zealfie.runtime.mutation_lock import (
+        OPERATION_RUNTIME_GC,
+        RuntimeMutationLock,
+    )
+
+    layout = RuntimeLayout(tmp_path / "rt")
+    layout.state_dir.mkdir(parents=True, exist_ok=True)
+    orphan = _make_wheel(tmp_path, "orphan-lib", "9.9.9")
+    store = ArtifactCacheStore(layout.artifact_cache_dir)
+    store.put(orphan, kind="dependency")
+
+    real_collect = ac_mod._collect_state_protected_refs
+    real_apply = ac_mod.apply_cache_gc_plan
+    order: list[tuple[str, str | None]] = []
+
+    def collect_spy(state_dir: Path):
+        lease = RuntimeMutationLock.current_lease()
+        order.append(("collect", lease.operation if lease else None))
+        return real_collect(state_dir)
+
+    def apply_spy(cache_root: Path, plan):
+        lease = RuntimeMutationLock.current_lease()
+        order.append(("apply", lease.operation if lease else None))
+        return real_apply(cache_root, plan)
+
+    monkeypatch.setattr(ac_mod, "_collect_state_protected_refs", collect_spy)
+    monkeypatch.setattr(ac_mod, "apply_cache_gc_plan", apply_spy)
+
+    result = runtime_cache_gc(layout.root)
+    assert not result.errors, result.errors
+    assert len(result.deleted) == 1
+    assert result.deleted[0].name == orphan.name
+
+    # Deterministic order contract: exactly one collection, then the
+    # deletion apply, both observed while the runtime-gc lease is held.
+    assert order == [
+        ("collect", OPERATION_RUNTIME_GC),
+        ("apply", OPERATION_RUNTIME_GC),
+    ]
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # Part 3 — accelerated GPU cache reuse (C.3)
 # ═════════════════════════════════════════════════════════════════════════
