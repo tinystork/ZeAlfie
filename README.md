@@ -4,205 +4,398 @@ ZeAlfie means **Astronomy Launcher For Imaging Engines**.
 
 It is also the **Astronomical Little Fellow Integrating Everything**.
 
-## Version 0 status
+ZeAlfie is the common launcher and runtime manager for the ZeSoftware imaging
+ecosystem. It provides one place to install, update, launch, and manage the
+supported applications while keeping their runtime dependencies isolated from
+the ZeAlfie development environment.
 
-ZeAlfie is experimental. Version 0.0.6 introduces a slot-based runtime
-architecture with staged transactions and rollback.
+## Current status
 
-Key capabilities:
+ZeAlfie **0.0.7** is an experimental but functional release.
 
-* building wheels from local sources;
-* inspecting wheel archives without executing code;
-* **persistent shared runtime** with platform-appropriate user location;
-* runtime states: ``ABSENT``, ``READY``, ``BROKEN``;
-* idempotent runtime creation (create twice = no-op);
-* offline local wheel installation with pre- and post-validation;
-* external Python metadata probe (no application code imported);
-* temporary isolated environments for hermetic testing;
-* structured launch plans and controlled subprocess execution;
-* **offline deployment planning** (M0-9.1) — resolve a deterministic
-  release directory into a read-only deployment plan.
-* **offline deployment apply + rollback** (M0-9.2) — orchestrate
-  full-state apply and reversible rollback via the application service.
-* **offline deployment CLI** (M0-9.3) — plan, apply, and rollback from
-  the terminal using the same application service.
+The current version provides:
 
-Concepts kept distinct by design:
+- a persistent, slot-based shared runtime;
+- transactional deployment with rollback support;
+- a PySide6 graphical Product Shell;
+- managed product installation, update, and launch workflows;
+- runtime and product state probing without importing application code;
+- GPU capability inspection and accelerated-runtime planning;
+- a transactional self-update mechanism for packaged ZeAlfie installations;
+- English and French GUI support.
 
-* **dev venv** (``.venv``) — for development only;
-* **shared runtime** — persistent, managed by ZeAlfie;
-* **temporary venv** — test-only, cleaned up after use.
+ZeAlfie is still under active development. The runtime architecture and update
+machinery are usable today, but the end-user installation experience is not yet
+final.
 
-## Product Shell (M1-2C)
+## Installation
 
-ZeAlfie 0.0.6 ships a **PySide6 graphical product shell** for browsing
-and launching managed products.
+### Current source installation
+
+For now, source-based installations are intended for testers and developers.
+
+Clone the repository, enter its root directory — the directory containing
+`pyproject.toml` — then create and activate a Python virtual environment.
+
+#### Linux
+
+```bash
+cd ZeAlfie
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+#### Windows PowerShell
+
+```powershell
+cd ZeAlfie
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+The installation command is meant to be used exactly as written:
+
+```bash
+python -m pip install -e .
+```
+
+- `.` means **install the Python project located in the current directory**.
+  Run the command from the ZeAlfie repository root, where `pyproject.toml`
+  is located.
+- `-e` means **editable install**. ZeAlfie runs directly from the checked-out
+  source tree, so code changes are immediately visible to the virtual
+  environment without reinstalling the package.
+
+After installation, start the graphical interface with:
 
 ```bash
 zealfie-gui
 ```
 
-The product shell:
-* displays all known products as individual product cards (with managed/installed/launchable state);
-* shows human-readable state labels derived from runtime probe results;
-* provides a **Lancer** button for each launchable product;
-* includes a **Refresh** toolbar button (or F5) to re-probe runtime state;
-* shows a visible error banner on startup if state collection fails.
-* **depends on PySide6** — declared as a runtime dependency in `pyproject.toml`.
+Editable/source installations are development or test installations.
+ZeAlfie's self-update mechanism does not replace or update a Git source
+checkout.
 
-The GUI exposes a single entry point `zealfie-gui` under
-`[project.gui-scripts]`, keeping the existing CLI under
-`[project.scripts]`.
+### Development dependencies
 
-## Development install
-
-Use the repository virtual environment:
+If you intend to run the test suite or work on ZeAlfie itself, install the
+development dependencies as well:
 
 ```bash
-source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
-## Commands
+This command is also meant to be used exactly as written:
+
+- `.` still means the project in the current directory;
+- `[dev]` asks pip to install ZeAlfie's optional **development dependency
+  group** in addition to the normal runtime dependencies;
+- the square brackets are literal syntax — `dev` is not a placeholder and
+  should not be replaced with a path or directory name.
+
+### Planned end-user installers
+
+Standalone installers for **Windows** and **Linux** are planned.
+
+The goal is to provide a normal end-user installation that does not require
+Git, pip, or a development virtual environment. Those installers will also
+integrate ZeAlfie's self-update mechanism into the normal graphical experience.
+
+## Launching ZeAlfie
+
+Start the graphical Product Shell with:
+
+```bash
+zealfie-gui
+```
+
+The command-line interface remains available as:
+
+```bash
+zealfie
+```
+
+or:
 
 ```bash
 python -m zealfie
-zealfie
 ```
+
+Check the installed ZeAlfie version with:
 
 ```bash
 zealfie --version
 ```
 
+## Product Shell
+
+The Product Shell is the main graphical interface.
+
+It:
+
+- displays the known ZeSoftware products as individual cards;
+- shows whether each product is installed, managed, launchable, or requires
+  attention;
+- installs supported products into the shared runtime;
+- checks for and applies supported product updates;
+- launches installed products through their public launch contracts;
+- provides a single **Refresh** action, also available with **F5**;
+- displays runtime and hardware-acceleration status;
+- supports live English/French language switching;
+- isolates product or probe failures instead of crashing the whole shell.
+
+The GUI entry point is declared as `zealfie-gui` under
+`[project.gui-scripts]`.
+
+## Updating ZeAlfie
+
+Packaged ZeAlfie installations can update themselves transactionally.
+
+The update flow is deliberately split into three steps:
+
 ```bash
-zealfie status
+zealfie self-update check --channel stable
+zealfie self-update stage --channel stable
+zealfie self-update apply
 ```
 
-`status` reports the current ZeAlfie runtime and the known components from the local packaged manifest.
+### `check`
 
-`Installed` means the component's Python distribution is present in the active Python environment metadata. A component can be known by the manifest but not installed in the current environment.
+```bash
+zealfie self-update check --channel stable
+```
 
-`Launch contract` means the installed distribution declares a public entry point whose group and name exactly match the contract ZeAlfie knows how to handle. It does not mean the application has been launched or that its runtime dependencies, GUI, catalogues, GPU, or resources have been validated.
+Read-only. Resolves the selected release channel and reports whether a newer
+ZeAlfie version is available.
 
-### Shared runtime commands
+### `stage`
+
+```bash
+zealfie self-update stage --channel stable
+```
+
+Acquires, builds, and verifies the candidate update, then records it as pending.
+
+The currently installed ZeAlfie version is **not** replaced during staging.
+
+### `apply`
+
+```bash
+zealfie self-update apply
+```
+
+Applies the previously staged and verified update.
+
+The ZeAlfie GUI should not be running while the update is applied. On platforms
+that require it, activation is handed off to a separate updater process so the
+running ZeAlfie process does not overwrite itself.
+
+After a successful update:
+
+```bash
+zealfie --version
+zealfie self-update check --channel stable
+```
+
+should report the new version and `UP_TO_DATE`.
+
+### Beta channel
+
+Testers can explicitly use the beta channel:
+
+```bash
+zealfie self-update check --channel beta
+zealfie self-update stage --channel beta
+```
+
+The stable channel remains the default and recommended channel.
+
+The current CLI workflow is primarily a development/test surface. Future
+Windows and Linux installers are intended to expose the same transactional
+update engine through a normal graphical update flow.
+
+## Runtime model
+
+ZeAlfie keeps three concepts separate by design:
+
+- **development venv (`.venv`)** — used to develop and test ZeAlfie itself;
+- **shared runtime** — persistent runtime managed by ZeAlfie for installed
+  products;
+- **temporary environments** — short-lived environments used for builds,
+  validation, and hermetic tests.
+
+The shared runtime is stored in a platform-appropriate user data location and
+uses slot-based activation.
+
+A deployment is prepared and validated in a candidate slot before activation.
+The previous known-good slot can be retained for rollback and lifecycle
+management.
+
+## Product and runtime commands
+
+Inspect the shared runtime:
 
 ```bash
 zealfie runtime status
 ```
 
-Reports the state (``ABSENT``, ``READY``, ``BROKEN``), location, Python path, and reason code of the persistent shared runtime.
+Inspect all known products:
+
+```bash
+zealfie products
+```
+
+Inspect a single product:
+
+```bash
+zealfie products zesolver
+```
+
+Install a product from its configured stable channel:
+
+```bash
+zealfie install zesolver --channel stable
+```
+
+Launch a managed component:
+
+```bash
+zealfie launch zesolver
+```
+
+Inspect host capabilities:
+
+```bash
+zealfie system capabilities
+```
+
+Preview the GPU deployment plan without changing the runtime:
+
+```bash
+zealfie system gpu-plan
+```
+
+The preview is read-only.
+
+## Runtime lifecycle
+
+Create the shared runtime if it does not exist:
 
 ```bash
 zealfie runtime create
 ```
 
-Creates the shared runtime at its platform-appropriate location if absent. Idempotent: running it again on a ``READY`` runtime does nothing.
-
-For M0-5 the runtime hosts only the controlled witness fixture. No real ZeSoftware components are installed.
-
-You can also inspect a known component directly:
+Preview safe runtime garbage collection:
 
 ```bash
-zealfie status zesolver
+zealfie runtime gc-plan
 ```
 
-## Offline release directory convention (M0-9.1)
-
-A deterministic, minimal, local convention for offline release
-directories.  Used by the deployment planning service to resolve a
-complete desired runtime state without network access.
-
-Layout:
-
-```
-release_dir/
-  <component_id>.toml      -- one release manifest per component
-  <wheel_filename>.whl     -- wheel artifacts at top level
-```
-
-Rules:
-
-1. For every *component_id* in the trusted component registry, the
-   file ``<component_id>.toml`` MUST exist at the top level.
-2. Each manifest's declared ``component_id`` MUST match its
-   filename stem.
-3. Wheel artifacts referenced by manifests live at the top level
-   of the release directory.
-4. Any ``.toml`` file whose stem does not match a known component
-   id is rejected (fail-closed).
-5. No recursive scan, no fallback names, no heuristic discovery.
-
-### Deployment planning service
-
-```python
-from zealfie.app import ZeAlfieService
-
-service = ZeAlfieService()
-plan = service.plan_offline_deployment(release_dir)
-```
-
-``plan_offline_deployment`` is **read-only** — it does not mutate the
-filesystem or shared runtime.  It resolves all manifests, verifies
-every artifact, builds a ``DesiredRuntimeState``, probes the current
-runtime, and returns a ``DeploymentPlan`` describing INSTALL/KEEP/BLOCKED
-for each component.
-
-The ``runtime plan`` command remains a preview: ``runtime apply`` always
-resolves and plans fresh instead of consuming a previous plan output.
-
-### Runtime plan, apply, and rollback commands (M0-9.3)
+Apply safe runtime garbage collection:
 
 ```bash
-zealfie runtime plan --release-dir PATH
+zealfie runtime gc
 ```
 
-Read-only preview.  Resolves the offline release directory, builds a
-``DeploymentPlan`` from the current runtime state, and prints planned
-actions/reasons/versions for each component.  Returns 0 for a
-successfully built plan, 1 when the plan is blocked, or 4 on
-``OfflineReleaseError`` (stderr, no traceback).  Does **not** mutate
-the shared runtime.
-
-```bash
-zealfie runtime apply --release-dir PATH
-```
-
-Applies the offline deployment.  Re-plans fresh at call time — a
-plan from a previous ``runtime plan`` is never consumed or persisted.
-Prints success/failure with active/previous slot ids.  Returns 0 on
-success, 3 when the ``DeploymentResult`` reports failure, or 4 on
-``OfflineReleaseError`` (stderr, no traceback).
+Roll back to the previous runtime slot when available:
 
 ```bash
 zealfie runtime rollback
 ```
 
-Rolls back the shared runtime to the previous active slot.  Prints the
-resulting runtime status using the existing runtime status formatting.
-Returns 0 when the resulting state is ``READY``, or 3 otherwise.
+Runtime mutations are serialized so concurrent writers cannot silently modify
+the managed runtime at the same time.
 
-### Application service injection for tests
+## Offline deployment
 
-The CLI constructs services via a private ``_make_service()`` factory
-that returns ``ZeAlfieService(registry=default_registry(),
-runtime=SharedRuntime(default_runtime_layout()))``.  Tests can
-monkeypatch ``zealfie.cli._make_service`` to inject a controlled
-registry and temp runtime — no production runtime is touched.
+ZeAlfie also retains an explicit offline deployment path for controlled and
+hermetic workflows.
 
-### Offline deployment orchestration service
+### Offline release directory convention
 
-``ZeAlfieService`` (``zealfie.app.service``) is the application-level
-orchestrator for offline deployment:
+A release directory contains one trusted manifest per component and the wheel
+artifacts referenced by those manifests:
 
-* ``resolve_offline_release_set(release_dir)`` — read-only, resolves
-  the complete desired runtime state from a release directory.
-* ``plan_offline_deployment(release_dir)`` — read-only, builds a
-  ``DeploymentPlan`` from the current runtime status.
-* ``apply_offline_deployment(release_dir)`` — re-plans fresh, then
-  applies via ``apply_deployment_plan`` (transactional, mutates the
-  shared runtime).
-* ``rollback_runtime()`` — delegates to ``SharedRuntime.rollback()``.
+```text
+release_dir/
+  <component_id>.toml
+  <wheel_filename>.whl
+```
 
-Errors during release resolution are surfaced as ``OfflineReleaseError``,
-which wraps all lower-level failures (missing manifests, parse errors,
-artifact verification, extra unknown manifests).
+Rules:
+
+1. every required component manifest must exist at the top level;
+2. each manifest's `component_id` must match its filename stem;
+3. referenced wheel artifacts live at the top level;
+4. unknown manifests are rejected;
+5. no recursive scan, fallback names, or heuristic discovery is used.
+
+### Preview an offline deployment
+
+```bash
+zealfie runtime plan --release-dir PATH
+```
+
+This command is read-only. It resolves manifests and artifacts, validates the
+candidate state, and reports the planned actions.
+
+### Apply an offline deployment
+
+```bash
+zealfie runtime apply --release-dir PATH
+```
+
+`runtime apply` resolves and plans again at execution time rather than trusting
+a previously printed plan.
+
+### Roll back
+
+```bash
+zealfie runtime rollback
+```
+
+Rollback switches back to the previous valid runtime slot when one is
+available.
+
+## Architecture notes
+
+`ZeAlfieService` is the application-level orchestration boundary for runtime,
+product, launch, deployment, and update operations.
+
+Important design principles include:
+
+- products remain independently usable outside ZeAlfie;
+- ZeAlfie interacts with products through public metadata and launch contracts;
+- mutable remote refs are resolved to immutable identities before activation;
+- candidate artifacts are verified before they become active;
+- activation is transactional;
+- failures in optional integrations are isolated;
+- ZeAlfie does not fabricate missing provenance for legacy runtime state.
+
+## Development
+
+Activate the repository environment:
+
+```bash
+source .venv/bin/activate
+```
+
+Run the focused test suites appropriate to the change being made. For example:
+
+```bash
+pytest -q tests/test_i18n.py
+pytest -q tests/test_gui.py
+```
+
+Build a local wheel with:
+
+```bash
+python -m pip wheel --no-deps . -w dist
+```
+
+The development virtual environment is not the shared product runtime and
+should not be treated as an end-user ZeAlfie installation.
