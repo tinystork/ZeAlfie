@@ -47,6 +47,10 @@ from zealfie.runtime.mutation_lock import (
 )
 
 from .handoff import spawn_windows_helper
+from .interpreter import (
+    InterpreterResolutionError,
+    resolve_install_interpreter,
+)
 from .state import (
     PendingMarkerError,
     PendingSelfUpdate,
@@ -227,6 +231,14 @@ def _apply_verified_wheel(
     to equal ``pending.target_version``.
     """
     try:
+        # Fail-closed gate: prove the same-venv console interpreter BEFORE any
+        # mutation.  _run_pip_install / _verify_installed_version resolve the
+        # same interpreter internally (idempotent).
+        resolve_install_interpreter()
+    except InterpreterResolutionError as exc:
+        return SelfUpdateApplyResult(ApplyStatus.FAILED, str(exc))
+
+    try:
         _verify_staged_wheel(pending, wheel_path)
     except SelfUpdateApplyError as exc:
         return SelfUpdateApplyResult(ApplyStatus.FAILED, str(exc))
@@ -278,15 +290,17 @@ def _apply_verified_wheel(
 def _verify_installed_version(target_version: str) -> SelfUpdateApplyResult | None:
     """Verify the installed ZeAlfie version equals *target_version*.
 
-    Runs a FRESH subprocess (list argv, no shell).  Returns ``None`` on
+    Runs a FRESH subprocess (list argv, no shell) with the resolved
+    install interpreter (never ``pythonw.exe``).  Returns ``None`` on
     success; a FAILED result on mismatch/unparseable output (fail closed).
     The subprocess is bounded by a timeout so a hung verifier never blocks
     the apply; a timeout fails closed (marker left in place).
     """
+    interpreter = resolve_install_interpreter()
     try:
         proc = subprocess.run(
             [
-                sys.executable,
+                interpreter,
                 "-c",
                 "import importlib.metadata; "
                 "print(importlib.metadata.version('zealfie'))",
@@ -346,11 +360,13 @@ def _verify_staged_wheel(pending: PendingSelfUpdate, wheel_path: Path) -> None:
 def _run_pip_install(wheel_path: Path) -> subprocess.CompletedProcess:
     """Run ``python -m pip install --no-deps --no-index <wheel>`` (list argv).
 
+    Runs with the resolved install interpreter (never ``pythonw.exe``).
     No shell; argv is passed as a list so no quoting/expansion can occur.
     """
+    interpreter = resolve_install_interpreter()
     return subprocess.run(
         [
-            sys.executable,
+            interpreter,
             "-m",
             "pip",
             "install",

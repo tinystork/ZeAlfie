@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .interpreter import InterpreterResolutionError, resolve_install_interpreter
+
 __all__ = ["spawn_windows_helper"]
 
 
@@ -42,16 +44,23 @@ def spawn_windows_helper(
 ) -> bool:
     """Spawn a detached helper that applies the pending self-update.
 
-    ``python`` defaults to ``sys.executable`` (the venv interpreter).  The
+    ``python`` defaults to the resolved install interpreter — the venv
+    *console* interpreter, never ``pythonw.exe`` (see
+    :func:`zealfie.selfupdate.interpreter.resolve_install_interpreter`).  The
     helper is spawned with list argv (no shell) and is fully detached from
     this process so it can outlive it and install after the caller exits.
 
     Returns ``True`` iff the helper process was spawned successfully
-    (``OSError`` / ``ValueError`` → ``False``).
+    (``OSError`` / ``ValueError`` → ``False``).  A same-venv console
+    interpreter that cannot be proven also fails closed (``False``) so the
+    pending update is never handed off with a windowed interpreter.
     """
-    interpreter = python if python is not None else sys.executable
+    try:
+        interpreter = resolve_install_interpreter(python=python)
+    except InterpreterResolutionError:
+        return False
     argv = [
-        str(interpreter),
+        interpreter,
         "-m",
         "zealfie.selfupdate.windows_helper",
         "--caller-pid",
