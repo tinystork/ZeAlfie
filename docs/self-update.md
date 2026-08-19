@@ -246,3 +246,28 @@ Real Windows HUMAN_GATE (2026-08-19) — **PASS**:
 
 The Windows `ctypes` wait and `msvcrt` mutation-lock backend are additionally
 covered hermetically (injected seams) in `tests/test_selfupdate.py`.
+
+### M1-4.2 — GUI self-update end-to-end (real Windows witness, 2026-08-19, PASS)
+
+Real Windows validation of the full GUI-driven self-update path, from a
+packaged **0.0.6** installation:
+
+| Step | Result |
+|---|---|
+| Packaged 0.0.6 installed | **PASS** — normal packaged install, no source checkout |
+| GUI automatic stable check | **PASS** — non-blocking check at Product Shell startup (stable channel) |
+| Automatic staging of v0.0.7 | **PASS** — candidate staged in the background, old install stayed active |
+| User consent | **PASS** — proposal banner with explicit "Update and restart" action |
+| Windows helper handoff | **PASS** — detached helper applied after GUI exit |
+| Automatic GUI restart | **PASS** — GUI relaunched on the newly installed version |
+| Installed version 0.0.7 | **PASS** — verified equal to the staged target |
+| Pending marker cleared | **PASS** — cleared only after verified apply |
+| Stable channel UP_TO_DATE | **PASS** — no further proposal on next launch |
+| Console launcher preserved | **PASS** — `zealfie.exe → python.exe`, `zealfie-gui.exe → pythonw.exe` |
+| No pythonww.exe regression | **PASS** — no windowed shebang leakage into launchers |
+
+The launcher-preservation result validates CORR-3: on Windows the self-update
+install interpreter is resolved to the same-venv console sibling
+(`...\Scripts\python.exe`), never `pythonw.exe`, so pip/distlib regenerates
+launchers with the correct shebangs. See
+`src/zealfie/selfupdate/interpreter.py` and `tests/test_self_update_interpreter.py`.

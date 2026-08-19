@@ -273,3 +273,31 @@ Real Windows validation of the M1-4 (hardening/UX/lifecycle) and M1-4.1
 The `msvcrt` mutation-lock backend and the Windows `ctypes` helper wait remain
 hermetically covered (injected seams) in `tests/test_mutation_lock.py` and
 `tests/test_selfupdate.py`.
+
+## M1-4.2 Windows HUMAN_GATE — GUI self-update real witness (2026-08-19, PASS)
+
+Full GUI-driven self-update from a packaged **0.0.6** install (CORR-3
+validation, launcher shebang preservation):
+
+| Step | Result |
+|---|---|
+| Packaged 0.0.6 installed | **PASS** |
+| GUI automatic stable check (non-blocking) | **PASS** |
+| Automatic staging of v0.0.7 (background) | **PASS** |
+| User consent ("Update and restart") | **PASS** |
+| Windows helper handoff | **PASS** |
+| Automatic GUI restart | **PASS** |
+| Installed version 0.0.7 (verified) | **PASS** |
+| Pending marker cleared | **PASS** |
+| Stable channel UP_TO_DATE | **PASS** |
+| Launchers preserved: `zealfie.exe → python.exe`, `zealfie-gui.exe → pythonw.exe` | **PASS** |
+| No `pythonww.exe` regression | **PASS** |
+
+Root cause fixed (CORR-3): the GUI-initiated update used `sys.executable`
+(`pythonw.exe`) for the helper and pip, so distlib regenerated launchers with
+windowed shebangs (`zealfie.exe → pythonw.exe`, `zealfie-gui.exe →
+pythonww.exe`) — `zealfie.exe --version` printed nothing (exit 0). The
+install interpreter is now resolved to the same-venv console sibling
+(`...\Scripts\python.exe`) via `zealfie/selfupdate/interpreter.py`, fail-closed
+when the sibling cannot be proven. Hermetic coverage:
+`tests/test_self_update_interpreter.py` (17 tests).
