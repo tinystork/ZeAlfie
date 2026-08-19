@@ -11,7 +11,7 @@ the ZeAlfie development environment.
 
 ## Current status
 
-ZeAlfie **0.0.7** is an experimental but functional release.
+ZeAlfie **0.0.8** is an experimental but functional release.
 
 The current version provides:
 
