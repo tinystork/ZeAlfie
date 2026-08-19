@@ -209,6 +209,7 @@ def build(
     variant_catalog: AcceleratedVariantCatalog | None = None,
     keep_products: dict[str, PlannedKeepProduct] | None = None,
     platform_tag: str = PLATFORM_TAG,
+    active_product_ids: frozenset[str] | None = None,
 ) -> AcceleratedDeploymentPlan:
     return build_accelerated_deployment_plan(
         catalog=make_catalog(*products),
@@ -228,6 +229,7 @@ def build(
         ),
         keep_products=keep_products if keep_products is not None else {},
         platform_tag=platform_tag,
+        active_product_ids=active_product_ids,
     )
 
 
@@ -1100,3 +1102,69 @@ def test_macos_platform_tag_no_variant_fails_closed_no_cuda_closure():
     entry = plan.added_requirements[0]
     assert entry.variant is None
     assert entry.variant_status is VariantStatus.NOT_AVAILABLE
+
+
+# ===========================================================================
+# active_product_ids applicability filter (ZA-GPU-FIRST-RUN-01)
+# ===========================================================================
+
+
+def _accel_variant_catalog() -> AcceleratedVariantCatalog:
+    return AcceleratedVariantCatalog(
+        variants=(variant("accelerated-lib", "1.2.0"),)
+    )
+
+
+def test_active_product_ids_none_preserves_historical_behaviour():
+    """``active_product_ids=None`` keeps the pure-planner historical
+    behaviour: every catalog product declaring acceleration contributes."""
+    plan = build(
+        ("zemosaic", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        ("zesolver", None),
+        capabilities=make_nvidia_capabilities("550.163.01"),
+        variant_catalog=_accel_variant_catalog(),
+        active_product_ids=None,
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    assert plan.products_concerned == ("zemosaic",)
+
+
+def test_active_product_ids_empty_set_is_strict_filter():
+    """An empty ``active_product_ids`` set is a STRICT filter: no catalog
+    product contributes, even when it declares acceleration and the host
+    is SUPPORTED (fresh-install machine)."""
+    plan = build(
+        ("zemosaic", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        capabilities=make_nvidia_capabilities("550.163.01"),
+        variant_catalog=_accel_variant_catalog(),
+        active_product_ids=frozenset(),
+    )
+    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.products_concerned == ()
+    assert plan.added_requirements == ()
+
+
+def test_active_product_ids_only_active_product_contributes():
+    """Only products present in ``active_product_ids`` contribute their
+    accelerated requirements; a non-active accelerated product is ignored."""
+    plan = build(
+        ("zemosaic", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        ("zesolver", None),
+        capabilities=make_nvidia_capabilities("550.163.01"),
+        variant_catalog=_accel_variant_catalog(),
+        active_product_ids=frozenset({"zesolver"}),
+    )
+    # zesolver declares no acceleration -> nothing to plan, and zemosaic
+    # (non-active) must NOT be consulted.
+    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.products_concerned == ()
+
+    plan_active = build(
+        ("zemosaic", _acc_block(_requirement("accelerated-lib", ">=1.0"))),
+        ("zesolver", None),
+        capabilities=make_nvidia_capabilities("550.163.01"),
+        variant_catalog=_accel_variant_catalog(),
+        active_product_ids=frozenset({"zemosaic"}),
+    )
+    assert plan_active.status is AcceleratedPlanStatus.PLAN_READY
+    assert plan_active.products_concerned == ("zemosaic",)

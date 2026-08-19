@@ -106,6 +106,32 @@ def test_panel_summary_already_ready_is_slot_state_verdict():
     assert configure_button_visible(rec) is False
 
 
+def test_gpu_wording_never_claims_version_cannot_install():
+    """The exposed GPU configure wording (EN + FR) is honest: it never
+    claims this version cannot install an accelerated runtime, and never
+    claims an install already happened.  Rendered through i18n — no
+    hardcoded widget string."""
+    from zealfie.gui.acceleration_panel import panel_configure_message
+    from zealfie.i18n import Language, reset_language, set_language
+
+    rec = _rec(RecommendationStatus.OFFER_SETUP, gpus=(_nvidia_gpu(),))
+    try:
+        en = panel_configure_message(rec)
+        assert "to configure" in en
+        assert "not performed by this version" not in en
+        assert "did not install" not in en
+        assert "not available in this version" not in en
+
+        set_language(Language.FR)
+        fr = panel_configure_message(rec)
+        assert fr != en
+        assert "à configurer" in fr
+        assert "not performed by this version" not in fr
+        assert "did not install" not in fr
+    finally:
+        reset_language()
+
+
 # ===========================================================================
 # 2) Panel widget (headless)
 # ===========================================================================
@@ -167,7 +193,7 @@ def test_panel_configure_click_shows_honest_no_install_message(qapp):
     intent = GpuSetupIntent(
         recommendation=rec,
         actionable=True,
-        message="GPU setup prepared, but no CUDA toolkit was installed.",
+        message="NVIDIA GPU detected with a usable driver. GPU acceleration can be configured for compatible installed products.",
     )
     service = _FakePanelService(intent=intent)
     panel = AccelerationPanel(service=service)
@@ -176,7 +202,10 @@ def test_panel_configure_click_shows_honest_no_install_message(qapp):
         panel._button.click()
         assert service.prepare_calls == 1
         assert service.prepared_recommendations == [rec]
-        assert "no CUDA toolkit was installed" in panel._detail_label.text()
+        text = panel._detail_label.text()
+        assert "to configure" in text
+        assert "no CUDA toolkit" not in text
+        assert "did not install" not in text
     finally:
         panel.close()
         panel.deleteLater()
@@ -192,7 +221,7 @@ def test_panel_configure_click_uses_displayed_recommendation_without_reprobe(qap
     intent = GpuSetupIntent(
         recommendation=rec,
         actionable=True,
-        message="GPU setup prepared, but no CUDA toolkit was installed.",
+        message="NVIDIA GPU detected with a usable driver. GPU acceleration can be configured for compatible installed products.",
     )
     service = _FakePanelService(intent=intent)
     panel = AccelerationPanel(service=service)

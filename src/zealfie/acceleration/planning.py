@@ -18,7 +18,7 @@ provenance and are never re-resolved.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -423,14 +423,17 @@ def build_accelerated_deployment_plan(
     variant_catalog: AcceleratedVariantCatalog,
     keep_products: Mapping[str, PlannedKeepProduct],
     platform_tag: str,
+    active_product_ids: Collection[str] | None = None,
 ) -> AcceleratedDeploymentPlan:
     """Build the read-only accelerated deployment plan (pure).
 
     Rules are applied deterministically, in this order (fail-closed):
 
     1. collect ``requirements_map`` from the catalog (products whose
-       ``acceleration`` is not ``None``); ``products_concerned`` is its
-       sorted keys and KEEP products are always documented;
+       ``acceleration`` is not ``None`` and, when ``active_product_ids``
+       is not ``None``, whose ``product_id`` is in that set);
+       ``products_concerned`` is its sorted keys and KEEP products are
+       always documented;
     2. evaluate hardware compatibility
        (:func:`~zealfie.acceleration.compatibility.evaluate_acceleration_compatibility`);
     3. empty ``requirements_map`` → ``NO_ACCELERATED_REQUIREMENTS``,
@@ -461,6 +464,13 @@ def build_accelerated_deployment_plan(
     The planner never mutates its inputs and never performs I/O.
     ``keep_products`` values are documented verbatim — provenance is
     supplied by the caller and never re-resolved here.
+
+    ``active_product_ids`` is the caller's ACTIVE-installed identity
+    authority: ``None`` preserves the historical pure-planner behaviour
+    (no filter), while a collection (even an empty one) restricts the
+    accelerated requirements to catalog products whose id is present in
+    it.  The planner never resolves that identity itself — a product
+    absent from the active set contributes no accelerated requirements.
     """
     if not isinstance(platform_tag, str) or not platform_tag.strip():
         raise ValueError("platform_tag must be a non-empty string")
@@ -468,8 +478,11 @@ def build_accelerated_deployment_plan(
 
     requirements_map: dict[str, ProductAccelerationRequirements] = {}
     for desc in catalog.list():
-        if desc.acceleration is not None:
-            requirements_map[desc.product_id] = desc.acceleration
+        if desc.acceleration is None:
+            continue
+        if active_product_ids is not None and desc.product_id not in active_product_ids:
+            continue
+        requirements_map[desc.product_id] = desc.acceleration
     products_concerned = tuple(sorted(requirements_map))
 
     kept = _sorted_keep_products(keep_products)

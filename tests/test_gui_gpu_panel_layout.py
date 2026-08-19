@@ -150,7 +150,7 @@ class _FakeGpuPlanService:
         return GpuSetupIntent(
             recommendation=recommendation,
             actionable=True,
-            message="GPU setup prepared, but no CUDA toolkit was installed.",
+            message="NVIDIA GPU detected with a usable driver. GPU acceleration can be configured for compatible installed products.",
         )
 
     def build_accelerated_deployment_plan(self, *, recommendation=None):

@@ -139,8 +139,8 @@ def build_gpu_setup_intent(
     """Build a preparatory, no-mutation GPU setup intent from a recommendation.
 
     The intent never installs or mutates anything.  Its ``message`` is
-    honest: it describes what *would* be required and never claims that a
-    CUDA toolkit or runtime was installed.
+    honest: it never claims that a CUDA toolkit or accelerated runtime was
+    installed, and never claims this version cannot install one.
     """
     status = recommendation.status
 
@@ -149,10 +149,8 @@ def build_gpu_setup_intent(
             recommendation=recommendation,
             actionable=True,
             message=(
-                "NVIDIA GPU detected with a usable driver. ZeAlfie prepared "
-                "the GPU setup intent, but did not install any CUDA toolkit "
-                "or accelerated runtime — that step is not performed by this "
-                "version."
+                "NVIDIA GPU detected with a usable driver. GPU acceleration "
+                "can be configured for compatible installed products."
             ),
         )
     if status is RecommendationStatus.ALREADY_READY:

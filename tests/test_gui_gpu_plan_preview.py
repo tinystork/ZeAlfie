@@ -327,7 +327,7 @@ class _FakeGpuPlanService:
         return GpuSetupIntent(
             recommendation=recommendation,
             actionable=True,
-            message="GPU setup prepared, but no CUDA toolkit was installed.",
+            message="NVIDIA GPU detected with a usable driver. GPU acceleration can be configured for compatible installed products.",
         )
 
     def build_accelerated_deployment_plan(self, *, recommendation=None):
@@ -347,7 +347,7 @@ class _FakeNoPlanService:
         return GpuSetupIntent(
             recommendation=recommendation,
             actionable=True,
-            message="GPU setup prepared, but no CUDA toolkit was installed.",
+            message="NVIDIA GPU detected with a usable driver. GPU acceleration can be configured for compatible installed products.",
         )
 
 
@@ -366,7 +366,7 @@ def test_panel_click_shows_plan_preview_lines(qapp):
         assert service.plan_recommendations == [rec]
         assert service.plan_recommendations[0] is rec
         text = panel._detail_label.text()
-        assert "no CUDA toolkit was installed" in text
+        assert "to configure" in text
         assert "Backend: NVIDIA_CUDA" in text
         assert "No changes have been made yet." in text
     finally:
@@ -385,8 +385,8 @@ def test_panel_without_plan_method_is_graceful(qapp):
         panel.set_recommendation(_rec())
         panel._button.click()
         text = panel._detail_label.text()
-        # Existing intent behaviour preserved, no plan preview, no crash.
-        assert "no CUDA toolkit was installed" in text
+        # Honest localized offer, no plan preview, no crash.
+        assert "to configure" in text
         assert "No changes have been made" not in text
     finally:
         panel.close()
@@ -404,7 +404,7 @@ def test_panel_survives_plan_build_error(qapp):
         panel.set_recommendation(_rec())
         panel._button.click()
         text = panel._detail_label.text()
-        assert "no CUDA toolkit was installed" in text
+        assert "to configure" in text
         assert "GPU plan preview unavailable" in text
         assert "Traceback" not in text
     finally:
@@ -444,7 +444,7 @@ class _FakeCapabilityAwareGpuPlanService:
         return GpuSetupIntent(
             recommendation=recommendation,
             actionable=True,
-            message="GPU setup prepared, but no CUDA toolkit was installed.",
+            message="NVIDIA GPU detected with a usable driver. GPU acceleration can be configured for compatible installed products.",
         )
 
     def collect_host_capabilities(self):

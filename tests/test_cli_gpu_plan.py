@@ -37,6 +37,7 @@ from zealfie.host.models import (
 )
 from zealfie.products.catalog import default_catalog
 from zealfie.runtime.model import RuntimeState, RuntimeStatus
+from zealfie.runtime.provenance import ProductProvenance
 
 SHA_A = "a" * 40
 WHEEL_A = "f" * 64
@@ -69,6 +70,23 @@ class _AbsentRt:
             state=RuntimeState.ABSENT,
             runtime_root=Path("/fake"),
         )
+
+
+class _ActiveProvenanceStore:
+    """Fake provenance store marking ``zemosaic`` ACTIVE (hermetic)."""
+
+    def load_active(self):
+        return {
+            "zemosaic": ProductProvenance(
+                product_id="zemosaic",
+                version="1.0.0",
+                source_owner="zealfie",
+                source_repo="ZeMosaic",
+                requested_ref="main",
+                commit_sha=SHA_A,
+                wheel_sha256=WHEEL_A,
+            )
+        }
 
 
 def _make_plan(status: AcceleratedPlanStatus, **overrides) -> AcceleratedDeploymentPlan:
@@ -193,6 +211,7 @@ def test_gpu_plan_default_catalog_honest_blocked(monkeypatch, tmp_path):
         runtime=_AbsentRt(),
         capability_collector=_caps,
         recommender=_recommender,
+        provenance_store=_ActiveProvenanceStore(),
     )
     monkeypatch.setattr(cli, "_make_service", lambda: service)
     before = sorted(p.name for p in tmp_path.iterdir())

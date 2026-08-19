@@ -192,6 +192,31 @@ def _variant_catalog() -> AcceleratedVariantCatalog:
     ))
 
 
+class _FakeProvenanceStore:
+    """Minimal provenance store returning a fixed active mapping."""
+
+    def __init__(self, active: dict[str, ProductProvenance]) -> None:
+        self._active = active
+
+    def load_active(self) -> dict[str, ProductProvenance]:
+        return dict(self._active)
+
+
+def _active_store(*product_ids: str) -> _FakeProvenanceStore:
+    active = {}
+    for pid in product_ids:
+        active[pid] = ProductProvenance(
+            product_id=pid,
+            version="0.0.1",
+            source_owner="tinystork",
+            source_repo="ZeWitness",
+            requested_ref="main",
+            commit_sha=WITNESS_SHA,
+            wheel_sha256="f" * 64,
+        )
+    return _FakeProvenanceStore(active)
+
+
 def _driver_unavailable_caps() -> HostCapabilities:
     """SUPPORTED-looking host with an NVIDIA GPU whose driver is gone."""
     return _caps(gpus=(
@@ -466,6 +491,7 @@ def test_service_plan_none_blocked_by_empty_variant_catalog(tmp_path):
         host=_host(),
         capability_collector=lambda: _caps(),
         recommender=lambda caps: _recommendation(),
+        provenance_store=_active_store("zewitness"),
     )
     acquirer = _SpyAcquirer()
 
@@ -878,6 +904,7 @@ def test_service_deploy_time_late_conflict_no_mutation(
         host=_host(),
         capability_collector=lambda: _caps(),
         recommender=recommend,
+        provenance_store=_active_store("zewitness"),
     )
     plan = service.build_accelerated_deployment_plan(
         capabilities=_caps(),

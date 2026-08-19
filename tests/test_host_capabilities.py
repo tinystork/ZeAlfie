@@ -721,4 +721,9 @@ def test_gpu_setup_intent_never_claims_install():
     intent = build_gpu_setup_intent(rec)
     assert intent.actionable is True
     assert intent.performed_any_mutation is False
-    assert "not" in intent.message.lower() or "did not" in intent.message.lower()
+    message = intent.message.lower()
+    # The intent must never claim a toolkit/runtime was installed, and must
+    # never claim this version cannot install one.
+    assert "did not install" not in message
+    assert "not performed by this version" not in message
+    assert "installed a" not in message

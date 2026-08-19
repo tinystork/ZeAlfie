@@ -102,6 +102,33 @@ def panel_detail(recommendation: AccelerationRecommendation | None) -> str:
     return ""
 
 
+def panel_configure_message(
+    recommendation: AccelerationRecommendation | None,
+) -> str:
+    """Return the localized configure-action message for the detail area.
+
+    Honest and generic: it never claims that a CUDA toolkit or
+    accelerated runtime was installed, and never claims this version
+    cannot install one.  Localized through the shared i18n catalog (no
+    hardcoded widget strings).
+    """
+    if recommendation is None:
+        return translate("gpu.status_unknown")
+    status = recommendation.status
+    if status is RecommendationStatus.OFFER_SETUP:
+        gpu = _primary_nvidia_gpu(recommendation)
+        if gpu is not None and gpu.model:
+            return translate("gpu.offer_setup_nvidia", model=gpu.model)
+        return translate("gpu.offer_setup")
+    if status is RecommendationStatus.ALREADY_READY:
+        return translate("gpu.already_ready")
+    if status is RecommendationStatus.BLOCKED:
+        return translate("gpu.blocked")
+    if status is RecommendationStatus.NOT_APPLICABLE:
+        return translate("gpu.not_applicable")
+    return translate("gpu.status_unknown")
+
+
 def _primary_nvidia_gpu(recommendation):
     for gpu in recommendation.gpus:
         if getattr(gpu, "is_nvidia", False):
@@ -375,7 +402,7 @@ class AccelerationPanel(QFrame):
         # lines and the Installer offer (never a second hardware
         # observation, never a duplicate plan build).
         plan, plan_error = self._obtain_plan()
-        lines = [intent.message]
+        lines = [panel_configure_message(intent.recommendation)]
         if plan is not None:
             lines.extend(gpu_plan_preview_lines(plan))
         elif plan_error is not None:

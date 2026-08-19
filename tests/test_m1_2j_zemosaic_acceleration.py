@@ -91,6 +91,7 @@ from zealfie.products.catalog import (
 )
 from zealfie.releases.model import HostTarget, VerifiedArtifact
 from zealfie.runtime.model import RuntimeState, RuntimeStatus
+from zealfie.runtime.provenance import ProductProvenance
 from zealfie.runtime.state import save_active_state
 from zealfie.runtime.layout import RuntimeLayout
 from zealfie.sources import RemoteSource, ResolvedSource
@@ -735,6 +736,7 @@ def test_N_planning_read_only_and_deterministic(tmp_path):
         ),
         capability_collector=_supported,
         recommender=lambda caps: _recommendation(),
+        provenance_store=_ActiveProvenanceStore(),
     )
     snapshot_before = _snapshot(tmp_path)
     first = service.build_accelerated_deployment_plan()
@@ -763,6 +765,23 @@ class _FakeRt:
 
     def status(self) -> RuntimeStatus:
         return self._status
+
+
+class _ActiveProvenanceStore:
+    """Fake provenance store marking ``zemosaic`` ACTIVE (hermetic)."""
+
+    def load_active(self):
+        return {
+            "zemosaic": ProductProvenance(
+                product_id="zemosaic",
+                version="1.0.0",
+                source_owner="zealfie",
+                source_repo="ZeMosaic",
+                requested_ref="main",
+                commit_sha=SHA_A,
+                wheel_sha256=WHEEL_A,
+            )
+        }
 
 
 # =============================================================================

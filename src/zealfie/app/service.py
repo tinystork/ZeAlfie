@@ -1028,6 +1028,14 @@ class ZeAlfieService:
         keep_products = self._keep_products_for_acceleration_plan()
         if variant_catalog is None:
             variant_catalog = default_manifest_variant_catalog()
+        # ACTIVE-installed identity is the planner's applicability filter:
+        # a catalog product absent from the ACTIVE state contributes no
+        # accelerated requirements (fresh-install / ZeSolver-only never
+        # proposes the ZeMosaic CUDA closure).  ``keep_products`` keys are
+        # exactly ``active_provenance()`` ∪ primary installed-lock products
+        # mapped to the catalog — the same sources used for KEEP — so a
+        # (possibly empty) frozenset is always passed, never ``None``.
+        active_product_ids = frozenset(keep_products)
         return build_accelerated_deployment_plan(
             catalog=self._catalog,
             capabilities=capabilities,
@@ -1036,6 +1044,7 @@ class ZeAlfieService:
             variant_catalog=variant_catalog,
             keep_products=keep_products,
             platform_tag=self._host.platform_tag,
+            active_product_ids=active_product_ids,
         )
 
     def _keep_products_for_acceleration_plan(

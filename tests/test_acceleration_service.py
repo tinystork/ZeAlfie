@@ -38,6 +38,8 @@ from zealfie.components.model import EntryPointContract
 from zealfie.host.models import (
     AccelerationRecommendation,
     CapabilityStatus,
+    GpuInfo,
+    GpuKind,
     HostCapabilities,
     HostReasonCode,
     RecommendationStatus,
@@ -164,6 +166,34 @@ def _variant_catalog() -> AcceleratedVariantCatalog:
     )
 
 
+class _FakeProvenanceStore:
+    """Minimal provenance store returning a fixed active mapping."""
+
+    def __init__(self, active: dict[str, ProductProvenance]) -> None:
+        self._active = active
+
+    def load_active(self) -> dict[str, ProductProvenance]:
+        return dict(self._active)
+
+
+def _provenance(product_id: str, version: str = "1.0.0") -> ProductProvenance:
+    return ProductProvenance(
+        product_id=product_id,
+        version=version,
+        source_owner="zealfie",
+        source_repo=product_id,
+        requested_ref="main",
+        commit_sha=SHA_A,
+        wheel_sha256=WHEEL_A,
+    )
+
+
+def _active_store(*product_ids: str) -> _FakeProvenanceStore:
+    return _FakeProvenanceStore(
+        {pid: _provenance(pid) for pid in product_ids}
+    )
+
+
 def _snapshot(root: Path) -> dict[str, bytes]:
     """Full byte snapshot of every file under *root* (deterministic)."""
     snapshot: dict[str, bytes] = {}
@@ -213,6 +243,7 @@ def test_default_catalog_blocked_plan_read_only(
         host=_host(),
         capability_collector=collector,
         recommender=recommender,
+        provenance_store=_active_store("zemosaic"),
     )
 
     status_before = runtime.status()
@@ -228,7 +259,14 @@ def test_default_catalog_blocked_plan_read_only(
     assert plan.backend is None
     assert plan.products_concerned == ("zemosaic",)
     assert plan.added_requirements == ()
-    assert plan.keep_products == ()
+    assert plan.keep_products == (
+        PlannedKeepProduct(
+            product_id="zemosaic",
+            version="1.0.0",
+            commit_sha=SHA_A,
+            wheel_sha256=WHEEL_A,
+        ),
+    )
     assert plan.target_runtime == "no new runtime required"
     assert "no supported accelerator hardware detected" in (
         plan.blocked_reason or ""
@@ -252,6 +290,7 @@ def test_planning_never_writes_files_with_absent_runtime(tmp_path):
         recommender=lambda caps: _recommendation(
             RecommendationStatus.NOT_APPLICABLE
         ),
+        provenance_store=_active_store("zemosaic"),
     )
     plan = service.build_accelerated_deployment_plan()
     assert plan.status is AcceleratedPlanStatus.BLOCKED
@@ -288,6 +327,7 @@ def test_plan_ready_with_synthetic_catalog_and_injected_inputs():
         host=_host(),
         capability_collector=collector,
         recommender=recommender,
+        provenance_store=_active_store("zebench"),
     )
 
     plan = service.build_accelerated_deployment_plan(
@@ -334,6 +374,7 @@ def test_plan_uses_default_collection_once_when_not_injected():
         host=_host(),
         capability_collector=collector,
         recommender=recommender,
+        provenance_store=_active_store("zebench"),
     )
     plan = service.build_accelerated_deployment_plan()
     assert calls == ["collect", ("recommend", caps_obj)]
@@ -350,6 +391,7 @@ def test_missing_variant_blocks_plan_honestly():
         host=_host(),
         capability_collector=_caps,
         recommender=lambda caps: _recommendation(),
+        provenance_store=_active_store("zebench"),
     )
     plan = service.build_accelerated_deployment_plan()
     assert plan.status is AcceleratedPlanStatus.BLOCKED
@@ -613,6 +655,7 @@ def test_plan_is_deterministic():
         host=_host(),
         capability_collector=_caps,
         recommender=lambda caps: _recommendation(),
+        provenance_store=_active_store("zebench"),
     )
     first = service.build_accelerated_deployment_plan(
         capabilities=_caps(),
@@ -626,3 +669,201 @@ def test_plan_is_deterministic():
     )
     assert first == second
     assert first.status is AcceleratedPlanStatus.PLAN_READY
+
+
+# ---------------------------------------------------------------------------
+# ZA-GPU-FIRST-RUN-01: ACTIVE-installed applicability for accelerated plans
+# ---------------------------------------------------------------------------
+
+
+def _nvidia_caps() -> HostCapabilities:
+    """A confident NVIDIA host observation (driver above the curated floor)."""
+    return _caps(gpus=(
+        GpuInfo(
+            vendor="NVIDIA",
+            model="GeForce MX150",
+            kind=GpuKind.DISCRETE,
+            hardware_present=True,
+            driver_status=CapabilityStatus.AVAILABLE,
+            driver_version="550.163.01",
+            driver_reason_code=None,
+            driver_reason=None,
+            nvidia_smi_available=True,
+            cuda_driver_present=True,
+        ),
+    ))
+
+
+def _accel_descriptor(
+    product_id: str, distribution: str = "accelerated-lib"
+) -> ProductDescriptor:
+    return ProductDescriptor(
+        product_id=product_id,
+        display_name=product_id,
+        distribution_name=product_id,
+        launch_entry_points=_EP,
+        acceleration=ProductAccelerationRequirements(
+            product_id=product_id,
+            backend="NVIDIA_CUDA",
+            optional=True,
+            requirements=(
+                AcceleratedRequirement(
+                    distribution=distribution, specifier=">=1.0"
+                ),
+            ),
+        ),
+    )
+
+
+def _plain_descriptor(product_id: str) -> ProductDescriptor:
+    return ProductDescriptor(
+        product_id=product_id,
+        display_name=product_id,
+        distribution_name=product_id,
+        launch_entry_points=_EP,
+    )
+
+
+def test_fresh_install_absent_runtime_no_installable_plan():
+    """Case A: fresh install — runtime ABSENT, no provenance, NVIDIA GPU
+    detected — the plan must NOT be PLAN_READY for a catalog product that
+    is not installed (no installable accelerated closure)."""
+    service = ZeAlfieService(
+        catalog=ProductCatalog((_accel_descriptor("zemosaic"),)),
+        runtime=_absent_runtime(Path("/fake")),
+        host=_host(),
+        capability_collector=_nvidia_caps,
+        recommender=lambda caps: _recommendation(),
+    )
+    plan = service.build_accelerated_deployment_plan(
+        capabilities=_nvidia_caps(),
+        recommendation=_recommendation(),
+        variant_catalog=_variant_catalog(),
+    )
+    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.products_concerned == ()
+    assert plan.added_requirements == ()
+    assert plan.target_runtime == "no new runtime required"
+
+
+def test_configure_gpu_click_no_exception_with_empty_provenance():
+    """Case A: the configure-click path (prepare_gpu_setup_intent + plan
+    build) never raises when provenance is empty/absent and the runtime is
+    absent — the plan is honestly NO_ACCELERATED_REQUIREMENTS."""
+    service = ZeAlfieService(
+        catalog=ProductCatalog((_accel_descriptor("zemosaic"),)),
+        runtime=_absent_runtime(Path("/fake")),
+        host=_host(),
+        capability_collector=_nvidia_caps,
+        recommender=lambda caps: _recommendation(),
+    )
+    # No provenance store -> active_provenance() == {}; must not raise.
+    intent = service.prepare_gpu_setup_intent(_recommendation())
+    assert intent is not None
+    plan = service.build_accelerated_deployment_plan(
+        capabilities=_nvidia_caps(),
+        recommendation=_recommendation(),
+        variant_catalog=_variant_catalog(),
+    )
+    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.added_requirements == ()
+
+
+def test_zesolver_only_active_no_zemosaic_closure():
+    """Case B: ZeSolver alone ACTIVE (runtime present) — the ZeMosaic
+    NVIDIA_CUDA closure is never installable."""
+    service = ZeAlfieService(
+        catalog=ProductCatalog((
+            _accel_descriptor("zemosaic"),
+            _plain_descriptor("zesolver"),
+        )),
+        runtime=_absent_runtime(Path("/fake")),
+        host=_host(),
+        capability_collector=_nvidia_caps,
+        recommender=lambda caps: _recommendation(),
+        provenance_store=_active_store("zesolver"),
+    )
+    plan = service.build_accelerated_deployment_plan(
+        capabilities=_nvidia_caps(),
+        recommendation=_recommendation(),
+        variant_catalog=_variant_catalog(),
+    )
+    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.products_concerned == ()
+    assert plan.added_requirements == ()
+
+
+def test_zemosaic_active_plan_ready_preserved():
+    """Case C: ZeMosaic installed with valid ACTIVE provenance — the
+    PLAN_READY NVIDIA_CUDA plan is preserved."""
+    service = ZeAlfieService(
+        catalog=ProductCatalog((_accel_descriptor("zemosaic"),)),
+        runtime=_absent_runtime(Path("/fake")),
+        host=_host(),
+        capability_collector=_nvidia_caps,
+        recommender=lambda caps: _recommendation(),
+        provenance_store=_active_store("zemosaic"),
+    )
+    plan = service.build_accelerated_deployment_plan(
+        capabilities=_nvidia_caps(),
+        recommendation=_recommendation(),
+        variant_catalog=_variant_catalog(),
+    )
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    assert plan.backend == "NVIDIA_CUDA"
+    assert plan.products_concerned == ("zemosaic",)
+    assert [d.distribution for d in plan.added_requirements] == [
+        "accelerated-lib"
+    ]
+
+
+def test_only_active_products_contribute_to_requirements():
+    """Case D: several catalog products declare acceleration; only the
+    ACTIVE ones contribute their requirements (no hardcoded product id)."""
+    service = ZeAlfieService(
+        catalog=ProductCatalog((
+            _accel_descriptor("zeproduct-a", distribution="accelerated-lib"),
+            _accel_descriptor("zeproduct-b", distribution="other-accel-lib"),
+        )),
+        runtime=_absent_runtime(Path("/fake")),
+        host=_host(),
+        capability_collector=_nvidia_caps,
+        recommender=lambda caps: _recommendation(),
+        provenance_store=_active_store("zeproduct-a"),
+    )
+    plan = service.build_accelerated_deployment_plan(
+        capabilities=_nvidia_caps(),
+        recommendation=_recommendation(),
+        variant_catalog=_variant_catalog(),
+    )
+    # zeproduct-b (non-active) would block with a missing variant if it
+    # were consulted; it is not, so only zeproduct-a contributes.
+    assert plan.status is AcceleratedPlanStatus.PLAN_READY
+    assert plan.products_concerned == ("zeproduct-a",)
+    assert [d.distribution for d in plan.added_requirements] == [
+        "accelerated-lib"
+    ]
+
+
+def test_active_product_without_acceleration_no_invented_requirements():
+    """Case D: an ACTIVE product that declares no acceleration never
+    invents accelerated requirements."""
+    service = ZeAlfieService(
+        catalog=ProductCatalog((
+            _plain_descriptor("zesolver"),
+            _accel_descriptor("zemosaic"),
+        )),
+        runtime=_absent_runtime(Path("/fake")),
+        host=_host(),
+        capability_collector=_nvidia_caps,
+        recommender=lambda caps: _recommendation(),
+        provenance_store=_active_store("zesolver"),
+    )
+    plan = service.build_accelerated_deployment_plan(
+        capabilities=_nvidia_caps(),
+        recommendation=_recommendation(),
+        variant_catalog=_variant_catalog(),
+    )
+    assert plan.status is AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS
+    assert plan.products_concerned == ()
+    assert plan.added_requirements == ()

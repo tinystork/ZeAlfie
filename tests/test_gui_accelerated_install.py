@@ -151,6 +151,17 @@ def _blocked_plan() -> AcceleratedDeploymentPlan:
     )
 
 
+def _no_requirements_plan() -> AcceleratedDeploymentPlan:
+    return _make_plan(
+        AcceleratedPlanStatus.NO_ACCELERATED_REQUIREMENTS,
+        blocked=True,
+        blocked_reason=(
+            "no product declares accelerated requirements; the active "
+            "CPU closure is preserved unchanged"
+        ),
+    )
+
+
 def _rec(status=RecommendationStatus.OFFER_SETUP) -> AccelerationRecommendation:
     gpu = GpuInfo(
         vendor="NVIDIA",
@@ -742,7 +753,7 @@ class _FakePanelService:
         return GpuSetupIntent(
             recommendation=recommendation,
             actionable=True,
-            message="GPU setup prepared, but no CUDA toolkit was installed.",
+            message="NVIDIA GPU detected with a usable driver. GPU acceleration can be configured for compatible installed products.",
         )
 
     def build_accelerated_deployment_plan(self, **kwargs):
@@ -848,6 +859,42 @@ class TestAccelerationPanelInstall:
             assert "Install" in panel._install_button.text()
             # Preview still shown in the detail label.
             assert "No changes have been made yet." in panel._detail_label.text()
+        finally:
+            panel.close()
+            panel.deleteLater()
+            qapp.processEvents()
+
+    def test_install_button_tracks_accelerated_product_applicability(self, qapp):
+        """ZA-GPU-FIRST-RUN-01 (7+8): with no applicable accelerated
+        product installed the plan is NO_ACCELERATED_REQUIREMENTS and the
+        Installer is hidden; once the product is installed the plan is
+        PLAN_READY and the Installer is offered again."""
+        from zealfie.gui.acceleration_panel import AccelerationPanel
+
+        class _MutableService(_FakePanelService):
+            def __init__(self):
+                super().__init__(plan=None)
+                self.product_installed = False
+
+            def build_accelerated_deployment_plan(self, **kwargs):
+                self.plan_calls += 1
+                self.plan_kwargs.append(kwargs)
+                if not self.product_installed:
+                    return _no_requirements_plan()
+                return _ready_plan()
+
+        service = _MutableService()
+        panel = AccelerationPanel(service=service)
+        try:
+            panel.set_recommendation(_rec())
+            panel._button.click()
+            # No accelerated product installed yet: no Installer.
+            assert panel._install_button.isHidden() is True
+
+            service.product_installed = True
+            panel._button.click()
+            assert panel._install_button.isHidden() is False
+            assert "Install" in panel._install_button.text()
         finally:
             panel.close()
             panel.deleteLater()
