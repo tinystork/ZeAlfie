@@ -13,6 +13,13 @@ from zealfie.app import ZeAlfieService
 from zealfie.sources.github import GitHubArchiveFetcher, GitHubSourceRefResolver
 from zealfie.app.install_defaults import default_install_work_root
 from zealfie.i18n import effective_language, set_language
+from zealfie.selfupdate import (
+    make_self_update_apply_fn,
+    make_self_update_check_fn,
+    restart_gui_after_update,
+)
+from zealfie.selfupdate.resolver import GitHubTagsLister
+from zealfie.runtime.layout import default_runtime_layout
 
 from .main_window import ZeAlfieMainWindow
 
@@ -59,6 +66,25 @@ def run_gui() -> None:
         product_id, resolver=resolver
     )
 
+    # ZA-M1-4.2: wire the existing self-update engine onto the GUI shell.
+    # The check + stage (background) and apply (worker thread) run off the
+    # GUI thread; the restart spawns a detached supervisor that relaunches
+    # zealfie-gui after the standalone activator/helper finishes.
+    layout = default_runtime_layout()
+    tags_lister = GitHubTagsLister()
+    self_update_check_fn = make_self_update_check_fn(
+        resolver=resolver,
+        tags_lister=tags_lister,
+        fetcher=fetcher,
+        work_root=work_root,
+        layout=layout,
+        channel="stable",
+    )
+    self_update_apply_fn = make_self_update_apply_fn(layout=layout)
+    self_update_restart_fn = lambda: restart_gui_after_update(
+        runtime_root=layout.root
+    )
+
     # M1-4 LOT E: apply the persisted preference (or first-run locale
     # inference) before building the UI so the shell renders in the right
     # language from the start.
@@ -70,6 +96,9 @@ def run_gui() -> None:
         fetcher=fetcher,
         work_root=work_root,
         check_fn=check_fn,
+        self_update_check_fn=self_update_check_fn,
+        self_update_apply_fn=self_update_apply_fn,
+        self_update_restart_fn=self_update_restart_fn,
     )
     window.show()
 

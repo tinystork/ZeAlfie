@@ -7,6 +7,8 @@ and install coordination via a QThread worker.
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -33,11 +35,14 @@ from zealfie.app.update_checks import CheckFunction
 from zealfie.sources.acquisition import ArchiveFetcher
 from zealfie.sources import SourceRefResolver
 from zealfie.i18n import Language, LanguageStore, get_language, set_language, translate
+from zealfie.selfupdate import ApplyStatus, GuiSelfUpdateResult, GuiSelfUpdateStatus
 
 from .presentation import action_enabled, runtime_summary
 from .product_card import ProductCard
 from .install_worker import create_install_thread
 from .update_bridge import UpdateResultBridge
+from .self_update_banner import SelfUpdateBanner
+from .self_update_worker import SelfUpdateResultBridge, create_self_update_apply_thread
 from .acceleration_panel import AccelerationPanel
 
 logger = logging.getLogger(__name__)
@@ -68,6 +73,9 @@ class ZeAlfieMainWindow(QMainWindow):
         fetcher: ArchiveFetcher | None = None,
         work_root: Path | None = None,
         check_fn: CheckFunction | None = None,
+        self_update_check_fn: Callable[[], GuiSelfUpdateResult] | None = None,
+        self_update_apply_fn: Callable[[], object] | None = None,
+        self_update_restart_fn: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
@@ -101,11 +109,28 @@ class ZeAlfieMainWindow(QMainWindow):
         self._update_bridge = UpdateResultBridge(self)
         self._update_bridge.update_result_ready.connect(self._on_update_result)
 
+        # ZA-M1-4.2: GUI self-update (check + stage + propose + apply + restart).
+        self._self_update_check_fn = self_update_check_fn
+        self._self_update_apply_fn = self_update_apply_fn
+        self._self_update_restart_fn = self_update_restart_fn
+        self._self_update_check_thread: threading.Thread | None = None
+        self._self_update_started: bool = False
+        self._self_update_dismissed: bool = False
+        self._self_update_applying: bool = False
+        self._self_update_restarting: bool = False
+        self._self_update_ready_result: GuiSelfUpdateResult | None = None
+        self._self_update_apply_thread: object | None = None
+        self._self_update_apply_worker: object | None = None
+        self._self_update_bridge = SelfUpdateResultBridge(self)
+        self._self_update_bridge.result_ready.connect(self._on_self_update_result)
+
         self._build_ui()
         self._refresh()
         # Start update checks after the initial refresh; non-blocking and
         # a no-op when no check function / resolver is available.
         self.start_update_checks()
+        # Start the non-blocking self-update check + stage (stable channel).
+        self.start_self_update_check()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -138,6 +163,14 @@ class ZeAlfieMainWindow(QMainWindow):
         header_layout.addWidget(self._subtitle_label)
 
         central_layout.addLayout(header_layout)
+
+        # --- Self-update proposal banner (ZA-M1-4.2, hidden by default) ---
+        self._self_update_banner = SelfUpdateBanner(self)
+        self._self_update_banner.update_accepted.connect(
+            self._on_self_update_accepted
+        )
+        self._self_update_banner.dismissed.connect(self._on_self_update_dismissed)
+        central_layout.addWidget(self._self_update_banner)
 
         # --- Hardware acceleration panel (M1-2G) ---
         # Composition-root transports are threaded down so the
@@ -393,6 +426,7 @@ class ZeAlfieMainWindow(QMainWindow):
             action.setChecked(get_language() is lang)
         if self._acceleration_panel is not None:
             self._acceleration_panel.retranslate()
+        self._self_update_banner.retranslate()
         self._clear_cards()
         self._populate_cards()
         self._refresh_products()
@@ -466,6 +500,162 @@ class ZeAlfieMainWindow(QMainWindow):
         if coordinator is not None:
             coordinator.shutdown(wait=False)
             self._update_coordinator = None
+
+    # ------------------------------------------------------------------
+    # ZA-M1-4.2: GUI self-update (check → stage → propose → apply → restart)
+    # ------------------------------------------------------------------
+
+    def start_self_update_check(self) -> None:
+        """Start the non-blocking self-update check + stage (stable channel).
+
+        No-op when no self-update check fn is wired.  The check (network
+        resolve + build + verify + stage) runs on a background daemon thread
+        — never the GUI thread — so a slow network call can never block
+        interpreter exit.  Staging is fail-closed (it only ever writes
+        work_root + a validated pending marker), so a daemon thread killed
+        mid-stage cannot fabricate a ready-to-install state.  A single check
+        is started per window.
+        """
+        if self._self_update_check_fn is None:
+            return
+        if self._self_update_started:
+            return
+        self._self_update_started = True
+        thread = threading.Thread(
+            target=self._run_self_update_check_and_notify,
+            name="zealfie-selfupdate",
+            daemon=True,
+        )
+        self._self_update_check_thread = thread
+        thread.start()
+
+    def _run_self_update_check_and_notify(self) -> None:
+        """Background worker: run the check pipeline, marshal the result."""
+        try:
+            result = self._self_update_check_fn()
+        except Exception as exc:  # noqa: BLE001 - never crash the shell
+            logger.exception("self-update check raised unexpectedly")
+            result = GuiSelfUpdateResult(
+                GuiSelfUpdateStatus.FAILED, reason=str(exc)
+            )
+        # The window may have closed (and been deleted) while the check ran;
+        # emitting on a deleted bridge must never crash the shell.
+        try:
+            self._self_update_bridge.notify(result)
+        except RuntimeError:
+            logger.debug(
+                "self-update check completed after window close; "
+                "dropping result"
+            )
+
+    def _on_self_update_result(self, result: GuiSelfUpdateResult) -> None:
+        """GUI-thread slot: show the proposal only for UPDATE_READY."""
+        if result.status is GuiSelfUpdateStatus.UPDATE_READY:
+            if self._self_update_dismissed or self._self_update_applying:
+                return
+            self._self_update_ready_result = result
+            self._self_update_banner.show_ready(result.version)
+        else:
+            # NOT_SUPPORTED / UP_TO_DATE / FAILED → silent (never intrusive).
+            self._self_update_ready_result = None
+
+    def _on_self_update_accepted(self) -> None:
+        """User accepted the update: run the existing apply exactly once."""
+        if self._self_update_applying:
+            return
+        if self._self_update_apply_fn is None:
+            return
+        # Do not start an apply while a product transaction is active.
+        if self._install_active:
+            return
+
+        self._self_update_applying = True
+        self._self_update_banner.set_busy(True)
+
+        self._self_update_apply_thread, self._self_update_apply_worker = (
+            create_self_update_apply_thread(
+                self._self_update_apply_fn, parent=self
+            )
+        )
+        worker = self._self_update_apply_worker
+        worker.apply_finished.connect(self._on_self_update_applied)
+        thread = self._self_update_apply_thread
+        thread.finished.connect(
+            lambda: self._cleanup_self_update_apply_thread(thread)
+        )
+        thread.start()
+        logger.info("self-update apply worker started")
+
+    def _on_self_update_applied(self, result) -> None:
+        """GUI-thread slot: restart on success, stay alive on honest failure."""
+        status = result.status
+        if status is ApplyStatus.APPLIED or status is ApplyStatus.HANDOFF_STARTED:
+            # Success (Linux applied in-process; Windows handed off to the
+            # detached helper).  Launch the restart once, then close the shell
+            # so activation can finish.  Never a false success claim: only
+            # APPLIED / HANDOFF_STARTED reach here.
+            self._self_update_restarting = True
+            try:
+                if self._self_update_restart_fn is not None:
+                    self._self_update_restart_fn()
+                else:
+                    logger.warning(
+                        "self-update succeeded but no restart fn is wired"
+                    )
+            except Exception:  # noqa: BLE001 - never block close on restart
+                logger.exception("self-update restart spawn failed")
+            self.close()
+            return
+
+        # Honest failure: no false success, pending preserved, shell usable.
+        logger.warning("self-update apply did not succeed: %s", status)
+        self._self_update_applying = False
+        self._self_update_banner.show_error()
+
+    def _on_self_update_dismissed(self) -> None:
+        """User chose "Later": hide the proposal, keep the pending marker."""
+        self._self_update_dismissed = True
+        self._self_update_banner.dismiss()
+
+    def _shutdown_self_update(self) -> None:
+        """Drop the self-update check-thread reference (never blocks exit).
+
+        The check thread is daemon, so the interpreter never joins it at
+        exit; dropping the reference here only releases the window's handle
+        to it.  A killed daemon thread mid-stage is safe: staging is
+        fail-closed and only ever writes work_root + a validated marker.
+        """
+        self._self_update_check_thread = None
+
+    def _cleanup_self_update_apply_thread(self, thread) -> None:
+        """Release the apply thread reference (mirrors _cleanup_thread)."""
+        if thread is not self._self_update_apply_thread:
+            return
+        if thread.isRunning():
+            thread.wait(5000)
+        thread.deleteLater()
+        self._self_update_apply_worker = None
+        self._self_update_apply_thread = None
+
+    def _teardown_self_update_apply_thread(self) -> None:
+        """Quit + bounded-wait the apply thread before the process exits.
+
+        On the restart/close path the apply worker has already emitted its
+        result, but the ``worker.destroyed → thread.quit`` handoff is a
+        queued connection delivered on the GUI event loop.  If that loop
+        exits first, the thread's event loop never quits and Qt would destroy
+        a still-running QThread at process exit ("QThread: Destroyed while
+        thread is still running").  ``QThread.quit()`` is thread-safe, so
+        calling it directly here (instead of relying on the queued signal)
+        and waiting a bounded time guarantees the thread stops without ever
+        blocking indefinitely.
+        """
+        thread = self._self_update_apply_thread
+        if thread is None:
+            return
+        if thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
 
     def _update_status_bar(self, shell: ProductShellState) -> None:
         if self._status_label:
@@ -772,10 +962,22 @@ class ZeAlfieMainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        """Reject close when an install is in progress.
+        """Reject close when an install or self-update apply is in progress.
 
-        Does NOT call QThread.terminate().
+        A self-update *restart* is a deliberate, accepted close and is never
+        blocked.  Does NOT call QThread.terminate().
         """
+        if self._self_update_restarting:
+            self._shutdown_update_checks()
+            self._shutdown_self_update()
+            self._teardown_self_update_apply_thread()
+            super().closeEvent(event)
+            return
+        if self._self_update_applying:
+            if self._status_label:
+                self._status_label.setText(translate("selfupdate.applying"))
+            event.ignore()
+            return
         if self._install_active:
             if self._status_label:
                 self._status_label.setText(
@@ -784,6 +986,8 @@ class ZeAlfieMainWindow(QMainWindow):
             event.ignore()
             return
         self._shutdown_update_checks()
+        self._shutdown_self_update()
+        self._teardown_self_update_apply_thread()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

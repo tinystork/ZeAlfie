@@ -14,9 +14,9 @@ Dynamic placeholders are formatted with a safe formatter so a missing value
 never raises ``KeyError`` and unknown placeholders are preserved verbatim.
 
 .. note::
-    The CLI self-update introduced in LOT D is command-line only (there is no
-    GUI self-update widget), so its messages remain English and are not part
-    of these catalogues.
+    The CLI self-update introduced in LOT D is command-line only, so its
+    messages remain English.  The GUI self-update banner introduced in
+    ZA-M1-4.2 is translated (``selfupdate.*`` keys) in these catalogues.
 """
 
 from __future__ import annotations

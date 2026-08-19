@@ -8,8 +8,9 @@ for every key introduced here.  Keys are stable, dotted identifiers (e.g.
 
 Strings here are the *user-visible shell text* only.  Internal log messages,
 CLI self-update output, and strings owned by the backend products are
-deliberately out of scope (the CLI self-update introduced in LOT D stays
-English, so there is no GUI self-update surface to translate).
+deliberately out of scope.  The CLI self-update (LOT D) stays English;
+the GUI self-update banner (ZA-M1-4.2) is translated here under the
+``selfupdate.*`` keys.
 """
 
 from __future__ import annotations
@@ -159,6 +160,15 @@ EN: dict[str, str] = {
     "plan.actions_none": "Planned actions: none recorded",
     "plan.host_prereqs": "Host prerequisites:",
     "plan.no_changes_yet": "No changes have been made yet.",
+    # -- Self-update banner (ZA-M1-4.2) ---------------------------------
+    "selfupdate.ready": "ZeAlfie {version} is ready to be installed.",
+    "selfupdate.update_restart": "Update and restart",
+    "selfupdate.later": "Later",
+    "selfupdate.applying": "Updating\u2026",
+    "selfupdate.apply_failed": (
+        "The update could not be applied. The current version is still "
+        "installed."
+    ),
 }
 
 
@@ -318,6 +328,15 @@ FR: dict[str, str] = {
     "plan.actions_none": "Actions planifiées : aucune enregistrée",
     "plan.host_prereqs": "Prérequis hôte :",
     "plan.no_changes_yet": "Aucun changement n'a encore été effectué.",
+    # -- Self-update banner (ZA-M1-4.2) ---------------------------------
+    "selfupdate.ready": "ZeAlfie {version} est prêt à être installé.",
+    "selfupdate.update_restart": "Mettre à jour et redémarrer",
+    "selfupdate.later": "Plus tard",
+    "selfupdate.applying": "Mise à jour\u2026",
+    "selfupdate.apply_failed": (
+        "La mise à jour n'a pas pu être appliquée. La version actuelle "
+        "reste installée."
+    ),
     # -- Product descriptions (FR only; EN lives in manifests/products.toml) ---
     "product.description.zesolver": (
         "Solveur astrométrique — résolution astrométrique, résolution à "

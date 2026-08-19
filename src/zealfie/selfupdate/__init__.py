@@ -49,12 +49,26 @@ from .verify import (
     compute_sha256,
     stage_update,
 )
+from .orchestration import (
+    GuiSelfUpdateResult,
+    GuiSelfUpdateStatus,
+    make_self_update_apply_fn,
+    make_self_update_check_fn,
+    run_self_update_check,
+)
+from .restart import (
+    restart_gui_after_update,
+    spawn_gui_process,
+    spawn_restart_supervisor,
+)
 
 __all__ = [
     "ApplyStatus",
     "DEFAULT_SOURCE_OWNER",
     "DEFAULT_SOURCE_REPO",
     "GitHubTagsLister",
+    "GuiSelfUpdateResult",
+    "GuiSelfUpdateStatus",
     "InstallMode",
     "PENDING_FILENAME",
     "PENDING_SCHEMA_VERSION",
@@ -72,12 +86,18 @@ __all__ = [
     "apply_pending_update",
     "build_self_update_plan",
     "clear_pending_marker",
+    "make_self_update_apply_fn",
+    "make_self_update_check_fn",
     "compute_sha256",
     "detect_identity",
     "load_pending_marker",
     "pending_marker_path",
     "resolve_available_update",
+    "restart_gui_after_update",
+    "run_self_update_check",
     "self_update_supported",
+    "spawn_gui_process",
+    "spawn_restart_supervisor",
     "stage_and_persist",
     "stage_update",
     "write_pending_marker",
