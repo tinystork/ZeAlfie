@@ -25,7 +25,7 @@ a non-``PLAN_READY`` plan offers no Installer button at all.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
@@ -182,6 +182,16 @@ class AccelerationPanel(QFrame):
     keeps its fail-closed behaviour (no fetcher -> honest PREPARE
     failure, runtime untouched).
     """
+
+    #: Emitted whenever the panel's user-visible status changes
+    #: (recommendation rendered, install started/progressed/finished).
+    #: The home badge mirrors this so it reflects install-in-progress and
+    #: terminal states without re-probing.
+    status_changed = Signal()
+    #: Emitted when an accelerated install terminates, carrying the result
+    #: object.  The shell uses it to re-collect authoritative runtime state
+    #: after a successful install (never on cancel/failure).
+    install_finished = Signal(object)
 
     def __init__(
         self,
@@ -355,6 +365,7 @@ class AccelerationPanel(QFrame):
         if self._button is not None:
             self._button.setVisible(configure_button_visible(recommendation))
         self._update_install_button()
+        self.status_changed.emit()
 
     def set_unknown(self) -> None:
         """Show an honest unknown state with no configure offer."""
@@ -374,6 +385,7 @@ class AccelerationPanel(QFrame):
         if not self._install_active:
             self._plan = None
         self._update_install_button()
+        self.status_changed.emit()
 
     # ------------------------------------------------------------------
     # Configure action
@@ -510,6 +522,7 @@ class AccelerationPanel(QFrame):
         if self._cancel_button is not None:
             self._cancel_button.setVisible(True)
         thread.start()
+        self.status_changed.emit()
 
     def _on_cancel_clicked(self) -> None:
         """Request cooperative cancellation of the running worker."""
@@ -530,6 +543,7 @@ class AccelerationPanel(QFrame):
         ):
             if self._cancel_button is not None:
                 self._cancel_button.setVisible(False)
+        self.status_changed.emit()
 
     def _set_progress_text(self, label: str, percent) -> None:
         if self._progress_label is None:
@@ -580,6 +594,8 @@ class AccelerationPanel(QFrame):
                 self._summary_label.setText(translate("gpu.failed"))
             self._show_detail(_short(str(reason or translate("gpu.unknown_error"))))
             self._update_install_button()  # retry stays available
+        self.status_changed.emit()
+        self.install_finished.emit(result)
 
     def retranslate(self) -> None:
         """Re-apply translated strings from the currently stored observation."""

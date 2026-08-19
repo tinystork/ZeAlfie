@@ -25,6 +25,7 @@ from zealfie.app import (
     UpdateStatus,
 )
 from zealfie.i18n import translate
+from zealfie.host import RecommendationStatus
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +181,50 @@ def runtime_summary(
     if managed_count > 0:
         text += translate("runtime.managed_suffix", managed=managed_count)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Compact GPU status badge (M1-5-A)
+# ---------------------------------------------------------------------------
+
+
+def primary_nvidia_gpu(recommendation):
+    """Return the first NVIDIA GPU of a recommendation, or ``None``."""
+    for gpu in getattr(recommendation, "gpus", ()) or ():
+        if getattr(gpu, "is_nvidia", False):
+            return gpu
+    return None
+
+
+def compact_gpu_status(
+    recommendation,
+    *,
+    install_active: bool = False,
+) -> str:
+    """Return the one-line GPU acceleration status for the home badge.
+
+    Pure presentation mapping (no Qt, no probing): mirrors the
+    recommendation status into a short localized label, plus an honest
+    "installing" state while the accelerated install worker is running.
+    Never leaks raw enum names.
+    """
+    if install_active:
+        return translate("gpu.badge.installing")
+    if recommendation is None:
+        return translate("gpu.badge.unknown")
+    status = recommendation.status
+    if status is RecommendationStatus.OFFER_SETUP:
+        gpu = primary_nvidia_gpu(recommendation)
+        if gpu is not None and gpu.model:
+            return translate("gpu.badge.offer_setup_nvidia", model=gpu.model)
+        return translate("gpu.badge.offer_setup")
+    if status is RecommendationStatus.ALREADY_READY:
+        return translate("gpu.badge.ready")
+    if status is RecommendationStatus.BLOCKED:
+        return translate("gpu.badge.blocked")
+    if status is RecommendationStatus.NOT_APPLICABLE:
+        return translate("gpu.badge.not_applicable")
+    return translate("gpu.badge.unknown")
 
 
 # ---------------------------------------------------------------------------

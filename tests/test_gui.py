@@ -1371,7 +1371,7 @@ class TestLanguageSelection:
 
 
 class TestM141LanguageMenuTopLevel:
-    """The language selector is a top-level menu, not nested in a Shell menu."""
+    """The language selector lives inside the single Settings menu (M1-5-A)."""
 
     @pytest.fixture(autouse=True)
     def _qapp(self, qapp):
@@ -1385,7 +1385,7 @@ class TestM141LanguageMenuTopLevel:
         yield
         reset_language()
 
-    def test_language_menu_is_top_level(self, qapp):
+    def test_language_menu_nested_in_settings_menu(self, qapp):
         from zealfie.i18n import Language
         from zealfie.gui.main_window import ZeAlfieMainWindow
 
@@ -1394,14 +1394,19 @@ class TestM141LanguageMenuTopLevel:
             menu_bar = window.menuBar()
             top_titles = [a.text() for a in menu_bar.actions()]
 
-            # No "Shell" menu exists (top-level or otherwise).
+            # No "Shell" menu exists; the single top-level menu is Settings.
             assert "Shell" not in top_titles
             assert "&Shell" not in top_titles
+            assert "Language" not in top_titles  # no longer a top-level menu
+            assert "Settings" in top_titles
 
-            # The language menu is a direct top-level child of the menu bar.
+            # Settings is a direct top-level child of the menu bar.
+            assert window._settings_menu is not None
+            assert window._settings_menu.parent() is menu_bar
+
+            # Language is a submenu of Settings (not of the menu bar).
             assert window._language_menu is not None
-            assert window._language_menu.parent() is menu_bar
-            assert "Language" in top_titles
+            assert window._language_menu.parent() is window._settings_menu
 
             # It holds exactly the two checkable actions.
             labels = [a.text() for a in window._language_menu.actions()]

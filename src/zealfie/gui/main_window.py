@@ -19,7 +19,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +37,7 @@ from zealfie.app.update_checks import CheckFunction
 from zealfie.sources.acquisition import ArchiveFetcher
 from zealfie.sources import SourceRefResolver
 from zealfie.i18n import Language, LanguageStore, get_language, set_language, translate
+from zealfie.host import RecommendationStatus
 from zealfie.selfupdate import ApplyStatus, GuiSelfUpdateResult, GuiSelfUpdateStatus
 
 from .presentation import action_enabled, runtime_summary
@@ -43,7 +46,9 @@ from .install_worker import create_install_thread
 from .update_bridge import UpdateResultBridge
 from .self_update_banner import SelfUpdateBanner
 from .self_update_worker import SelfUpdateResultBridge, create_self_update_apply_thread
+from .acceleration_badge import AccelerationBadge
 from .acceleration_panel import AccelerationPanel
+from .settings_page import SettingsPage
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +94,12 @@ class ZeAlfieMainWindow(QMainWindow):
         self._subtitle_label: QLabel | None = None
         self._cards_container: QWidget | None = None
         self._acceleration_panel: AccelerationPanel | None = None
+        self._acceleration_badge: AccelerationBadge | None = None
+        self._settings_page: SettingsPage | None = None
+        self._home_page: QWidget | None = None
+        self._stack: QStackedWidget | None = None
+        self._settings_menu = None
+        self._open_settings_action: QAction | None = None
         self._language_actions: dict = {}
         self._language_menu = None
 
@@ -140,11 +151,36 @@ class ZeAlfieMainWindow(QMainWindow):
         self.setWindowTitle(translate("app.title"))
         self.resize(580, 500)
 
-        # --- Central scroll area ---
-        central = QWidget()
-        central_layout = QVBoxLayout(central)
-        central_layout.setContentsMargins(16, 12, 16, 12)
-        central_layout.setSpacing(10)
+        # --- Central stacked widget: Home page + Settings page ---
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("mainStack")
+        self.setCentralWidget(self._stack)
+
+        self._home_page = self._build_home_page()
+        self._settings_page = self._build_settings_page()
+        self._stack.addWidget(self._home_page)
+        self._stack.addWidget(self._settings_page)
+
+        # --- Status bar ---
+        status_bar = QStatusBar()
+        self._status_label = QLabel(translate("status.starting"))
+        self._status_label.setObjectName("statusLabel")
+        status_bar.addWidget(self._status_label)
+        self.setStatusBar(status_bar)
+
+        # --- Top bar: single Settings menu (left) + Refresh (right) ---
+        self._build_top_bar()
+
+        # --- Populate cards from catalog ---
+        self._populate_cards()
+
+    def _build_home_page(self) -> QWidget:
+        """Build the home page (header, banner, badge, cards)."""
+        page = QWidget()
+        page.setObjectName("homePage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
 
         # Header
         header_layout = QVBoxLayout()
@@ -162,7 +198,7 @@ class ZeAlfieMainWindow(QMainWindow):
         self._subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(self._subtitle_label)
 
-        central_layout.addLayout(header_layout)
+        layout.addLayout(header_layout)
 
         # --- Self-update proposal banner (ZA-M1-4.2, hidden by default) ---
         self._self_update_banner = SelfUpdateBanner(self)
@@ -170,29 +206,20 @@ class ZeAlfieMainWindow(QMainWindow):
             self._on_self_update_accepted
         )
         self._self_update_banner.dismissed.connect(self._on_self_update_dismissed)
-        central_layout.addWidget(self._self_update_banner)
+        layout.addWidget(self._self_update_banner)
 
-        # --- Hardware acceleration panel (M1-2G) ---
-        # Composition-root transports are threaded down so the
-        # accelerated install worker re-acquires the KEEP base runtime
-        # at the exact provenance SHA (ZA-M1-2J.1).  ``None`` defaults
-        # preserve the fail-closed service behaviour for callers
-        # without transports (tests, headless).
-        self._acceleration_panel = AccelerationPanel(
-            self._service,
-            self,
-            fetcher=self._fetcher,
-            work_root=self._work_root,
-        )
-        self._acceleration_panel.setObjectName("accelerationPanel")
-        central_layout.addWidget(self._acceleration_panel)
+        # --- Compact GPU acceleration status badge (clickable → Settings) ---
+        self._acceleration_badge = AccelerationBadge(self)
+        self._acceleration_badge.setObjectName("accelerationBadge")
+        self._acceleration_badge.clicked.connect(self._open_settings)
+        layout.addWidget(self._acceleration_badge)
 
         # Error label (hidden by default, shown on startup failure)
         self._error_label = QLabel()
         self._error_label.setStyleSheet("color: #c0392b; font-weight: bold;")
         self._error_label.setWordWrap(True)
         self._error_label.setVisible(False)
-        central_layout.addWidget(self._error_label)
+        layout.addWidget(self._error_label)
 
         # --- Known UX limitation label (hidden unless install active) ---
         self._known_limitation_label = QLabel(translate("app.known_limitation"))
@@ -202,7 +229,7 @@ class ZeAlfieMainWindow(QMainWindow):
         self._known_limitation_label.setWordWrap(True)
         self._known_limitation_label.setVisible(False)
         self._known_limitation_label.setObjectName("knownLimitationLabel")
-        central_layout.addWidget(self._known_limitation_label)
+        layout.addWidget(self._known_limitation_label)
 
         # --- Indeterminate progress bar (hidden unless install active) ---
         self._install_progress_bar = QProgressBar()
@@ -211,7 +238,7 @@ class ZeAlfieMainWindow(QMainWindow):
         self._install_progress_bar.setVisible(False)
         self._install_progress_bar.setObjectName("installProgressBar")
         self._install_progress_bar.setTextVisible(False)
-        central_layout.addWidget(self._install_progress_bar)
+        layout.addWidget(self._install_progress_bar)
 
         # Product cards container
         self._cards_container = QWidget()
@@ -228,31 +255,64 @@ class ZeAlfieMainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._cards_container)
         scroll.setObjectName("productScrollArea")
-        central_layout.addWidget(scroll)
+        layout.addWidget(scroll)
 
-        self.setCentralWidget(central)
+        return page
 
-        # --- Status bar ---
-        status_bar = QStatusBar()
-        self._status_label = QLabel(translate("status.starting"))
-        self._status_label.setObjectName("statusLabel")
-        status_bar.addWidget(self._status_label)
-        self.setStatusBar(status_bar)
+    def _build_settings_page(self) -> "SettingsPage":
+        """Build the Settings page and wire its GPU panel to the shell."""
+        page = SettingsPage(
+            self._service,
+            fetcher=self._fetcher,
+            work_root=self._work_root,
+        )
+        self._acceleration_panel = page.acceleration_panel
+        self._acceleration_panel.setObjectName("accelerationPanel")
+        page.back_requested.connect(self._open_home)
+        page.language_selected.connect(self._on_language_selected)
+        self._acceleration_panel.status_changed.connect(
+            self._update_acceleration_badge
+        )
+        self._acceleration_panel.install_finished.connect(
+            self._on_acceleration_install_finished
+        )
+        return page
 
-        # --- Refresh action (toolbar only — single, non-redundant) ---
+    def _build_top_bar(self) -> None:
+        """Build a single-row top bar: Settings menu (left) + Refresh (right)."""
+        menu_bar = self.menuBar()
+
+        self._settings_menu = menu_bar.addMenu(translate("menu.settings"))
+
+        self._open_settings_action = QAction(translate("menu.open_settings"), self)
+        self._open_settings_action.triggered.connect(self._open_settings)
+        self._settings_menu.addAction(self._open_settings_action)
+
+        self._settings_menu.addSeparator()
+
+        self._language_menu = self._settings_menu.addMenu(translate("menu.language"))
+        self._build_language_menu(self._language_menu)
+
+        # Refresh — single, non-redundant action, placed on the right corner
+        # of the menu bar so the whole top bar is one row.
         self._refresh_action = QAction("&Refresh", self)
         self._refresh_action.setShortcut("F5")
         self._refresh_action.triggered.connect(self._refresh)
+        refresh_button = QToolButton()
+        refresh_button.setDefaultAction(self._refresh_action)
+        refresh_button.setAutoRaise(True)
+        refresh_button.setObjectName("refreshButton")
+        menu_bar.setCornerWidget(refresh_button, Qt.Corner.TopRightCorner)
 
-        toolbar = self.addToolBar('Shell')
-        toolbar.addAction(self._refresh_action)
+    def _open_settings(self) -> None:
+        """Switch the stacked widget to the Settings page."""
+        if self._stack is not None and self._settings_page is not None:
+            self._stack.setCurrentWidget(self._settings_page)
 
-        # --- Top-level language menu (immediately identifiable) ---
-        self._language_menu = self.menuBar().addMenu(translate("menu.language"))
-        self._build_language_menu(self._language_menu)
-
-        # --- Populate cards from catalog ---
-        self._populate_cards()
+    def _open_home(self) -> None:
+        """Switch the stacked widget back to the Home page."""
+        if self._stack is not None and self._home_page is not None:
+            self._stack.setCurrentWidget(self._home_page)
 
     # ------------------------------------------------------------------
     # Card population
@@ -347,15 +407,21 @@ class ZeAlfieMainWindow(QMainWindow):
         # Update status bar
         self._update_status_bar(shell)
 
+        # Update the Settings page's runtime section from the same
+        # authoritative observation (no extra probing).
+        if self._settings_page is not None:
+            self._settings_page.set_shell_state(shell)
+
     def _refresh_acceleration(self) -> None:
-        """Update the acceleration panel from the service observation.
+        """Update the acceleration panel + home badge from the service.
 
         Exactly one observation cycle: when the service exposes
         ``collect_host_capabilities``, the capabilities are collected
         once, the recommendation is derived from that exact
         observation, and both are stored in the panel — so the
         configure click's plan preview never triggers a second
-        hardware observation.
+        hardware observation.  The same observation feeds the Settings
+        hardware section and the compact home badge.
 
         Tolerates services without the acceleration API and any probe
         failure — the panel falls back to an honest unknown/error state and
@@ -366,6 +432,7 @@ class ZeAlfieMainWindow(QMainWindow):
         getter = getattr(self._service, "get_acceleration_recommendation", None)
         if not callable(getter):
             self._acceleration_panel.set_unknown()
+            self._update_acceleration_badge()
             return
         collector = getattr(self._service, "collect_host_capabilities", None)
         try:
@@ -378,10 +445,34 @@ class ZeAlfieMainWindow(QMainWindow):
         except Exception as exc:
             logger.error("acceleration recommendation failed: %s", exc)
             self._acceleration_panel.set_error(str(exc))
+            self._update_acceleration_badge()
             return
         self._acceleration_panel.set_recommendation(
             recommendation, capabilities=capabilities
         )
+        if self._settings_page is not None and capabilities is not None:
+            self._settings_page.set_capabilities(capabilities)
+        self._update_acceleration_badge()
+
+    def _update_acceleration_badge(self) -> None:
+        """Mirror the acceleration panel state onto the compact home badge."""
+        if self._acceleration_badge is None or self._acceleration_panel is None:
+            return
+        panel = self._acceleration_panel
+        self._acceleration_badge.set_status(
+            recommendation=panel._recommendation,
+            install_active=panel._install_active,
+        )
+
+    def _on_acceleration_install_finished(self, result) -> None:
+        """Re-collect authoritative state after a successful GPU install.
+
+        Cancelled/failed installs leave the runtime unchanged, so the
+        panel's own honest terminal message stays visible and no refresh
+        is forced.
+        """
+        if getattr(result, "success", False):
+            self._refresh()
 
     # ------------------------------------------------------------------
     # Runtime language selection
@@ -416,6 +507,10 @@ class ZeAlfieMainWindow(QMainWindow):
         re-probe host capabilities.
         """
         self.setWindowTitle(translate("app.title"))
+        if self._settings_menu is not None:
+            self._settings_menu.setTitle(translate("menu.settings"))
+        if self._open_settings_action is not None:
+            self._open_settings_action.setText(translate("menu.open_settings"))
         if self._language_menu is not None:
             self._language_menu.setTitle(translate("menu.language"))
         if self._subtitle_label is not None:
@@ -426,6 +521,10 @@ class ZeAlfieMainWindow(QMainWindow):
             action.setChecked(get_language() is lang)
         if self._acceleration_panel is not None:
             self._acceleration_panel.retranslate()
+        if self._acceleration_badge is not None:
+            self._acceleration_badge.retranslate()
+        if self._settings_page is not None:
+            self._settings_page.retranslate()
         self._self_update_banner.retranslate()
         self._clear_cards()
         self._populate_cards()

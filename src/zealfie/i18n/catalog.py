@@ -20,11 +20,12 @@ EN: dict[str, str] = {
     "app.title": "ZeAlfie — Astronomy Launcher For Imaging Engines",
     "app.subtitle": "Astronomy Launcher For Imaging Engines  \U0001f47d",
     "app.known_limitation": (
-        "KNOWN UX LIMITATION: running product installations cannot yet "
-        "be cancelled."
+        "Note: running product installations cannot yet be cancelled."
     ),
-    # -- Menu bar ---------------------------------------------------------
+    # -- Menu bar / top bar ----------------------------------------------
     "menu.language": "Language",
+    "menu.settings": "Settings",
+    "menu.open_settings": "Settings…",
     # -- Status bar / lifecycle wording ----------------------------------
     "status.starting": "Starting\u2026",
     "status.installing": "Installing {name}\u2026",
@@ -93,6 +94,23 @@ EN: dict[str, str] = {
     "runtime.ready_none": "Runtime: ready — {total} known, none installed",
     "runtime.ready": "Runtime: ready — {installed}/{total} installed",
     "runtime.managed_suffix": ", {managed} managed",
+    # -- Settings page (M1-5-A) ------------------------------------------
+    "settings.back": "← Back",
+    "settings.language_title": "Language",
+    "settings.hardware_title": "Hardware",
+    "settings.runtime_title": "Runtime",
+    "settings.hardware_os": "Operating system: {os}",
+    "settings.hardware_arch": "CPU architecture: {arch}",
+    "settings.hardware_gpu": "GPU: {gpu}",
+    "settings.hardware_driver": "Driver: {driver}",
+    "settings.hardware_none": "No GPU detected",
+    "settings.hardware_unknown": "Hardware information unavailable",
+    "settings.runtime_state": "State: {state}",
+    "settings.runtime_root": "Root: {root}",
+    "settings.runtime_unknown": "Runtime status unavailable",
+    "settings.runtime_absent": "absent",
+    "settings.runtime_ready": "ready",
+    "settings.runtime_broken": "broken",
     # -- Hardware acceleration panel -------------------------------------
     "gpu.panel_title": "Hardware acceleration",
     "gpu.configure": "Configure GPU",
@@ -132,6 +150,15 @@ EN: dict[str, str] = {
     ),
     "gpu.failed": "Accelerated runtime installation failed",
     "gpu.unknown_error": "unknown error",
+    # -- Compact GPU status badge (M1-5-A) --------------------------------
+    "gpu.badge.offer_setup_nvidia": "GPU: {model} — to configure",
+    "gpu.badge.offer_setup": "GPU: NVIDIA — to configure",
+    "gpu.badge.ready": "GPU: ready",
+    "gpu.badge.blocked": "GPU: blocked",
+    "gpu.badge.not_applicable": "GPU: CPU mode",
+    "gpu.badge.unknown": "GPU: unknown",
+    "gpu.badge.installing": "GPU: installing…",
+    "gpu.badge.tooltip": "Open Settings",
     # -- Accelerated deployment phase labels -----------------------------
     "phase.preparation": "Preparation",
     "phase.download": "Download",
@@ -177,11 +204,13 @@ FR: dict[str, str] = {
     "app.title": "ZeAlfie — Lanceur d'astronomie pour moteurs d'imagerie",
     "app.subtitle": "Lanceur d'astronomie pour moteurs d'imagerie  \U0001f47d",
     "app.known_limitation": (
-        "LIMITATION UX CONNUE : les installations de produits en cours ne "
-        "peuvent pas encore être annulées."
+        "Remarque : les installations de produits en cours ne peuvent pas "
+        "encore être annulées."
     ),
-    # -- Menu bar ---------------------------------------------------------
+    # -- Menu bar / top bar ----------------------------------------------
     "menu.language": "Langue",
+    "menu.settings": "Paramètres",
+    "menu.open_settings": "Paramètres…",
     # -- Status bar / lifecycle wording ----------------------------------
     "status.starting": "Démarrage\u2026",
     "status.installing": "Installation de {name}\u2026",
@@ -258,6 +287,23 @@ FR: dict[str, str] = {
     "runtime.ready_none": "Runtime : prêt — {total} connus, aucun installé",
     "runtime.ready": "Runtime : prêt — {installed}/{total} installés",
     "runtime.managed_suffix": ", {managed} gérés",
+    # -- Settings page (M1-5-A) ------------------------------------------
+    "settings.back": "← Retour",
+    "settings.language_title": "Langue",
+    "settings.hardware_title": "Matériel",
+    "settings.runtime_title": "Runtime",
+    "settings.hardware_os": "Système d'exploitation : {os}",
+    "settings.hardware_arch": "Architecture CPU : {arch}",
+    "settings.hardware_gpu": "GPU : {gpu}",
+    "settings.hardware_driver": "Pilote : {driver}",
+    "settings.hardware_none": "Aucun GPU détecté",
+    "settings.hardware_unknown": "Informations matérielles indisponibles",
+    "settings.runtime_state": "État : {state}",
+    "settings.runtime_root": "Racine : {root}",
+    "settings.runtime_unknown": "État du runtime indisponible",
+    "settings.runtime_absent": "absent",
+    "settings.runtime_ready": "prêt",
+    "settings.runtime_broken": "cassé",
     # -- Hardware acceleration panel -------------------------------------
     "gpu.panel_title": "Accélération matérielle",
     "gpu.configure": "Configurer le GPU",
@@ -300,6 +346,15 @@ FR: dict[str, str] = {
     ),
     "gpu.failed": "Échec de l'installation du runtime accéléré",
     "gpu.unknown_error": "erreur inconnue",
+    # -- Compact GPU status badge (M1-5-A) --------------------------------
+    "gpu.badge.offer_setup_nvidia": "GPU : {model} — à configurer",
+    "gpu.badge.offer_setup": "GPU : NVIDIA — à configurer",
+    "gpu.badge.ready": "GPU : prêt",
+    "gpu.badge.blocked": "GPU : bloqué",
+    "gpu.badge.not_applicable": "GPU : mode CPU",
+    "gpu.badge.unknown": "GPU : inconnu",
+    "gpu.badge.installing": "GPU : installation en cours…",
+    "gpu.badge.tooltip": "Ouvrir les paramètres",
     # -- Accelerated deployment phase labels -----------------------------
     "phase.preparation": "Préparation",
     "phase.download": "Téléchargement",
