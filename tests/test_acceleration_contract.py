@@ -373,15 +373,17 @@ def test_absent_acceleration_is_none():
 
 
 def test_real_catalog_acceleration_contracts():
-    """The packaged catalog declares exactly one acceleration table:
-    zemosaic (ZA-M1-2J Phase C); every other product stays None."""
+    """The packaged catalog declares acceleration tables for the products
+    that ship an optional NVIDIA_CUDA backend: zemosaic (ZA-M1-2J Phase C)
+    and zeseestarstacker (ZSSS M3, optional CuPy drizzle); every other
+    product stays None."""
     catalog = default_catalog()
     declared = [
         desc.product_id for desc in catalog.list() if desc.acceleration is not None
     ]
-    assert declared == ["zemosaic"]
+    assert declared == ["zemosaic", "zeseestarstacker"]
     for desc in catalog.list():
-        if desc.product_id == "zemosaic":
+        if desc.product_id in ("zemosaic", "zeseestarstacker"):
             continue
         assert desc.acceleration is None, desc.product_id
 

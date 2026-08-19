@@ -272,10 +272,11 @@ def test_B_catalog_without_contract_plan_no_accelerated_requirements():
     assert plan.target_runtime == "no new runtime required"
 
 
-def test_C_contract_products_concerned_is_zemosaic():
-    """C. The zemosaic contract -> products_concerned == ("zemosaic",)."""
+def test_C_contract_products_concerned():
+    """C. The zemosaic + zeseestarstacker contracts -> products_concerned
+    == ("zemosaic", "zeseestarstacker")."""
     plan = _build_real_plan()
-    assert plan.products_concerned == ("zemosaic",)
+    assert plan.products_concerned == ("zemosaic", "zeseestarstacker")
     assert plan.status is AcceleratedPlanStatus.PLAN_READY
 
 
@@ -335,7 +336,7 @@ def test_E_plan_specifiers_exact():
         for entry in plan.added_requirements
     )
     assert all(
-        entry.declaring_products == ("zemosaic",)
+        entry.declaring_products == ("zemosaic", "zeseestarstacker")
         for entry in plan.added_requirements
     )
 
@@ -712,7 +713,7 @@ def test_M_keep_products_carried_verbatim():
     assert plan.keep_products[0].version == "4.6.0"
     assert plan.keep_products[0].source == "provenance"
     # products_concerned only documents declarers; nothing is updated.
-    assert plan.products_concerned == ("zemosaic",)
+    assert plan.products_concerned == ("zemosaic", "zeseestarstacker")
 
 
 def test_N_planning_read_only_and_deterministic(tmp_path):
@@ -927,12 +928,12 @@ def _witness_ppa(wheel_path: Path) -> PreparedProductArtifact:
 
 
 def test_Q_products_without_acceleration_not_concerned():
-    """Q. zesolver / zeseestarstacker / zeanalyser (no acceleration
-    declared) are absent from products_concerned."""
+    """Q. zesolver / zeanalyser (no acceleration declared) are absent from
+    products_concerned; zemosaic and zeseestarstacker both declare
+    NVIDIA_CUDA and are present."""
     plan = _build_real_plan()
-    assert plan.products_concerned == ("zemosaic",)
+    assert plan.products_concerned == ("zemosaic", "zeseestarstacker")
     assert "zesolver" not in plan.products_concerned
-    assert "zeseestarstacker" not in plan.products_concerned
     assert "zeanalyser" not in plan.products_concerned
 
 

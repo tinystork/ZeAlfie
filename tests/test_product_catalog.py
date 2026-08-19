@@ -1134,12 +1134,17 @@ def test_zeanalyser_has_remote_source():
     assert desc.remote_source.ref == "main"
 
 
-def test_other_products_have_no_remote_source():
-    """Products without explicit remote_source in TOML have None."""
+def test_zeseestarstacker_has_remote_source():
+    """ZeSeestarStacker's catalog entry carries the declared remote source
+    (ZSSS M3: owner=tinystork, repo=zeseestarstacker, ref=main)."""
     catalog = default_catalog()
-    for pid in ("zeseestarstacker",):
-        desc = catalog.get(pid)
-        assert desc.remote_source is None, f"{pid} should have no remote_source"
+    from zealfie.sources import RemoteSource
+    desc = catalog.get("zeseestarstacker")
+    assert desc.remote_source is not None
+    assert isinstance(desc.remote_source, RemoteSource)
+    assert desc.remote_source.owner == "tinystork"
+    assert desc.remote_source.repo == "zeseestarstacker"
+    assert desc.remote_source.ref == "main"
 
 
 # ---------------------------------------------------------------------------
@@ -1738,15 +1743,55 @@ def test_zeanalyser_default_follow_stable_resolves_main():
     assert effective_ref(policy, channel_refs=desc.channel_ref_map) == "main"
 
 
-def test_no_remote_source_products_have_no_channels():
-    """Products without remote_source expose no channels (fail-closed)."""
+def test_zeseestarstacker_channels_map_stable_and_beta():
+    """ZeSeestarStacker exposes ``stable -> main`` AND ``beta -> beta``
+    (ZSSS M3: released on main; beta tracks the beta branch — ecosystem
+    convention, same as zeanalyser)."""
     catalog = default_catalog()
-    for pid in ("zeseestarstacker",):
-        desc = catalog.get(pid)
-        assert desc.channel_refs == ()
-        assert desc.channel_ref_map == {}
-        assert desc.available_channels == ()
-        assert desc.channel_ref("stable") is None
+    desc = catalog.get("zeseestarstacker")
+    assert desc.channel_refs == (("stable", "main"), ("beta", "beta"))
+    assert desc.channel_ref_map == {"stable": "main", "beta": "beta"}
+    assert desc.available_channels == ("stable", "beta")
+    assert desc.channel_ref("stable") == "main"
+    assert desc.channel_ref("beta") == "beta"
+
+
+def test_zeseestarstacker_acceleration_contract_matches_zemosaic():
+    """ZeSeestarStacker declares the same NVIDIA_CUDA acceleration closure
+    as ZeMosaic: optional, the full 10-distribution CUDA runtime closure
+    (cupy-cuda12x + cuda-pathfinder + pinned nvidia-*-cu12 12.4.x),
+    fastrlock deliberately absent."""
+    catalog = default_catalog()
+    acc = catalog.get("zeseestarstacker").acceleration
+    assert acc is not None
+    assert acc.product_id == "zeseestarstacker"
+    assert acc.backend == "NVIDIA_CUDA"
+    assert acc.optional is True
+    assert acc.incompatibilities == ()
+    requirements = {r.distribution: r for r in acc.requirements}
+    assert set(requirements) == {
+        "cupy-cuda12x",
+        "cuda-pathfinder",
+        "nvidia-cuda-runtime-cu12",
+        "nvidia-cuda-nvrtc-cu12",
+        "nvidia-cublas-cu12",
+        "nvidia-cufft-cu12",
+        "nvidia-cusparse-cu12",
+        "nvidia-curand-cu12",
+        "nvidia-cusolver-cu12",
+        "nvidia-nvjitlink-cu12",
+    }
+    assert requirements["cupy-cuda12x"].specifier == ">=14.1.1,<15"
+    assert requirements["cuda-pathfinder"].specifier == ">=1.3.4,<2"
+    assert requirements["nvidia-cuda-runtime-cu12"].specifier == "==12.4.127"
+    assert requirements["nvidia-cuda-nvrtc-cu12"].specifier == "==12.4.127"
+    assert requirements["nvidia-cublas-cu12"].specifier == "==12.4.5.8"
+    assert requirements["nvidia-cufft-cu12"].specifier == "==11.2.1.3"
+    assert requirements["nvidia-cusparse-cu12"].specifier == "==12.3.1.170"
+    assert requirements["nvidia-curand-cu12"].specifier == "==10.3.5.147"
+    assert requirements["nvidia-cusolver-cu12"].specifier == "==11.6.1.9"
+    assert requirements["nvidia-nvjitlink-cu12"].specifier == "==12.4.127"
+    assert "fastrlock" not in requirements
 
 
 def test_all_real_catalog_descriptors_have_valid_channels():
