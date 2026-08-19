@@ -320,9 +320,8 @@ FR: dict[str, str] = {
     "plan.no_changes_yet": "Aucun changement n'a encore été effectué.",
     # -- Product descriptions (FR only; EN lives in manifests/products.toml) ---
     "product.description.zesolver": (
-        "Solveur optique pour l'astrophotographie haute résolution — "
-        "résolution sur plaque, résolution à l'aveugle et analyse de "
-        "champs d'étoiles."
+        "Solveur astrométrique — résolution astrométrique, résolution à "
+        "l'aveugle et analyse de champs stellaires."
     ),
     "product.description.zemosaic": (
         "Planificateur et composeur de mosaïques — assemblage, alignement "
