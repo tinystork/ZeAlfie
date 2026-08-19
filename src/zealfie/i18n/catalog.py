@@ -34,6 +34,10 @@ EN: dict[str, str] = {
     "status.install_in_progress_wait": (
         "Installation in progress — please wait for it to finish."
     ),
+    "status.gpu_install_in_progress_wait": (
+        "Accelerated runtime installation in progress — please wait for "
+        "it to finish."
+    ),
     "status.refresh_deferred": "Installation in progress — refresh deferred",
     "status.refresh_failed": "Refresh failed",
     "status.refresh_failed_after_install": "Refresh failed after installation",
@@ -112,6 +116,9 @@ EN: dict[str, str] = {
     "settings.runtime_absent": "absent",
     "settings.runtime_ready": "ready",
     "settings.runtime_broken": "broken",
+    "settings.runtime_products": "Managed products: {list}",
+    "settings.runtime_products_none": "none",
+    "settings.runtime_active_slot": "Active slot: {slot}",
     # -- Hardware acceleration panel -------------------------------------
     "gpu.panel_title": "Hardware acceleration",
     "gpu.configure": "Configure GPU",
@@ -226,6 +233,10 @@ FR: dict[str, str] = {
     "status.install_in_progress_wait": (
         "Installation en cours — veuillez attendre la fin."
     ),
+    "status.gpu_install_in_progress_wait": (
+        "Installation du runtime accéléré en cours — veuillez attendre "
+        "la fin."
+    ),
     "status.refresh_deferred": (
         "Installation en cours — rafraîchissement différé"
     ),
@@ -312,6 +323,9 @@ FR: dict[str, str] = {
     "settings.runtime_absent": "absent",
     "settings.runtime_ready": "prêt",
     "settings.runtime_broken": "cassé",
+    "settings.runtime_products": "Produits gérés : {list}",
+    "settings.runtime_products_none": "aucun",
+    "settings.runtime_active_slot": "Slot actif : {slot}",
     # -- Hardware acceleration panel -------------------------------------
     "gpu.panel_title": "Accélération matérielle",
     "gpu.configure": "Configurer le GPU",

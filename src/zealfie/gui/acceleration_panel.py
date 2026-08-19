@@ -335,6 +335,18 @@ class AccelerationPanel(QFrame):
     # Public
     # ------------------------------------------------------------------
 
+    @property
+    def install_active(self) -> bool:
+        """True while the accelerated install worker is running.
+
+        Read-only public accessor so the product shell can reject window
+        close during a GPU-accelerated runtime install (mirroring the
+        product install path) without reaching into the panel's private
+        ``_install_active`` attribute.  The worker lifecycle (cooperative
+        cancellation, ``QThread.terminate`` never called) is unchanged.
+        """
+        return self._install_active
+
     def set_recommendation(
         self,
         recommendation: AccelerationRecommendation | None,

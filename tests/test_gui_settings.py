@@ -32,8 +32,15 @@ from zealfie.host.models import (
     RecommendationStatus,
 )
 
+from zealfie.app import (
+    ManagedStatus,
+    ProductShellState,
+    ProductState,
+    ProductStateReasonCode,
+)
 from zealfie.gui.acceleration_panel import AccelerationPanel
 from zealfie.gui.presentation import compact_gpu_status
+from zealfie.runtime.model import RuntimeState
 
 pytestmark = pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 not available")
 
@@ -418,6 +425,210 @@ class TestRuntimeAbsent:
             # No Installer offered on the home page: the full panel (and its
             # Installer button) is only reachable via Settings.
             assert len(window._home_page.findChildren(AccelerationPanel)) == 0
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+
+
+# ===========================================================================
+# 6) Runtime details (M1-5-C): managed products, active slot, honest absent
+# ===========================================================================
+
+
+def _product_state(
+    pid: str,
+    name: str,
+    *,
+    installed: bool = False,
+    managed=ManagedStatus.UNMANAGED,
+) -> ProductState:
+    return ProductState(
+        product_id=pid,
+        display_name=name,
+        known=True,
+        installed=installed,
+        launchable=installed,
+        version="1.0.0" if installed else None,
+        reason_code=(
+            ProductStateReasonCode.INSTALLED_LAUNCHABLE
+            if installed
+            else ProductStateReasonCode.NOT_INSTALLED
+        ),
+        reason="installed and launchable" if installed else "not installed",
+        managed=managed,
+    )
+
+
+class TestRuntimeDetails:
+    def _shell(
+        self,
+        *,
+        state="READY",
+        root=Path("/srv/zealfie-runtime"),
+        products=(),
+        slot=None,
+    ):
+        return ProductShellState(
+            runtime_state=RuntimeState(state),
+            runtime_root=root,
+            products=tuple(products),
+            active_slot_id=slot,
+        )
+
+    def _render(self, qapp, shell):
+        from zealfie.gui.settings_page import SettingsPage
+
+        page = SettingsPage(service=_FakeShellService())
+        page.set_shell_state(shell)
+        return page
+
+    def test_root_is_authoritative(self, qapp):
+        page = self._render(qapp, self._shell(root=Path("/srv/zealfie-runtime")))
+        try:
+            assert "/srv/zealfie-runtime" in page._runtime_label.text()
+        finally:
+            page.close()
+            page.deleteLater()
+            qapp.processEvents()
+
+    def test_managed_products_shown_by_display_name(self, qapp):
+        products = (
+            _product_state(
+                "zemosaic", "ZeMosaic", installed=True,
+                managed=ManagedStatus.MANAGED,
+            ),
+            _product_state(
+                "zesolver", "ZeSolver", managed=ManagedStatus.UNMANAGED,
+            ),
+        )
+        page = self._render(qapp, self._shell(products=products))
+        try:
+            text = page._runtime_label.text()
+            assert "ZeMosaic" in text
+            assert "ZeSolver" not in text
+        finally:
+            page.close()
+            page.deleteLater()
+            qapp.processEvents()
+
+    def test_active_slot_shown_as_advanced_detail(self, qapp):
+        page = self._render(qapp, self._shell(slot="rt-db83abc"))
+        try:
+            text = page._runtime_label.text()
+            assert "rt-db83abc" in text
+            assert "Active slot" in text
+        finally:
+            page.close()
+            page.deleteLater()
+            qapp.processEvents()
+
+    def test_runtime_absent_stays_honest_no_products_or_slot(self, qapp):
+        products = (
+            _product_state(
+                "zemosaic", "ZeMosaic", managed=ManagedStatus.MANAGED,
+            ),
+        )
+        page = self._render(
+            qapp, self._shell(state="ABSENT", products=products, slot=None)
+        )
+        try:
+            text = page._runtime_label.text()
+            assert "absent" in text.lower()
+            assert "ZeMosaic" not in text
+            assert "Active slot" not in text
+            assert "Slot actif" not in text
+        finally:
+            page.close()
+            page.deleteLater()
+            qapp.processEvents()
+
+    def test_retranslate_runtime_details_en_fr(self, qapp):
+        from zealfie.i18n import Language, set_language
+
+        products = (
+            _product_state(
+                "zemosaic", "ZeMosaic", installed=True,
+                managed=ManagedStatus.MANAGED,
+            ),
+        )
+        page = self._render(
+            qapp, self._shell(products=products, slot="rt-db83abc")
+        )
+        try:
+            en = page._runtime_label.text()
+            assert "Managed products" in en
+            assert "Active slot" in en
+            set_language(Language.FR)
+            page.retranslate()
+            fr = page._runtime_label.text()
+            assert "Produits gérés" in fr
+            assert "Slot actif" in fr
+        finally:
+            page.close()
+            page.deleteLater()
+            qapp.processEvents()
+
+
+# ===========================================================================
+# 7) Close guard during accelerated install (M1-5-C)
+# ===========================================================================
+
+
+class TestGpuCloseGuard:
+    def test_close_rejected_during_accelerated_install(self, qapp):
+        from PySide6.QtGui import QCloseEvent
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        window = ZeAlfieMainWindow(service=_FakeShellService())
+        try:
+            window._acceleration_panel._install_active = True
+            ev = QCloseEvent()
+            window.closeEvent(ev)
+            assert ev.isAccepted() is False
+            assert "please wait" in window._status_label.text().lower()
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            dict(success=True, cancelled=False, phase="COMPLETED"),
+            dict(success=False, cancelled=False, phase="ACQUIRE"),
+            dict(success=False, cancelled=True, phase="ACQUIRE"),
+        ],
+        ids=["success", "failure", "cancelled"],
+    )
+    def test_close_allowed_after_accelerated_install_terminates(
+        self, qapp, result
+    ):
+        from PySide6.QtGui import QCloseEvent
+        from zealfie.acceleration import (
+            AcceleratedDeploymentPhase,
+            AcceleratedDeploymentResult,
+        )
+        from zealfie.gui.main_window import ZeAlfieMainWindow
+
+        window = ZeAlfieMainWindow(service=_FakeShellService())
+        try:
+            panel = window._acceleration_panel
+            panel._install_active = True
+            panel._on_install_finished(
+                AcceleratedDeploymentResult(
+                    success=result["success"],
+                    cancelled=result["cancelled"],
+                    phase=AcceleratedDeploymentPhase(result["phase"]),
+                    active_slot_id="slot-new" if result["success"] else None,
+                    reason=None if result["success"] else "some reason",
+                )
+            )
+            assert panel.install_active is False
+            ev = QCloseEvent()
+            window.closeEvent(ev)
+            assert ev.isAccepted() is True
         finally:
             window.close()
             window.deleteLater()

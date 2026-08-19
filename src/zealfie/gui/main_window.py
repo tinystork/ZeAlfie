@@ -479,7 +479,7 @@ class ZeAlfieMainWindow(QMainWindow):
         panel = self._acceleration_panel
         self._acceleration_badge.set_status(
             recommendation=panel._recommendation,
-            install_active=panel._install_active,
+            install_active=panel.install_active,
         )
 
     def _on_acceleration_install_finished(self, result) -> None:
@@ -737,6 +737,14 @@ class ZeAlfieMainWindow(QMainWindow):
             return
         # Do not start an apply while a product transaction is active.
         if self._install_active:
+            return
+        # Nor while an accelerated GPU runtime install is running (its
+        # worker is parented to the panel and would be destroyed by the
+        # self-update restart/close).
+        if (
+            self._acceleration_panel is not None
+            and self._acceleration_panel.install_active
+        ):
             return
 
         self._self_update_applying = True
@@ -1161,6 +1169,16 @@ class ZeAlfieMainWindow(QMainWindow):
             if self._status_label:
                 self._status_label.setText(
                     translate("status.install_in_progress_wait")
+                )
+            event.ignore()
+            return
+        if (
+            self._acceleration_panel is not None
+            and self._acceleration_panel.install_active
+        ):
+            if self._status_label:
+                self._status_label.setText(
+                    translate("status.gpu_install_in_progress_wait")
                 )
             event.ignore()
             return

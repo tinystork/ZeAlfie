@@ -436,6 +436,36 @@ class TestApplyAction:
             window.deleteLater()
             qapp.processEvents()
 
+    def test_apply_is_not_started_during_gpu_install(self, qapp):
+        """Self-update apply must not start while a GPU runtime install runs.
+
+        The accelerated-install worker is parented to the acceleration
+        panel; a self-update restart/close would destroy it mid-run, so
+        ``_on_self_update_accepted`` must refuse (mirror of the product
+        transaction guard).
+        """
+        apply_calls: list[int] = []
+
+        def apply_fn():
+            apply_calls.append(1)
+            return SelfUpdateApplyResult(ApplyStatus.APPLIED, "applied")
+
+        window = self._ready_window(qapp, apply_fn)
+        try:
+            panel = window._acceleration_panel
+            assert panel is not None
+            panel._install_active = True
+            window._self_update_banner._update_button.click()
+            qapp.processEvents()
+            time.sleep(0.05)
+            assert apply_calls == []
+            assert window._self_update_applying is False
+        finally:
+            window._acceleration_panel._install_active = False
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
 
 # ---------------------------------------------------------------------------
 # 5. Translation (EN/FR)

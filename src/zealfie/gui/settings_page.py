@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from zealfie.app import ManagedStatus
 from zealfie.gui.acceleration_panel import AccelerationPanel
 from zealfie.host import HostCapabilities
 from zealfie.i18n import Language, get_language, translate
@@ -226,6 +227,23 @@ class SettingsPage(QWidget):
         root = getattr(shell, "runtime_root", None)
         if root is not None:
             lines.append(translate("settings.runtime_root", root=str(root)))
+
+        # Advanced details are only meaningful for a READY runtime: an
+        # absent/broken runtime has no managed products installed and no
+        # active slot to report, so we stay honest and omit both.
+        if state_str == "READY":
+            managed = [
+                p.display_name
+                for p in getattr(shell, "products", ())
+                if getattr(p, "managed", None) is ManagedStatus.MANAGED
+            ]
+            names = ", ".join(managed) if managed else translate(
+                "settings.runtime_products_none"
+            )
+            lines.append(translate("settings.runtime_products", list=names))
+            slot = getattr(shell, "active_slot_id", None)
+            if slot:
+                lines.append(translate("settings.runtime_active_slot", slot=slot))
         self._runtime_label.setText("\n".join(lines))
 
     # ------------------------------------------------------------------

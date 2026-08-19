@@ -126,6 +126,7 @@ class ProductShellState:
     products: tuple[ProductState, ...]
     managed_count: int = field(default=0)
     installed_count: int = field(default=0)
+    active_slot_id: str | None = None
 
     def __post_init__(self) -> None:
         mcount = sum(1 for p in self.products if p.managed == ManagedStatus.MANAGED)
@@ -193,6 +194,7 @@ def collect_product_state(
         runtime_state=runtime_status.state,
         runtime_root=runtime_status.runtime_root,
         products=tuple(products),
+        active_slot_id=runtime_status.active_slot_id,
     )
 
 
