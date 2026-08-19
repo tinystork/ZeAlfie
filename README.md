@@ -11,28 +11,58 @@ the ZeAlfie development environment.
 
 ## Current status
 
-ZeAlfie **0.0.8** is an experimental but functional release.
+ZeAlfie **0.1.0** is the first release where the Product Shell is the main
+user-facing front door of the product.
 
 The current version provides:
 
 - a persistent, slot-based shared runtime;
 - transactional deployment with rollback support;
-- a PySide6 graphical Product Shell;
+- a PySide6 graphical Product Shell (home page + Settings/System zone);
 - managed product installation, update, and launch workflows;
 - runtime and product state probing without importing application code;
 - GPU capability inspection and accelerated-runtime planning;
+- GPU onboarding for compatible products (never a silent install);
 - a transactional self-update mechanism for packaged ZeAlfie installations;
 - English and French GUI support.
 
-ZeAlfie is still under active development. The runtime architecture and update
-machinery are usable today, but the end-user installation experience is not yet
-final.
+The runtime architecture and update machinery are usable today and validated by
+real Windows witnesses.  ZeAlfie is still under active development.
+
+> **Accepted product deviation (ZA-M1-5):** the visible **Refresh** action was
+> removed from the main interface by product decision (it was not demonstrated
+> as necessary, and its removal simplifies the shell).  The F5 shortcut and the
+> refresh logic remain in the codebase; this deviation is intentional and is
+> not to be reverted to satisfy earlier mission wording.
 
 ## Installation
 
-### Current source installation
+### User installation (packaged)
 
-For now, source-based installations are intended for testers and developers.
+The user-facing installation path is a **packaged (non-editable) install** of a
+built wheel.  Packaged installations support ZeAlfie's transactional
+self-update flow from the GUI or the CLI.
+
+```bash
+python -m pip install zealfie-0.1.0-py3-none-any.whl
+```
+
+After installation, start the graphical interface with:
+
+```bash
+zealfie-gui
+```
+
+Packaged installations can update themselves through the GUI self-update flow
+(check → consent → restart) or through the CLI commands documented under
+[Updating ZeAlfie](#updating-zealfie).  Standalone Windows/Linux installers are
+planned to expose the same flow without requiring Python or pip.
+
+### Source installation (developers and testers)
+
+Source-based installations are **development/test installations only**.  They
+are not the user-facing path and are never updated by ZeAlfie's self-update
+mechanism.
 
 Clone the repository, enter its root directory — the directory containing
 `pyproject.toml` — then create and activate a Python virtual environment.
@@ -76,9 +106,8 @@ After installation, start the graphical interface with:
 zealfie-gui
 ```
 
-Editable/source installations are development or test installations.
-ZeAlfie's self-update mechanism does not replace or update a Git source
-checkout.
+Editable/source installations are development or test installations.  ZeAlfie's
+self-update mechanism does not replace or update a Git source checkout.
 
 ### Development dependencies
 
@@ -96,14 +125,6 @@ This command is also meant to be used exactly as written:
   group** in addition to the normal runtime dependencies;
 - the square brackets are literal syntax — `dev` is not a placeholder and
   should not be replaced with a path or directory name.
-
-### Planned end-user installers
-
-Standalone installers for **Windows** and **Linux** are planned.
-
-The goal is to provide a normal end-user installation that does not require
-Git, pip, or a development virtual environment. Those installers will also
-integrate ZeAlfie's self-update mechanism into the normal graphical experience.
 
 ## Launching ZeAlfie
 
@@ -143,7 +164,9 @@ It:
 - installs supported products into the shared runtime;
 - checks for and applies supported product updates;
 - launches installed products through their public launch contracts;
-- provides a single **Refresh** action, also available with **F5**;
+- keeps technical details (runtime, slots, GPU plan) in the Settings/System
+  page rather than the home page;
+- offers GPU onboarding for newly installed GPU-capable products;
 - displays runtime and hardware-acceleration status;
 - supports live English/French language switching;
 - isolates product or probe failures instead of crashing the whole shell.
@@ -214,9 +237,9 @@ zealfie self-update stage --channel beta
 
 The stable channel remains the default and recommended channel.
 
-The current CLI workflow is primarily a development/test surface. Future
-Windows and Linux installers are intended to expose the same transactional
-update engine through a normal graphical update flow.
+The current CLI workflow is primarily a development/test surface.  Packaged
+GUI installations expose the same transactional update engine through the
+normal graphical self-update flow.
 
 ## Runtime model
 
