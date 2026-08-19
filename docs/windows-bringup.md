@@ -91,6 +91,42 @@ The witness proved **real compute**, not merely detection.
   wording; single curated driver floor unchanged).
 
 
+### W4 — First-run GPU applicability (real Windows HUMAN_GATE, 2026-08-19, PASS)
+
+Real Windows validation of **ZA-GPU-FIRST-RUN-01** on a fresh machine
+(no old ZeAlfie runtime, no product selection, no ACTIVE product
+provenance, NVIDIA GPU detected):
+
+| Case | Step | Result |
+|---|---|---|
+| A — fresh install / runtime absent | NVIDIA GPU detected | **PASS** |
+| A — fresh install / runtime absent | no premature GPU Installer (no installable closure without an applicable ACTIVE product) | **PASS** |
+| B — ZeSolver only | runtime present, ZeSolver launched | **PASS** |
+| B — ZeSolver only | no ZeMosaic/CUDA closure proposed | **PASS** |
+| C — ZeMosaic installed | GPU applicable, NVIDIA_CUDA plan correctly produced | **PASS** |
+| D — GPU runtime | installation completed 100 % | **PASS** |
+| D — GPU runtime | accelerated slot ACTIVE | **PASS** |
+| D — GPU runtime | ZeMosaic launched | **PASS** |
+| D — GPU runtime | ZeSolver still launchable | **PASS** |
+
+Root cause fixed (commit `4281eda`): `build_accelerated_deployment_plan`
+collected acceleration requirements from the **full catalog**, so a fresh
+machine with an NVIDIA GPU received a `PLAN_READY` for the ZeMosaic CUDA
+closure even though ZeMosaic was not installed — clicking Install failed
+with `ProductInstallPreparationError: no active product provenance`.
+The planner is now filtered by ACTIVE-installed identity
+(`active_product_ids`, always passed by the service as
+`frozenset(keep_products)` — provenance ACTIVE ∪ installed-lock products
+mapped to the catalog); a catalog product absent from the ACTIVE set
+contributes no accelerated requirements. See
+`src/zealfie/acceleration/planning.py` and `src/zealfie/app/service.py`.
+
+Known NIT recorded for M1-5 (Lot F): `plan.no_requirements` still reads
+"Aucun produit ne déclare de besoins d'accélération GPU." /
+"No product declares GPU acceleration requirements." — to be reworded
+from the installed/applicable products perspective.
+
+
 ## Platform support matrix (runtime mutation lock)
 
 | Platform | Primitive | Status |
