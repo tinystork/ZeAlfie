@@ -26,6 +26,7 @@ EN: dict[str, str] = {
     "menu.language": "Language",
     "menu.settings": "Settings",
     "menu.open_settings": "Settings…",
+    "menu.refresh": "Refresh",
     # -- Status bar / lifecycle wording ----------------------------------
     "status.starting": "Starting\u2026",
     "status.installing": "Installing {name}\u2026",
@@ -159,6 +160,12 @@ EN: dict[str, str] = {
     "gpu.badge.unknown": "GPU: unknown",
     "gpu.badge.installing": "GPU: installing…",
     "gpu.badge.tooltip": "Open Settings",
+    # -- GPU onboarding banner (ZA-M1-5-B LOT D) ---------------------------
+    "gpu.onboarding.message": (
+        "GPU acceleration is available for {product}. Enable it in Settings."
+    ),
+    "gpu.onboarding.activate": "Enable acceleration",
+    "gpu.onboarding.later": "Later",
     # -- Accelerated deployment phase labels -----------------------------
     "phase.preparation": "Preparation",
     "phase.download": "Download",
@@ -169,7 +176,7 @@ EN: dict[str, str] = {
     "phase.completed": "Completed",
     "phase.in_progress": "In progress",
     # -- GPU plan preview lines ------------------------------------------
-    "plan.no_requirements": "No product declares GPU acceleration requirements.",
+    "plan.no_requirements": "No installed product currently requires GPU acceleration.",
     "plan.cpu_preserved": "The CPU deployment closure is preserved unchanged.",
     "plan.unknown": "GPU acceleration status could not be determined.",
     "plan.no_change": "No accelerated change has been planned.",
@@ -211,6 +218,7 @@ FR: dict[str, str] = {
     "menu.language": "Langue",
     "menu.settings": "Paramètres",
     "menu.open_settings": "Paramètres…",
+    "menu.refresh": "Rafraîchir",
     # -- Status bar / lifecycle wording ----------------------------------
     "status.starting": "Démarrage\u2026",
     "status.installing": "Installation de {name}\u2026",
@@ -355,6 +363,13 @@ FR: dict[str, str] = {
     "gpu.badge.unknown": "GPU : inconnu",
     "gpu.badge.installing": "GPU : installation en cours…",
     "gpu.badge.tooltip": "Ouvrir les paramètres",
+    # -- GPU onboarding banner (ZA-M1-5-B LOT D) ---------------------------
+    "gpu.onboarding.message": (
+        "L'accélération GPU est disponible pour {product}. Activez-la dans "
+        "les paramètres."
+    ),
+    "gpu.onboarding.activate": "Activer l'accélération",
+    "gpu.onboarding.later": "Plus tard",
     # -- Accelerated deployment phase labels -----------------------------
     "phase.preparation": "Préparation",
     "phase.download": "Téléchargement",
@@ -365,7 +380,7 @@ FR: dict[str, str] = {
     "phase.completed": "Terminé",
     "phase.in_progress": "En cours",
     # -- GPU plan preview lines ------------------------------------------
-    "plan.no_requirements": "Aucun produit ne déclare de besoins d'accélération GPU.",
+    "plan.no_requirements": "Aucun produit installé ne nécessite actuellement d'accélération GPU.",
     "plan.cpu_preserved": "La fermeture de déploiement CPU est préservée inchangée.",
     "plan.unknown": "L'état de l'accélération GPU n'a pas pu être déterminé.",
     "plan.no_change": "Aucun changement accéléré n'a été planifié.",

@@ -55,6 +55,7 @@ class SettingsPage(QWidget):
         self._capabilities: HostCapabilities | None = None
         self._shell_state = None
         self._syncing = False
+        self._content_scroll = None
         # Explicit index -> Language mapping (QComboBox.itemData would
         # coerce a StrEnum to a plain str).
         self._combo_languages = (Language.EN, Language.FR)
@@ -86,6 +87,7 @@ class SettingsPage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setObjectName("settingsScrollArea")
+        self._content_scroll = scroll
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -153,6 +155,19 @@ class SettingsPage(QWidget):
         """Store and render the product-shell state (runtime summary)."""
         self._shell_state = shell_state
         self._render_runtime()
+
+    # ------------------------------------------------------------------
+    # Focus helper (ZA-M1-5-B LOT D)
+    # ------------------------------------------------------------------
+
+    def focus_acceleration_panel(self) -> None:
+        """Scroll the GPU acceleration panel into view.
+
+        Used by the GPU onboarding banner's "Enable acceleration" action so
+        the user lands directly on the panel (and its plan/Installer).
+        """
+        if self._content_scroll is not None and self.acceleration_panel is not None:
+            self._content_scroll.ensureWidgetVisible(self.acceleration_panel)
 
     # ------------------------------------------------------------------
     # Rendering

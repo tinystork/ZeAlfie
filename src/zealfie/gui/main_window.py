@@ -48,6 +48,7 @@ from .self_update_banner import SelfUpdateBanner
 from .self_update_worker import SelfUpdateResultBridge, create_self_update_apply_thread
 from .acceleration_badge import AccelerationBadge
 from .acceleration_panel import AccelerationPanel
+from .gpu_onboarding_banner import GpuOnboardingBanner
 from .settings_page import SettingsPage
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,13 @@ class ZeAlfieMainWindow(QMainWindow):
         self._install_progress_bar: QProgressBar | None = None
         self._known_limitation_label: QLabel | None = None
         self._refresh_action: QAction | None = None
+
+        # ZA-M1-5-B LOT D: GPU onboarding (install -> offer -> Settings).
+        self._gpu_onboarding_banner: GpuOnboardingBanner | None = None
+        self._gpu_onboarding_product_id: str | None = None
+        # Session-scoped dismissal: a deferred product is not re-offered
+        # until a NEW install/update of it is requested.
+        self._gpu_onboarding_dismissed: set[str] = set()
 
         # M1-2E LOT E.4: read-only update-check coordination.
         self._update_coordinator: UpdateCheckCoordinator | None = None
@@ -214,6 +222,16 @@ class ZeAlfieMainWindow(QMainWindow):
         self._acceleration_badge.clicked.connect(self._open_settings)
         layout.addWidget(self._acceleration_badge)
 
+        # --- GPU onboarding banner (ZA-M1-5-B LOT D, hidden by default) ---
+        self._gpu_onboarding_banner = GpuOnboardingBanner(self)
+        self._gpu_onboarding_banner.activate_requested.connect(
+            self._on_gpu_onboarding_activate
+        )
+        self._gpu_onboarding_banner.dismissed.connect(
+            self._on_gpu_onboarding_dismissed
+        )
+        layout.addWidget(self._gpu_onboarding_banner)
+
         # Error label (hidden by default, shown on startup failure)
         self._error_label = QLabel()
         self._error_label.setStyleSheet("color: #c0392b; font-weight: bold;")
@@ -295,7 +313,7 @@ class ZeAlfieMainWindow(QMainWindow):
 
         # Refresh — single, non-redundant action, placed on the right corner
         # of the menu bar so the whole top bar is one row.
-        self._refresh_action = QAction("&Refresh", self)
+        self._refresh_action = QAction("&" + translate("menu.refresh"), self)
         self._refresh_action.setShortcut("F5")
         self._refresh_action.triggered.connect(self._refresh)
         refresh_button = QToolButton()
@@ -475,6 +493,55 @@ class ZeAlfieMainWindow(QMainWindow):
             self._refresh()
 
     # ------------------------------------------------------------------
+    # ZA-M1-5-B LOT D: GPU onboarding (install -> offer -> Settings)
+    # ------------------------------------------------------------------
+
+    def _on_gpu_onboarding_activate(self) -> None:
+        """Open Settings with the GPU panel visible (never a silent install).
+
+        The user must review the plan and click *Install* themselves; this
+        button only navigates and never calls any install method.
+        """
+        self._open_settings()
+        if self._settings_page is not None:
+            self._settings_page.focus_acceleration_panel()
+
+    def _on_gpu_onboarding_dismissed(self) -> None:
+        """User chose "Later": remember (session) and hide, never install."""
+        if self._gpu_onboarding_product_id is not None:
+            self._gpu_onboarding_dismissed.add(self._gpu_onboarding_product_id)
+        self._gpu_onboarding_product_id = None
+        if self._gpu_onboarding_banner is not None:
+            self._gpu_onboarding_banner.dismiss()
+
+    def _maybe_offer_gpu_onboarding(self, product_id: str) -> None:
+        """Offer GPU onboarding after a successful install/update.
+
+        Reads the recommendation already produced by the service (never
+        recomputes it) and the product's declared acceleration
+        requirements from the descriptor (never probes).  Only
+        ``OFFER_SETUP`` triggers the banner: ``NOT_APPLICABLE`` /
+        ``ALREADY_READY`` / ``BLOCKED`` / ``UNKNOWN`` never do.
+        """
+        if self._gpu_onboarding_banner is None or self._acceleration_panel is None:
+            return
+        if product_id in self._gpu_onboarding_dismissed:
+            return
+        card = self._cards.get(product_id)
+        if card is None:
+            return
+        descriptor = card._descriptor
+        if getattr(descriptor, "acceleration", None) is None:
+            return
+        recommendation = self._acceleration_panel._recommendation
+        if recommendation is None:
+            return
+        if recommendation.status is not RecommendationStatus.OFFER_SETUP:
+            return
+        self._gpu_onboarding_product_id = product_id
+        self._gpu_onboarding_banner.show_for_product(descriptor.display_name)
+
+    # ------------------------------------------------------------------
     # Runtime language selection
     # ------------------------------------------------------------------
 
@@ -513,6 +580,8 @@ class ZeAlfieMainWindow(QMainWindow):
             self._open_settings_action.setText(translate("menu.open_settings"))
         if self._language_menu is not None:
             self._language_menu.setTitle(translate("menu.language"))
+        if self._refresh_action is not None:
+            self._refresh_action.setText("&" + translate("menu.refresh"))
         if self._subtitle_label is not None:
             self._subtitle_label.setText(translate("app.subtitle"))
         if self._known_limitation_label is not None:
@@ -526,6 +595,8 @@ class ZeAlfieMainWindow(QMainWindow):
         if self._settings_page is not None:
             self._settings_page.retranslate()
         self._self_update_banner.retranslate()
+        if self._gpu_onboarding_banner is not None:
+            self._gpu_onboarding_banner.retranslate()
         self._clear_cards()
         self._populate_cards()
         self._refresh_products()
@@ -800,6 +871,8 @@ class ZeAlfieMainWindow(QMainWindow):
         self._install_active = True
         self._active_install_pid = product_id
         self._active_operation = "install"
+        # A new install re-arms the GPU onboarding offer for this product.
+        self._gpu_onboarding_dismissed.discard(product_id)
         self._set_global_install_lock(True)
 
         # --- Update the requesting card to "in progress" ---
@@ -862,6 +935,8 @@ class ZeAlfieMainWindow(QMainWindow):
         self._install_active = True
         self._active_install_pid = product_id
         self._active_operation = "update"
+        # A new update re-arms the GPU onboarding offer for this product.
+        self._gpu_onboarding_dismissed.discard(product_id)
         self._set_global_install_lock(True)
 
         card.set_update_in_progress(True)
@@ -989,6 +1064,11 @@ class ZeAlfieMainWindow(QMainWindow):
 
         if operation == "update":
             self._recheck_update(product_id)
+
+        # ZA-M1-5-B LOT D: a GPU-capable product may have just been
+        # installed/updated — offer the non-intrusive GPU onboarding step
+        # (only ever for OFFER_SETUP; never a silent install).
+        self._maybe_offer_gpu_onboarding(product_id)
 
     def _on_worker_failure(self, product_id: str, message: str) -> None:
         """Operation failed — show error, allow retry/launch when possible."""

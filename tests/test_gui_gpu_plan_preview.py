@@ -156,7 +156,7 @@ def test_preview_no_accelerated_requirements():
     )
     lines = gpu_plan_preview_lines(plan)
     assert lines == (
-        "No product declares GPU acceleration requirements.",
+        "No installed product currently requires GPU acceleration.",
         "The CPU deployment closure is preserved unchanged.",
     )
 
