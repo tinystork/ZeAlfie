@@ -219,3 +219,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Legacy ZeSeestarStacker runtime settings
+/seestar_settings.json
