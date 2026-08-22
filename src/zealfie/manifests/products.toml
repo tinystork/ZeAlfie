@@ -115,11 +115,11 @@ description = "One-click star stacking for Seestar S50 users — calibrate, alig
 group = "gui_scripts"
 name = "zeseestarstacker"
 
-# ZSSS M3: ZeSeestarStacker is now a first-class ZeAlfie product (wheel
-# zeseestarstacker-7.0.2, entry point gui_scripts:zeseestarstacker, on the
-# ``main`` branch of tinystork/zeseestarstacker).  ``stable`` follows
-# ``main``; ``beta`` tracks the ``beta`` branch (ecosystem convention,
-# same as zeanalyser).
+# ZSSS M3: ZeSeestarStacker is a first-class ZeAlfie product.  The stable
+# ``main`` branch of tinystork/zeseestarstacker is ZeSeestarStacker 7.1.0
+# (wheel zeseestarstacker-7.1.0, entry point gui_scripts:zeseestarstacker).
+# ``stable`` follows ``main``; ``beta`` tracks the ``beta`` branch
+# (ecosystem convention, same as zeanalyser).
 [products.remote_source]
 owner = "tinystork"
 repo = "zeseestarstacker"
