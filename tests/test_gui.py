@@ -1354,7 +1354,7 @@ class TestLanguageSelection:
 
             assert get_language() is Language.FR
             assert saved.get("lang") is Language.FR
-            assert "Lanceur" in window.windowTitle()
+            assert "Gestionnaire" in window.windowTitle()
             assert "Astronomy Launcher" not in window.windowTitle()
 
             window._language_actions[Language.EN].trigger()

@@ -347,7 +347,7 @@ class TestSettingsContents:
             combo.setCurrentIndex(1)  # Français
             assert get_language() is Language.FR
             assert saved.get("lang") is Language.FR
-            assert "Lanceur" in window.windowTitle()
+            assert "Gestionnaire" in window.windowTitle()
         finally:
             window.close()
             window.deleteLater()

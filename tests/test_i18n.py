@@ -205,7 +205,7 @@ def test_translate_product_description_fr_hit():
         translate_product_description("zesolver", "EN default")
         == FR["product.description.zesolver"]
     )
-    assert "Solveur astrométrique" in translate_product_description("zesolver", "EN default")
+    assert "Résolution astrométrique" in translate_product_description("zesolver", "EN default")
 
 
 def test_translate_product_description_fr_miss_falls_back():

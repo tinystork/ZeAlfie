@@ -215,8 +215,8 @@ EN: dict[str, str] = {
 
 FR: dict[str, str] = {
     # -- Application shell (main window) ---------------------------------
-    "app.title": "ZeAlfie — Lanceur d'astronomie pour moteurs d'imagerie",
-    "app.subtitle": "Lanceur d'astronomie pour moteurs d'imagerie  \U0001f47d",
+    "app.title": "ZeAlfie — Gestionnaire des outils d’imagerie astro",
+    "app.subtitle": "Le chef d’orchestre de vos outils d’imagerie astro  \U0001f47d",
     "app.known_limitation": (
         "Remarque : les installations de produits en cours ne peuvent pas "
         "encore être annulées."
@@ -277,13 +277,13 @@ FR: dict[str, str] = {
     "cards.channel": "Canal : {channel}",
     # -- Product state labels --------------------------------------------
     "state.runtime_absent": "Aucun runtime — déployez d'abord un runtime",
-    "state.runtime_broken": "Runtime cassé — vérifiez ou recréez",
+    "state.runtime_broken": "Environnement d'exécution défaillant — vérifiez ou recréez",
     "state.installed_launchable": "Prêt — cliquez sur Lancer pour démarrer",
     "state.installed_not_launchable": "Installé mais contrat de lancement manquant",
     "state.not_installed": (
         "Non installé — cliquez sur Installer pour récupérer et installer"
     ),
-    "state.probe_failed": "Impossible de vérifier — échec de la sonde",
+    "state.probe_failed": "Vérification impossible",
     "state.unknown": "État inconnu",
     # -- Action button tooltips ------------------------------------------
     "action.launch_tooltip": "Lancer {name}",
@@ -302,7 +302,7 @@ FR: dict[str, str] = {
     "update.unknown": "État de mise à jour inconnu",
     # -- Runtime status summary ------------------------------------------
     "runtime.absent": "Runtime : absent",
-    "runtime.broken": "Runtime : cassé",
+    "runtime.broken": "Runtime : défaillant",
     "runtime.ready_none": "Runtime : prêt — {total} connus, aucun installé",
     "runtime.ready": "Runtime : prêt — {installed}/{total} installés",
     "runtime.managed_suffix": ", {managed} gérés",
@@ -322,7 +322,7 @@ FR: dict[str, str] = {
     "settings.runtime_unknown": "État du runtime indisponible",
     "settings.runtime_absent": "absent",
     "settings.runtime_ready": "prêt",
-    "settings.runtime_broken": "cassé",
+    "settings.runtime_broken": "défaillant",
     "settings.runtime_products": "Produits gérés : {list}",
     "settings.runtime_products_none": "aucun",
     "settings.runtime_active_slot": "Slot actif : {slot}",
@@ -341,8 +341,8 @@ FR: dict[str, str] = {
         "à configurer"
     ),
     "gpu.already_ready": (
-        "Runtime d'accélération GPU actif et validé (fermeture accélérée "
-        "vérifiée dans le slot de runtime actif)."
+        "Runtime d'accélération GPU actif et validé (environnement GPU "
+        "validé dans le slot de runtime actif)."
     ),
     "gpu.blocked": "GPU NVIDIA détecté — pilote compatible indisponible.",
     "gpu.not_applicable": "Aucun GPU pris en charge détecté — exécution en mode CPU.",
@@ -395,9 +395,9 @@ FR: dict[str, str] = {
     "phase.in_progress": "En cours",
     # -- GPU plan preview lines ------------------------------------------
     "plan.no_requirements": "Aucun produit installé ne nécessite actuellement d'accélération GPU.",
-    "plan.cpu_preserved": "La fermeture de déploiement CPU est préservée inchangée.",
+    "plan.cpu_preserved": "L’ensemble des dépendances CPU reste inchangé.",
     "plan.unknown": "L'état de l'accélération GPU n'a pas pu être déterminé.",
-    "plan.no_change": "Aucun changement accéléré n'a été planifié.",
+    "plan.no_change": "Aucun changement lié à l’accélération n’est prévu.",
     "plan.blocked": "La planification de l'accélération GPU est bloquée.",
     "plan.reason": "Raison : {reason}",
     "plan.no_reason": "aucune raison enregistrée",
@@ -410,7 +410,7 @@ FR: dict[str, str] = {
     "plan.actions": "Actions planifiées :",
     "plan.action_item": " - {line}",
     "plan.actions_none": "Actions planifiées : aucune enregistrée",
-    "plan.host_prereqs": "Prérequis hôte :",
+    "plan.host_prereqs": "Prérequis système :",
     "plan.no_changes_yet": "Aucun changement n'a encore été effectué.",
     # -- Self-update banner (ZA-M1-4.2) ---------------------------------
     "selfupdate.ready": "ZeAlfie {version} est prêt à être installé.",
@@ -423,19 +423,18 @@ FR: dict[str, str] = {
     ),
     # -- Product descriptions (FR only; EN lives in manifests/products.toml) ---
     "product.description.zesolver": (
-        "Solveur astrométrique — résolution astrométrique, résolution à "
-        "l'aveugle et analyse de champs stellaires."
+        "Résolution astrométrique, rapide ou à l’aveugle — avec analyse du "
+        "champ d’étoiles."
     ),
     "product.description.zemosaic": (
-        "Planificateur et composeur de mosaïques — assemblage, alignement "
-        "et fusion d'images du ciel profond multi-panneaux."
+        "Préparez et assemblez vos mosaïques du ciel profond — cadrage, "
+        "alignement et fusion des panneaux."
     ),
     "product.description.zeseestarstacker": (
-        "Empilement d'étoiles en un clic pour les utilisateurs de "
-        "Seestar S50 — calibration, alignement et empilement automatiques."
+        "Le petit stacker pour plein de brutes."
     ),
     "product.description.zeanalyser": (
-        "Boîte à outils d'analyse d'images approfondie — FWHM, excentricité, "
+        "Mesurez ce qu’il y a vraiment dans vos images — FWHM, excentricité, "
         "SNR et statistiques de session."
     ),
 }
