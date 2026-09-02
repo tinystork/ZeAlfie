@@ -41,6 +41,9 @@ name: "windows standalone bootstrap witness"
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-standalone-bootstrap
 
 permissions:
   contents: read
