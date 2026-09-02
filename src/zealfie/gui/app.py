@@ -22,6 +22,7 @@ from zealfie.selfupdate.resolver import GitHubTagsLister
 from zealfie.runtime.layout import default_runtime_layout
 
 from .main_window import ZeAlfieMainWindow
+from .icon import apply_app_icon
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,15 @@ def run_gui() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("ZeAlfie")
     app.setOrganizationName("ZeSoftware")
+
+    # ZA-ICON-01: ZeAlfie identity at the QApplication level.  Qt then
+    # uses this icon for every top-level window/dialog that does not set
+    # its own (window decorations, taskbar/alt-tab, dialogs, …).
+    # Best-effort: a missing icon asset must never block GUI startup.
+    # NOTE (future Windows packager): the EXE-embedded icon and the
+    # AppUserModelID are packager concerns (see zealfie.gui.icon) and
+    # are intentionally not implemented here.
+    apply_app_icon(app)
 
     service = ZeAlfieService()
 

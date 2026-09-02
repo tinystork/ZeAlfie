@@ -40,4 +40,4 @@ where = ["src"]
 include = ["zealfie*"]
 
 [tool.setuptools.package-data]
-zealfie = ["manifests/*.toml"]
+zealfie = ["manifests/*.toml", "icon/*"]

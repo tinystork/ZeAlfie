@@ -50,6 +50,7 @@ from .acceleration_badge import AccelerationBadge
 from .acceleration_panel import AccelerationPanel
 from .gpu_onboarding_banner import GpuOnboardingBanner
 from .settings_page import SettingsPage
+from .icon import apply_window_icon
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,12 @@ class ZeAlfieMainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle(translate("app.title"))
+        # ZA-ICON-01: explicit ZeAlfie icon on the shell window.  Qt
+        # normally propagates the QApplication icon to every top-level
+        # window; the explicit set keeps the identity stable even when
+        # this window is created outside the standard composition root.
+        # Best-effort: no-op (never raises) when the asset is missing.
+        apply_window_icon(self)
         self.resize(580, 500)
 
         # --- Central stacked widget: Home page + Settings page ---
