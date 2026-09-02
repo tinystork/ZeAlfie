@@ -1,0 +1,49 @@
+# ZeAlfie Windows standalone bootstrap — reproducibility record (ZA-WIN-BOOT-01).
+#
+# Pinned at implementation time (2026-09-02) from python.org release data:
+#   3.13.15 is the latest stable CPython 3.13.x patch release at that date
+#   (published 2026-08-05).  The SHA-256 below is REAL: it was computed on a
+#   Linux host from the official python.org download
+#   (https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe).
+#   It is never fabricated and never guessed.
+#
+# Provisioning fails CLOSED on any mismatch between this record and the
+# artifact actually downloaded/installed on the Windows witness.
+
+[zealfie]
+# ZeAlfie version/revision whose wheel this record bootstraps.
+version = "0.1.0"
+revision = "a1a777a2df065b86c9f7e5305550ac436f60b42d"
+
+[cpython]
+# Exact pinned private runtime interpreter (full python.org Windows x64
+# installer — NOT the embeddable zip: ZeAlfie needs real pip + venv).
+version = "3.13.15"
+architecture = "x86_64"
+installer_filename = "python-3.13.15-amd64.exe"
+installer_url = "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe"
+# sha256 of python-3.13.15-amd64.exe as downloaded from python.org on
+# 2026-09-02 (29 452 944 bytes).  Verified by provisioning before install.
+sha256 = "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403"
+
+[install]
+# Silent per-user install, no admin, no PATH/associations/shortcuts/launcher.
+# TargetDir is injected at runtime by the provisioning code
+# (<witness-root>\python); everything else is pinned here.
+per_user = true
+silent = true
+# Properties passed to the python.org installer (order preserved).
+properties = [
+  "InstallAllUsers=0",
+  "PrependPath=0",
+  "Include_launcher=0",
+  "AssociateFiles=0",
+  "Shortcuts=0",
+  "Include_pip=1",
+  "Include_venv=1",
+  "Include_test=0",
+  "Include_doc=0",
+  "Include_tcltk=0",
+]
+# Additional installer command-line switches (before the properties).
+switches = ["/quiet", "/norestart"]

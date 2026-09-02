@@ -1,0 +1,181 @@
+# ZeAlfie Windows standalone bootstrap — bounded CI witness (ZA-WIN-BOOT-01).
+#
+# Trigger: workflow_dispatch ONLY (no push/PR/schedule — a human-invoked
+# bootstrap/packaging proof, not routine CI).
+#
+# Proves, on a genuine GitHub-hosted windows-latest x64 runner, that
+# ZeAlfie can run as a standalone application on a PRIVATE, pinned CPython
+# 3.13 runtime with NO dependency on the runner's preinstalled Python
+# AFTER provisioning:
+#
+#   checkout
+#     -> build the zealfie wheel (driver python — build concern only)
+#     -> download the pinned CPython installer
+#     -> verify its SHA-256 against packaging/windows/reproducibility.toml
+#        (fail closed — never install an unverified payload)
+#     -> silent per-user install into <witness-root>\python
+#     -> create <witness-root>\appenv from THAT private python
+#     -> install the built wheel into appenv
+#     -> isolation assertions (sys.executable/prefix/base_prefix provenance;
+#        rejection of runner Pythons by path, never by version string)
+#     -> runtime-child capability witness (venv.create with_pip from appenv;
+#        child derives from the private CPython)
+#     -> CLI smoke (appenv\Scripts\zealfie.exe --version/--help)
+#     -> GUI smoke (bounded offscreen instantiation of the real window)
+#     -> failure diagnostics (diagnose + artifact upload of the witness root)
+#
+# No release, no tag, no signing, no secrets.  The existing shared runtime
+# (%LOCALAPPDATA%\zealfie\runtime with slots/state/cache) is a SEPARATE
+# concern and is never touched: the GUI smoke runs on a throwaway runtime
+# root under the witness area.
+#
+# Action majors pinned at implementation time (2026-09-02) after auditing
+# the GitHub API for the latest release tags:
+#   actions/checkout       -> v7.0.1  (major v7)
+#   actions/setup-python   -> v7.0.0  (major v7)
+#   actions/upload-artifact -> v7.0.1 (major v7)
+#
+# No caching, no continue-on-error on the witness steps: every step must
+# succeed on its own for the job to pass.
+name: "windows standalone bootstrap witness"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Shared per-run witness root (created/owned by the provisioning code).
+  ZEALFIE_WITNESS_ROOT: "${{ runner.temp }}/zealfie-windows-boot-witness"
+
+jobs:
+  windows-bootstrap-witness:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - id: checkout
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: setup-python
+        name: Setup driver Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - id: host-identity
+        name: Host identity (driver python — build concern only)
+        shell: bash
+        run: |
+          uname -a || true
+          python --version
+          python -c "import platform, sys; print(platform.platform()); print('executable:', sys.executable)"
+          echo "runner.os=${{ runner.os }} runner.arch=${{ runner.arch }}"
+
+      - id: build-wheel
+        name: Build the zealfie wheel
+        shell: bash
+        run: |
+          python -m pip install --quiet build
+          python -m build --wheel --outdir "$RUNNER_TEMP/zealfie-dist"
+          ls -la "$RUNNER_TEMP/zealfie-dist"
+
+      - id: provision-python
+        name: Download pinned CPython -> verify SHA-256 -> silent per-user install
+        shell: bash
+        run: |
+          python packaging/windows/provision_windows.py provision-python
+
+      - id: make-appenv
+        name: Create appenv from the private python and install the wheel
+        shell: bash
+        timeout-minutes: 25
+        run: |
+          wheel=$(ls "$RUNNER_TEMP"/zealfie-dist/zealfie-*.whl | head -n 1)
+          echo "installing wheel: $wheel"
+          python packaging/windows/provision_windows.py make-appenv --wheel "$wheel"
+
+      - id: witness
+        name: Isolation assertions + runtime-child capability witness
+        shell: bash
+        run: |
+          python packaging/windows/provision_windows.py witness
+
+      - id: smoke-cli
+        name: CLI smoke from the INSTALLED appenv
+        shell: bash
+        run: |
+          python packaging/windows/provision_windows.py smoke-cli
+
+      - id: smoke-gui
+        name: GUI smoke (bounded offscreen instantiation)
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: "offscreen"
+        run: |
+          python packaging/windows/provision_windows.py smoke-gui
+
+      - id: diagnostics
+        name: Failure diagnostics (diagnose + witness log echo)
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== witness root ==="
+          ls -laR "$ZEALFIE_WITNESS_ROOT" 2>/dev/null | head -n 120 || true
+          echo "=== interpreter identities ==="
+          python packaging/windows/provision_windows.py diagnose || true
+          echo "=== log tails ==="
+          for log in "$ZEALFIE_WITNESS_ROOT"/logs/*.log; do
+            echo "--- $log ---"
+            tail -n 60 "$log" 2>/dev/null || true
+          done
+
+      - id: upload-logs
+        name: Upload witness logs (failure only)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-bootstrap-witness-logs
+          path: "${{ runner.temp }}/zealfie-windows-boot-witness"
+          if-no-files-found: warn
+          retention-days: 7
+
+      - id: step-summary
+        name: Step summary
+        if: always()
+        shell: bash
+        env:
+          OUT_CHECKOUT: "${{ steps.checkout.outcome }}"
+          OUT_SETUP: "${{ steps.setup-python.outcome }}"
+          OUT_HOST: "${{ steps.host-identity.outcome }}"
+          OUT_BUILD: "${{ steps.build-wheel.outcome }}"
+          OUT_PROVISION: "${{ steps.provision-python.outcome }}"
+          OUT_APPENV: "${{ steps.make-appenv.outcome }}"
+          OUT_WITNESS: "${{ steps.witness.outcome }}"
+          OUT_CLI: "${{ steps.smoke-cli.outcome }}"
+          OUT_GUI: "${{ steps.smoke-gui.outcome }}"
+        run: |
+          {
+            echo "## ZeAlfie Windows standalone bootstrap — witness"
+            echo "**Bounded proof: private pinned CPython 3.13 runtime with NO dependency on the runner's preinstalled Python after provisioning. Bootstrap/packaging proof only — not the final public installer, not a frozen PyInstaller exe.**"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Runner | ${{ runner.os }} ${{ runner.arch }} |"
+            echo "| ZeAlfie HEAD | ${{ github.sha }} |"
+            echo "| Pinned CPython | $(python -c \"import tomllib; d=tomllib.load(open('packaging/windows/reproducibility.toml','rb')); print(d['cpython']['version'])\" 2>/dev/null || echo 'see reproducibility.toml') |"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Checkout | ${OUT_CHECKOUT:-NOT REACHED} |"
+            echo "| Setup driver Python | ${OUT_SETUP:-NOT REACHED} |"
+            echo "| Host identity | ${OUT_HOST:-NOT REACHED} |"
+            echo "| Build wheel | ${OUT_BUILD:-NOT REACHED} |"
+            echo "| Provision private CPython | ${OUT_PROVISION:-NOT REACHED} |"
+            echo "| Appenv + wheel install | ${OUT_APPENV:-NOT REACHED} |"
+            echo "| Isolation + child witness | ${OUT_WITNESS:-NOT REACHED} |"
+            echo "| CLI smoke | ${OUT_CLI:-NOT REACHED} |"
+            echo "| GUI smoke | ${OUT_GUI:-NOT REACHED} |"
+          } >> "$GITHUB_STEP_SUMMARY"
