@@ -162,6 +162,8 @@ jobs:
           OUT_CLI: "${{ steps.smoke-cli.outcome }}"
           OUT_GUI: "${{ steps.smoke-gui.outcome }}"
         run: |
+          PINNED_CPYTHON="$(python -c 'import tomllib; d=tomllib.load(open("packaging/windows/reproducibility.toml","rb")); print(d["cpython"]["version"])' 2>/dev/null || true)"
+          PINNED_CPYTHON="${PINNED_CPYTHON:-see reproducibility.toml}"
           {
             echo "## ZeAlfie Windows standalone bootstrap — witness"
             echo "**Bounded proof: private pinned CPython 3.13 runtime with NO dependency on the runner's preinstalled Python after provisioning. Bootstrap/packaging proof only — not the final public installer, not a frozen PyInstaller exe.**"
@@ -170,7 +172,7 @@ jobs:
             echo "| --- | --- |"
             echo "| Runner | ${{ runner.os }} ${{ runner.arch }} |"
             echo "| ZeAlfie HEAD | ${{ github.sha }} |"
-            echo "| Pinned CPython | $(python -c \"import tomllib; d=tomllib.load(open('packaging/windows/reproducibility.toml','rb')); print(d['cpython']['version'])\" 2>/dev/null || echo 'see reproducibility.toml') |"
+            echo "| Pinned CPython | $PINNED_CPYTHON |"
             echo ""
             echo "| Step | Result |"
             echo "| --- | --- |"

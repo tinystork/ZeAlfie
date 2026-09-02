@@ -233,7 +233,11 @@ def step_witness(witness_root: Path, child_root: Path) -> None:
             str(witness_script),
             "--witness-root", str(witness_root),
             "--child-root", str(child_root),
-        ]
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0:
         raise StepError(
