@@ -63,11 +63,18 @@ def _log_dir(witness_root: Path) -> Path:
 
 
 def _default_witness_root() -> Path:
-    base = (
-        os.environ.get("ZEALFIE_WITNESS_ROOT")
-        or os.environ.get("RUNNER_TEMP")
-        or tempfile.gettempdir()
-    )
+    """Resolve the witness root.
+
+    ``ZEALFIE_WITNESS_ROOT`` (when set, e.g. by the CI ``witness-root``
+    step) is honored as the FULL witness root — it already carries the
+    ``zealfie-windows-boot-witness`` subdirectory.  The local fallback
+    appends that subdirectory to ``RUNNER_TEMP``/the platform temp dir so
+    local and no-env runs keep a single, self-describing root.
+    """
+    explicit = os.environ.get("ZEALFIE_WITNESS_ROOT")
+    if explicit:
+        return Path(explicit)
+    base = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
     return Path(base) / "zealfie-windows-boot-witness"
 
 

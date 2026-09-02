@@ -48,16 +48,18 @@ on:
 permissions:
   contents: read
 
-env:
-  # Shared per-run witness root (created/owned by the provisioning code).
-  ZEALFIE_WITNESS_ROOT: "${{ runner.temp }}/zealfie-windows-boot-witness"
-
 jobs:
   windows-bootstrap-witness:
     runs-on: windows-latest
     timeout-minutes: 45
 
     steps:
+      - id: witness-root
+        name: Define witness root
+        shell: bash
+        run: |
+          echo "ZEALFIE_WITNESS_ROOT=$RUNNER_TEMP/zealfie-windows-boot-witness" >> "$GITHUB_ENV"
+
       - id: checkout
         name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
