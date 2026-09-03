@@ -1477,3 +1477,31 @@ def test_uninstall_witness_requires_private_runtime_removal() -> None:
     assert "removed, shortcut removed" in step
     # the preservation-era assertion is gone
     assert "unexpectedly removed by uninstall" not in step
+
+
+def test_iss_uninstalldelete_covers_runtime_created_appenv_and_logs() -> None:
+    """(Rework-1, confirmed defect) {app}\\appenv and {app}\\logs are created
+    at ssPostInstall by the bootstrap and are NOT registered via [Files],
+    so the uninstaller must delete them explicitly through [UninstallDelete];
+    {app}\\python and {app}\\assets ARE [Files]-registered and auto-removed."""
+    iss = _iss_text()
+    assert "[UninstallDelete]" in iss
+    assert r'Type: filesandordirs; Name: "{app}\appenv"' in iss
+    assert r'Type: filesandordirs; Name: "{app}\logs"' in iss
+    # the SECTION must sit between [Icons] and [Code] (the header prose may
+    # mention [UninstallDelete] earlier, so anchor on section headers only)
+    icons = iss.index("\n[Icons]\n")
+    uninst = iss.index("\n[UninstallDelete]\n")
+    code = iss.index("\n[Code]\n")
+    assert icons < uninst < code
+    # mechanism matches the assertions: the side-effect witness expects the
+    # appenv gone after uninstall, and the CI uninstall witness FAILS when it
+    # survives — so the .iss deletion mechanism is what makes them true
+    witness = (_WINDOWS_PKG / "side_effect_witness.py").read_text(
+        encoding="utf-8"
+    )
+    assert "appenv_exists" in witness
+    assert "application environment still present after uninstall" in witness
+    workflow = (_REPO_ROOT / ".github" / "workflows"
+                / "windows-installer-build.yml").read_text(encoding="utf-8")
+    assert "application environment not removed by uninstall" in workflow
