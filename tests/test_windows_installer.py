@@ -1480,14 +1480,17 @@ def test_uninstall_witness_requires_private_runtime_removal() -> None:
 
 
 def test_iss_uninstalldelete_covers_runtime_created_appenv_and_logs() -> None:
-    """(Rework-1, confirmed defect) {app}\\appenv and {app}\\logs are created
-    at ssPostInstall by the bootstrap and are NOT registered via [Files],
-    so the uninstaller must delete them explicitly through [UninstallDelete];
-    {app}\\python and {app}\\assets ARE [Files]-registered and auto-removed."""
+    """(Rework-1 + rework-3, confirmed defects) The uninstaller must delete
+    EVERY runtime-created/untracked part of {app}: {app}\\appenv and
+    {app}\\logs are created at ssPostInstall (NOT [Files]-registered), and
+    runtime execution creates untracked .pyc/__pycache__ residue inside the
+    [Files]-registered {app}\\python and {app}\\assets trees — so all four
+    subtrees carry explicit recursive [UninstallDelete] ownership."""
     iss = _iss_text()
     assert "[UninstallDelete]" in iss
-    assert r'Type: filesandordirs; Name: "{app}\appenv"' in iss
-    assert r'Type: filesandordirs; Name: "{app}\logs"' in iss
+    for subtree in ("{app}\\appenv", "{app}\\logs",
+                    "{app}\\python", "{app}\\assets"):
+        assert f'Type: filesandordirs; Name: "{subtree}"' in iss, subtree
     # the SECTION must sit between [Icons] and [Code] (the header prose may
     # mention [UninstallDelete] earlier, so anchor on section headers only)
     icons = iss.index("\n[Icons]\n")
@@ -1505,6 +1508,29 @@ def test_iss_uninstalldelete_covers_runtime_created_appenv_and_logs() -> None:
     workflow = (_REPO_ROOT / ".github" / "workflows"
                 / "windows-installer-build.yml").read_text(encoding="utf-8")
     assert "application environment not removed by uninstall" in workflow
+
+
+def test_iss_uninstalldelete_never_touches_shared_runtime() -> None:
+    """(Rework-3) The uninstall deletion contract is bounded to {app}: no
+    [UninstallDelete]/[UninstallRun] entry may reference the shared runtime
+    root (%LOCALAPPDATA%\\zealfie), and the 'never deleted' prose stays."""
+    iss = _iss_text()
+    # anchor on the SECTION header line (the header prose also mentions
+    # [UninstallDelete]); the section body must contain only {app}-rooted
+    # entries — never the shared runtime root
+    uninst_sec = iss.split("\n[UninstallDelete]\n", 1)[1].split("\n[Code]\n", 1)[0]
+    entries = [ln.strip() for ln in uninst_sec.splitlines()
+               if ln.strip().startswith("Type:")]
+    # every deletion ENTRY is {app}-rooted; none references the shared
+    # runtime root (the section comment may mention it to say it is NOT
+    # deleted — the entries are the contract)
+    assert len(entries) >= 4
+    for entry in entries:
+        assert '"{app}\\' in entry, entry
+        assert "zealfie" not in entry, entry
+    assert "[UninstallRun]" not in iss
+    assert "%LOCALAPPDATA%\\zealfie" in iss  # shared runtime never touched
+    assert "never read, written, or deleted" in iss
 
 
 def test_provision_windows_parser_contract_provision_python_and_record() -> None:

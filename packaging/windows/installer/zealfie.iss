@@ -66,12 +66,13 @@
 ; pollution, no Authenticode signing, no public Release, no frozen single
 ; exe.  The user's separate %LOCALAPPDATA%\zealfie\runtime (shared runtime)
 ; is never read, written, or deleted by this installer.  Uninstall removes
-; the WHOLE {app} tree INCLUDING the private {app}\python runtime: {app}\python
-; and {app}\assets are [Files]-registered (auto-removed), and the two
-; bootstrap-created trees that are NOT [Files]-registered — {app}\appenv and
-; {app}\logs — are deleted explicitly via [UninstallDelete] below.  Nothing
-; on the host references any of it (no external registration), so nothing is
-; preserved.
+; the WHOLE {app} tree INCLUDING the private {app}\python runtime: the four
+; {app} subtrees — python, assets, appenv and logs — are all deleted via
+; [UninstallDelete] below ({app}\python and {app}\assets are also
+; [Files]-registered, and the recursive declarations additionally remove the
+; untracked .pyc/__pycache__ residue runtime execution creates inside them).
+; Nothing on the host references any of it (no external registration), so
+; nothing is preserved.
 ; ============================================================================
 
 #ifndef ZeAlfieVersion
@@ -169,12 +170,19 @@ Name: "{autoprograms}\ZeAlfie"; Filename: "{app}\appenv\Scripts\zealfie-gui.exe"
 ; The appenv and the bootstrap logs are created at ssPostInstall by the
 ; bootstrap (NOT registered via [Files]), so the uninstaller must be told
 ; to delete them explicitly.  {app}\python and {app}\assets ARE registered
-; via [Files] and auto-removed; these two entries cover the runtime-created
-; trees, so the whole {app} tree (all of it installer-owned) is removed
-; with the installer.  unins000.exe/.dat are Inno's own files and are
-; handled by the uninstaller itself.
+; via [Files] and their embedded files are auto-removed, but runtime
+; execution creates untracked .pyc/__pycache__ residue inside those two
+; trees that the [Files] bookkeeping does not know about — so they are
+; covered by explicit recursive ownership declarations below as well.
+; Together the four entries remove the whole {app} tree (all of it
+; installer-owned) with the installer; NOTHING outside {app} is touched
+; (the shared %LOCALAPPDATA%\zealfie runtime is never deleted here).
+; unins000.exe/.dat are Inno's own files and are handled by the uninstaller
+; itself.
 Type: filesandordirs; Name: "{app}\appenv"
 Type: filesandordirs; Name: "{app}\logs"
+Type: filesandordirs; Name: "{app}\python"
+Type: filesandordirs; Name: "{app}\assets"
 
 [Code]
 // Set True by every fatal bootstrap condition.  Inno swallows exceptions
