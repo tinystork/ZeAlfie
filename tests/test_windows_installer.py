@@ -910,6 +910,7 @@ def _baseline_snapshot() -> dict:
         "start_menu_shortcut_exists": False,
         "start_menu_shortcut_target": None,
         "runtime_exists": False,
+        "zealfie_appdata_exists": False,
     }
 
 
@@ -943,6 +944,7 @@ def _install_snapshot(root: str = _ROOT, **overrides) -> dict:
             root + "\\appenv\\Scripts\\zealfie-gui.exe"
         ),
         "runtime_exists": False,
+        "zealfie_appdata_exists": False,
     }
     snap.update(overrides)
     return snap
@@ -1024,7 +1026,8 @@ def test_side_effect_witness_no_new_pythoncore_state() -> None:
                "pythoncore_3_13_hklm_install_path": None,
                "uninstall_hkcu": {}, "uninstall_hklm": {},
                "start_menu_shortcut_exists": False,
-               "start_menu_shortcut_target": None, "runtime_exists": False}
+               "start_menu_shortcut_target": None, "runtime_exists": False,
+               "zealfie_appdata_exists": False}
     snap = _install_snapshot(
         pythoncore_3_13_hkcu_install_path=(
             r"C:\Users\u\AppData\Local\Programs\Python\Python313")
@@ -1146,9 +1149,11 @@ def test_side_effect_witness_start_menu_target() -> None:
 
 
 def test_side_effect_witness_uninstall_deltas() -> None:
-    """(ZA-WIN-BOOT-03B) After uninstall EVERYTHING installer-owned is gone
-    — shortcut, ZeAlfie registration, assets, private {app}\\python AND
-    {app}\\appenv — and the host footprint is byte-identical to baseline."""
+    """(ZA-WIN-BOOT-03B + ZA-WIN-UNINSTALL-01) After uninstall EVERYTHING
+    installer-owned is gone — shortcut, ZeAlfie registration, assets,
+    private {app}\\python, {app}\\appenv AND the whole %LOCALAPPDATA%\\zealfie
+    managed app-data tree — and the host footprint is byte-identical to
+    baseline."""
     baseline = _baseline_snapshot()
     # clean post-uninstall snapshot (host untouched, nothing left)
     snap = {
@@ -1165,6 +1170,7 @@ def test_side_effect_witness_uninstall_deltas() -> None:
         "start_menu_shortcut_exists": False,
         "start_menu_shortcut_target": None,
         "runtime_exists": False,
+        "zealfie_appdata_exists": False,
         "owned_assets": False,
         "private_python_exists": False,
         "appenv_exists": False,
@@ -1190,10 +1196,13 @@ def test_side_effect_witness_uninstall_deltas() -> None:
     snap6 = dict(snap, owned_assets=True)
     assert any("asset still present" in f
                for f in _SEW.verify_uninstall_findings(baseline, snap6, _ROOT))
-    # shared runtime touched -> finding
-    snap7 = dict(snap, runtime_exists=True)
-    assert any("runtime" in f
-               for f in _SEW.verify_uninstall_findings(baseline, snap7, _ROOT))
+    # whole managed app-data tree still present -> finding (the whole
+    # %LOCALAPPDATA%\zealfie tree is removed WITH the installer now; the
+    # old "shared runtime never touched" contract is obsolete)
+    snap7 = dict(snap, zealfie_appdata_exists=True)
+    findings = _SEW.verify_uninstall_findings(baseline, snap7, _ROOT)
+    assert any("zealfie" in f and "still present after uninstall" in f
+               for f in findings)
     # host PATH changed by uninstall -> finding
     snap8 = dict(snap, user_path=["c:\\windows\\system32", "c:\\evil"])
     assert any("user PATH" in f
@@ -1465,7 +1474,11 @@ def test_workflow_acquire_standalone_before_compile_and_extract_gate() -> None:
 
 def test_uninstall_witness_requires_private_runtime_removal() -> None:
     """The CI uninstall witness must FAIL if {app}\\python or {app}\\appenv
-    survive uninstall (they are installer-owned and removed WITH Setup)."""
+    survive uninstall (they are installer-owned and removed WITH Setup).
+    (ZA-WIN-UNINSTALL-01) It must also seed representative managed app-data
+    state before uninstalling and FAIL when the whole %LOCALAPPDATA%\\zealfie
+    root survives (the whole ZeAlfie-owned managed tree is removed WITH the
+    installer now)."""
     workflow = (_REPO_ROOT / ".github" / "workflows"
                 / "windows-installer-build.yml").read_text(encoding="utf-8")
     start = workflow.index("- id: uninstall-witness")
@@ -1475,6 +1488,16 @@ def test_uninstall_witness_requires_private_runtime_removal() -> None:
     assert "application environment not removed by uninstall" in step
     assert "uninstall witness PASS" in step
     assert "removed, shortcut removed" in step
+    # (ZA-WIN-UNINSTALL-01) representative managed app-data state is seeded
+    # BEFORE the uninstaller runs so the whole-tree cleanup is witnessed
+    assert 'ZEALFIE_APPDATA="$LOCALAPPDATA/zealfie"' in step
+    assert 'mkdir -p "$ZEALFIE_APPDATA/runtime/state" "$ZEALFIE_APPDATA/work"' in step
+    assert 'printf \'products = ["zefocus"]\\n\' > "$ZEALFIE_APPDATA/desired-products.toml"' in step
+    assert step.index('mkdir -p "$ZEALFIE_APPDATA') < step.index('if "$UNINS" /VERYSILENT')
+    # ... and the whole managed app-data root must be GONE afterwards
+    assert "ZeAlfie managed app-data root not removed by uninstall" in step
+    assert '[ -e "$ZEALFIE_APPDATA" ]' in step
+    assert "never touched" not in step
     # the preservation-era assertion is gone
     assert "unexpectedly removed by uninstall" not in step
 
@@ -1510,27 +1533,59 @@ def test_iss_uninstalldelete_covers_runtime_created_appenv_and_logs() -> None:
     assert "application environment not removed by uninstall" in workflow
 
 
-def test_iss_uninstalldelete_never_touches_shared_runtime() -> None:
-    """(Rework-3) The uninstall deletion contract is bounded to {app}: no
-    [UninstallDelete]/[UninstallRun] entry may reference the shared runtime
-    root (%LOCALAPPDATA%\\zealfie), and the 'never deleted' prose stays."""
+def test_iss_uninstalldelete_cleanup_bounded_to_owned_namespaces() -> None:
+    """(ZA-WIN-UNINSTALL-01) The uninstall deletion contract is bounded to
+    the ZeAlfie-owned namespaces: the four {app} subtree entries AND exactly
+    the whole-tree {localappdata}\\zealfie managed app-data entry.  No
+    [UninstallRun], and no entry may broaden to {localappdata} as a whole
+    or to any non-ZeAlfie path ({userprofile}/Documents/Pictures...)."""
     iss = _iss_text()
     # anchor on the SECTION header line (the header prose also mentions
-    # [UninstallDelete]); the section body must contain only {app}-rooted
-    # entries — never the shared runtime root
+    # [UninstallDelete]); the section body carries the deletion ENTRIES
     uninst_sec = iss.split("\n[UninstallDelete]\n", 1)[1].split("\n[Code]\n", 1)[0]
     entries = [ln.strip() for ln in uninst_sec.splitlines()
                if ln.strip().startswith("Type:")]
-    # every deletion ENTRY is {app}-rooted; none references the shared
-    # runtime root (the section comment may mention it to say it is NOT
-    # deleted — the entries are the contract)
-    assert len(entries) >= 4
+    # exactly five recursive whole-tree entries: the four {app} subtrees
+    # plus the whole ZeAlfie managed app-data tree
+    assert len(entries) == 5
+    app_entries = [e for e in entries if '"{app}\\' in e]
+    assert len(app_entries) == 4
+    for subtree in ("{app}\\appenv", "{app}\\logs",
+                    "{app}\\python", "{app}\\assets"):
+        assert f'Type: filesandordirs; Name: "{subtree}"' in entries, subtree
+    assert 'Type: filesandordirs; Name: "{localappdata}\\zealfie"' in entries
+    # cleanup can never escape the ZeAlfie-owned namespace: {app}-rooted or
+    # exactly the whole {localappdata}\zealfie tree — never {localappdata}
+    # itself (whole), never {userprofile}/Documents/any other path
     for entry in entries:
-        assert '"{app}\\' in entry, entry
-        assert "zealfie" not in entry, entry
+        assert '"{localappdata}"' not in entry, entry
+        assert "{userprofile}" not in entry, entry
+        assert "Documents" not in entry, entry
+        assert "Pictures" not in entry, entry
     assert "[UninstallRun]" not in iss
-    assert "%LOCALAPPDATA%\\zealfie" in iss  # shared runtime never touched
-    assert "never read, written, or deleted" in iss
+
+
+def test_iss_uninstalldelete_whole_appdata_tree_covers_selection_and_work() -> None:
+    """(ZA-WIN-UNINSTALL-01) The single whole-tree {localappdata}\\zealfie
+    entry removes ZeAlfie-installed products' managed runtime
+    (runtime\\ slots/state/cache), the install work/cache staging (work\\),
+    the persisted desired-products.toml selection and the internal
+    .runtime.zealfie-mutation.lock — ALL ZeAlfie-owned disposable
+    application state (no user-authored data).  The test no longer asserts
+    runtime preservation: the obsolete "never read, written, or deleted"
+    contract is gone from the .iss."""
+    iss = _iss_text()
+    uninst_sec = iss.split("\n[UninstallDelete]\n", 1)[1].split("\n[Code]\n", 1)[0]
+    # whole-tree app-data entry declared with recursive filesandordirs
+    assert 'Type: filesandordirs; Name: "{localappdata}\\zealfie"' in uninst_sec
+    # the section prose truthfully states what the whole tree covers
+    assert "{localappdata}\\zealfie" in uninst_sec
+    assert "desired-products.toml" in uninst_sec
+    assert ".runtime.zealfie-mutation.lock" in uninst_sec
+    lowered = uninst_sec.lower()
+    assert "runtime" in lowered and "work" in lowered
+    # preservation-era contract removed by product decision
+    assert "never read, written, or deleted" not in iss
 
 
 def test_provision_windows_parser_contract_provision_python_and_record() -> None:

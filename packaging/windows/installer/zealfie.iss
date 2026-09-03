@@ -64,15 +64,22 @@
 ;
 ; Non-goals respected: no PATH/launcher/file-association/global-shortcut
 ; pollution, no Authenticode signing, no public Release, no frozen single
-; exe.  The user's separate %LOCALAPPDATA%\zealfie\runtime (shared runtime)
-; is never read, written, or deleted by this installer.  Uninstall removes
-; the WHOLE {app} tree INCLUDING the private {app}\python runtime: the four
-; {app} subtrees — python, assets, appenv and logs — are all deleted via
+; exe.  Installing never reads, writes or deletes the host's own
+; %LOCALAPPDATA% content — only the ZeAlfie-owned namespace is ever touched.
+; Uninstall removes the WHOLE {app} tree INCLUDING the private {app}\python
+; runtime AND the whole %LOCALAPPDATA%\zealfie managed app-data tree
+; (ZeAlfie-installed products' managed runtime slots/state/cache under
+; runtime\, the install work/cache staging under work\, the persisted
+; desired-products.toml selection and the internal
+; .runtime.zealfie-mutation.lock — all ZeAlfie-owned disposable application
+; state, no user-authored data): the four {app} subtrees — python, assets,
+; appenv and logs — plus {localappdata}\zealfie are all deleted via
 ; [UninstallDelete] below ({app}\python and {app}\assets are also
 ; [Files]-registered, and the recursive declarations additionally remove the
 ; untracked .pyc/__pycache__ residue runtime execution creates inside them).
-; Nothing on the host references any of it (no external registration), so
-; nothing is preserved.
+; Cleanup NEVER broadens to {localappdata} itself or to any non-ZeAlfie
+; path (never Documents/Pictures/astronomy data): nothing outside
+; {app} + {localappdata}\zealfie is touched.
 ; ============================================================================
 
 #ifndef ZeAlfieVersion
@@ -174,15 +181,23 @@ Name: "{autoprograms}\ZeAlfie"; Filename: "{app}\appenv\Scripts\zealfie-gui.exe"
 ; execution creates untracked .pyc/__pycache__ residue inside those two
 ; trees that the [Files] bookkeeping does not know about — so they are
 ; covered by explicit recursive ownership declarations below as well.
-; Together the four entries remove the whole {app} tree (all of it
-; installer-owned) with the installer; NOTHING outside {app} is touched
-; (the shared %LOCALAPPDATA%\zealfie runtime is never deleted here).
-; unins000.exe/.dat are Inno's own files and are handled by the uninstaller
-; itself.
+; The four {app} entries remove the whole {app} tree (all of it
+; installer-owned) with the installer.  The {localappdata}\zealfie entry
+; removes the whole ZeAlfie-owned managed app-data tree on top of that:
+; the products ZeAlfie installs live there (%LOCALAPPDATA%\zealfie\runtime
+; — managed slots/state/cache), as does the install work/cache staging
+; ({localappdata}\zealfie\work), the persisted desired-products.toml
+; selection and the internal .runtime.zealfie-mutation.lock — ALL
+; ZeAlfie-owned disposable application state (no user-authored data), so
+; the WHOLE tree goes with the installer.  Cleanup NEVER broadens to
+; {localappdata} itself or to any non-ZeAlfie path; nothing outside
+; {app} + {localappdata}\zealfie is touched.  unins000.exe/.dat are
+; Inno's own files and are handled by the uninstaller itself.
 Type: filesandordirs; Name: "{app}\appenv"
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\assets"
+Type: filesandordirs; Name: "{localappdata}\zealfie"
 
 [Code]
 // Set True by every fatal bootstrap condition.  Inno swallows exceptions

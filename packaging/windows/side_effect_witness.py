@@ -1,5 +1,6 @@
 """ZeAlfie Windows installer — non-invasive side-effect witness
-(ZA-WIN-BOOT-02 closure; ZA-WIN-BOOT-03B no-provider semantics).
+(ZA-WIN-BOOT-02 closure; ZA-WIN-BOOT-03B no-provider semantics;
+ZA-WIN-UNINSTALL-01 complete-uninstall semantics).
 Baseline → post-install → post-uninstall DELTA audit of the machine-scope
 footprint the installer is allowed to touch.  Since ZA-WIN-BOOT-03B the
 substrate is a **python-build-standalone** runtime (plain extracted
@@ -17,12 +18,19 @@ files, no installer), so the installer's contract is:
   ``{app}\\appenv\\Scripts\\zealfie-gui.exe`` and a per-user ZeAlfie
   uninstall registration (no machine-scope ZeAlfie registration).
 * UNINSTALL: everything installer-owned is removed WITH the installer —
-  shortcut, per-user ZeAlfie registration, assets AND the whole private
+  shortcut, per-user ZeAlfie registration, assets, the whole private
   runtime ``{app}\\python`` + ``{app}\\appenv`` (plain files with no
   external registration: nothing on the host references them, so nothing
-  is preserved); host Python/launcher/PATH/associations/registry
-  unchanged; ``%LOCALAPPDATA%\\zealfie\\runtime`` never touched.
-outside its documented footprint.
+  is preserved) AND the whole ZeAlfie-owned managed app-data tree
+  ``%LOCALAPPDATA%\\zealfie`` (installed products' managed runtime
+  slots/state/cache under ``runtime\\``, the install work/cache staging
+  under ``work\\``, the persisted ``desired-products.toml`` selection and
+  the internal mutation lock — all disposable ZeAlfie-owned state, no
+  user-authored data).  Host Python/launcher/PATH/associations/registry
+  unchanged.  Cleanup never broadens outside that owned namespace:
+  never ``{localappdata}`` itself and never any non-ZeAlfie path (no
+  Documents/Pictures/astronomy data) — nothing is deleted outside its
+  documented footprint.
 
 Design rules (mirror the other ``packaging/windows`` modules):
 
@@ -65,7 +73,14 @@ UNINSTALL_SUBKEY = 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
 ASSOC_PY_SUBKEY = 'Software\\Classes\\.py'
 START_MENU_REL = os.path.join("Microsoft", "Windows", "Start Menu",
                               "Programs", "ZeAlfie.lnk")
-RUNTIME_REL = os.path.join("zealfie", "runtime")
+# The ZeAlfie-owned managed app-data namespace under %LOCALAPPDATA%:
+# runtime\ (managed product slots/state/cache), work\ (install
+# staging/cache), desired-products.toml (persisted selection) and the
+# internal .runtime.zealfie-mutation.lock — ALL disposable ZeAlfie-owned
+# application state (no user-authored data).  Since ZA-WIN-UNINSTALL-01
+# the uninstaller removes the WHOLE tree with the installer.
+ZEALFIE_APPDATA_REL = os.path.join("zealfie")
+RUNTIME_REL = os.path.join(ZEALFIE_APPDATA_REL, "runtime")
 
 
 class SideEffectError(RuntimeError):
@@ -282,7 +297,8 @@ def capture_snapshot(
 
     lnk = _start_menu_lnk(_env)
     local = _env("LOCALAPPDATA")
-    runtime = os.path.join(local, RUNTIME_REL) if local else None
+    appdata_root = os.path.join(local, ZEALFIE_APPDATA_REL) if local else None
+    runtime = os.path.join(appdata_root, "runtime") if appdata_root else None
     py_launcher_path = _which("py.exe")
 
     return {
@@ -302,6 +318,7 @@ def capture_snapshot(
             _shortcut_target(lnk) if lnk and _isfile(lnk) else None
         ),
         "runtime_exists": bool(runtime and _exists(runtime)),
+        "zealfie_appdata_exists": bool(appdata_root and _exists(appdata_root)),
     }
 
 
@@ -471,11 +488,19 @@ def verify_uninstall_findings(
             f"({ntpath.join(str(install_root), 'appenv')!r}) — the appenv is "
             "installer-owned and must be removed with the installer"
         )
-    if baseline.get("runtime_exists") != snapshot.get("runtime_exists"):
+    # The whole %LOCALAPPDATA%\zealfie managed app-data tree (managed
+    # runtime slots/state/cache, work staging/cache, the persisted
+    # desired-products.toml selection and the mutation lock) is
+    # ZeAlfie-owned disposable product/runtime state — since
+    # ZA-WIN-UNINSTALL-01 the uninstaller removes it WITH the installer
+    # (never {localappdata} itself, never any non-ZeAlfie path).
+    if snapshot.get("zealfie_appdata_exists"):
         findings.append(
-            "%LOCALAPPDATA%\\zealfie\\runtime existence changed "
-            f"({baseline.get('runtime_exists')} -> "
-            f"{snapshot.get('runtime_exists')}) — it must never be touched"
+            "%LOCALAPPDATA%\\zealfie still present after uninstall — the "
+            "whole ZeAlfie-owned managed app-data tree (managed runtime, "
+            "install work, desired-products selection, mutation lock) is "
+            "disposable product/runtime state and must be removed with "
+            "the installer"
         )
     return findings
 

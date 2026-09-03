@@ -41,13 +41,19 @@
 #     -> installer install/provenance smoke from the INSTALLED appenv
 #        (layout + provenance + CLI + offscreen GUI + offline pip evidence)
 #     -> bounded silent uninstall witness (unins000.exe /VERYSILENT) —
-#        removes the WHOLE installer-owned tree INCLUDING {app}\python
+#        seeds representative managed app-data state, then removes the
+#        WHOLE installer-owned tree INCLUDING {app}\python AND the whole
+#        %LOCALAPPDATA%\zealfie managed app-data tree (ZA-WIN-UNINSTALL-01)
 #     -> upload ZeAlfie-Setup*.exe + SHA-256 + provenance.json as an
 #        Actions ARTIFACT (never a Release)
 #
-# No release, no tag, no signing, no secrets.  The existing shared runtime
-# (%LOCALAPPDATA%\zealfie\runtime) is never touched by the installer, and
-# the CI never creates one (the GUI smoke uses a throwaway runtime root).
+# No release, no tag, no signing, no secrets.  Installing never touches
+# %LOCALAPPDATA%\zealfie (the GUI smoke uses a throwaway runtime root);
+# UNINSTALLING removes the whole ZeAlfie-owned managed app-data tree
+# (%LOCALAPPDATA%\zealfie — managed runtime slots, work staging, the
+# desired-products selection and internal locks) along with {app}, which
+# the uninstall witness below proves by seeding representative managed
+# state immediately before uninstalling (ZA-WIN-UNINSTALL-01).
 #
 # Action majors pinned at implementation time (2026-09-03):
 #   actions/checkout        -> v7.0.1 (3d3c42e5aac5ba805825da76410c181273ba90b1)
@@ -278,6 +284,20 @@ jobs:
           APP="$ZEALFIE_INSTALL_ROOT"
           UNINS="$APP/unins000.exe"
           [ -f "$UNINS" ] || { echo "FATAL: uninstaller not found: $UNINS"; exit 1; }
+          # Seed representative ZeAlfie-owned managed app-data state under
+          # the canonical root so the whole-tree cleanup is actually
+          # witnessed: a managed runtime state marker, the install
+          # work/cache staging marker and the persisted desired-products.toml
+          # selection.  (The install-phase audits already ran; this state is
+          # created only here, immediately before uninstalling.)
+          ZEALFIE_APPDATA="$LOCALAPPDATA/zealfie"
+          mkdir -p "$ZEALFIE_APPDATA/runtime/state" "$ZEALFIE_APPDATA/work"
+          printf 'marker\n' > "$ZEALFIE_APPDATA/runtime/state/marker.txt"
+          printf 'marker\n' > "$ZEALFIE_APPDATA/work/marker.txt"
+          printf 'products = ["zefocus"]\n' > "$ZEALFIE_APPDATA/desired-products.toml"
+          [ -f "$ZEALFIE_APPDATA/runtime/state/marker.txt" ] || { echo "FATAL: managed app-data seed missing"; exit 1; }
+          [ -f "$ZEALFIE_APPDATA/work/marker.txt" ] || { echo "FATAL: managed app-data seed missing"; exit 1; }
+          [ -f "$ZEALFIE_APPDATA/desired-products.toml" ] || { echo "FATAL: managed app-data seed missing"; exit 1; }
           # Bounded exit-code capture: set -e must not kill the script before
           # rc=$? records the uninstaller's exit code.
           if "$UNINS" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="$ZEALFIE_STAGE/logs/setup-uninstall.log"; then
@@ -314,7 +334,16 @@ jobs:
           # Start Menu shortcut removed by the uninstaller.
           LNK="$APPDATA/Microsoft/Windows/Start Menu/Programs/ZeAlfie.lnk"
           if [ -f "$LNK" ]; then echo "FATAL: Start Menu shortcut still present after uninstall"; exit 1; fi
-          echo "uninstall witness PASS (assets + private runtime {app}\\python + appenv removed, shortcut removed)"
+          # The whole ZeAlfie-owned managed app-data root (%LOCALAPPDATA%
+          # \zealfie — the seeded runtime/work/desired-products state above
+          # is the witness) must ALSO be gone: the managed tree is
+          # ZeAlfie-owned disposable product/runtime state removed WITH the
+          # installer.  Never broadened to {localappdata} itself.
+          if [ -e "$ZEALFIE_APPDATA" ]; then
+            echo "FATAL: ZeAlfie managed app-data root not removed by uninstall: $ZEALFIE_APPDATA"
+            exit 1
+          fi
+          echo "uninstall witness PASS (assets + private runtime {app}\\python + appenv removed, shortcut removed, whole %LOCALAPPDATA%\\zealfie managed app-data tree removed)"
 
       - id: side-effect-uninstall-audit
         name: Side-effect uninstall audit (owned state removed, host unchanged)
