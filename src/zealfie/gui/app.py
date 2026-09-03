@@ -23,6 +23,7 @@ from zealfie.runtime.layout import default_runtime_layout
 
 from .main_window import ZeAlfieMainWindow
 from .icon import apply_app_icon
+from .windows_identity import apply_windows_app_identity
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,20 @@ logger = logging.getLogger(__name__)
 def run_gui() -> None:
     """Composition root for the ZeAlfie product shell GUI.
 
+    - Applies the Windows AppUserModelID first (best-effort, ZA-ICON-02)
+      so the taskbar/alt-tab entry groups under the ZeAlfie identity.
     - Creates ``QApplication`` before any other Qt object.
     - Instantiates ``ZeAlfieService`` with default dependencies.
     - Creates default GitHub transports for remote product install.
     - Creates and shows ``ZeAlfieMainWindow(service=service)``.
     - Enters the Qt event loop; returns when the window closes.
     """
+    # ZA-ICON-02: Windows shell identity — set the AppUserModelID BEFORE
+    # any Qt object exists so Windows groups the taskbar/alt-tab entry
+    # under the ZeAlfie identity instead of a generic launcher icon.
+    # Best-effort: no-op on non-Windows; never raises.
+    apply_windows_app_identity()
+
     from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
@@ -46,9 +55,9 @@ def run_gui() -> None:
     # uses this icon for every top-level window/dialog that does not set
     # its own (window decorations, taskbar/alt-tab, dialogs, …).
     # Best-effort: a missing icon asset must never block GUI startup.
-    # NOTE (future Windows packager): the EXE-embedded icon and the
-    # AppUserModelID are packager concerns (see zealfie.gui.icon) and
-    # are intentionally not implemented here.
+    # NOTE (future Windows packager): the EXE-embedded icon remains a
+    # packager concern (see zealfie.gui.icon).  The AppUserModelID is
+    # applied above by ZA-ICON-02, before the QApplication exists.
     apply_app_icon(app)
 
     service = ZeAlfieService()
