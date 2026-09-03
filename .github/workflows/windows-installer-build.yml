@@ -245,11 +245,19 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
+          # Guard the Inno slash switches (/VERYSILENT ...) from Git Bash/MSYS
+          # path conversion — the same guard the silent-install step uses.
+          export MSYS2_ARG_CONV_EXCL="*"
           APP="$ZEALFIE_INSTALL_ROOT"
           UNINS="$APP/unins000.exe"
           [ -f "$UNINS" ] || { echo "FATAL: uninstaller not found: $UNINS"; exit 1; }
-          "$UNINS" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="$ZEALFIE_STAGE/logs/setup-uninstall.log"
-          rc=$?
+          # Bounded exit-code capture: set -e must not kill the script before
+          # rc=$? records the uninstaller's exit code.
+          if "$UNINS" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="$ZEALFIE_STAGE/logs/setup-uninstall.log"; then
+            rc=0
+          else
+            rc=$?
+          fi
           echo "uninstaller exit code: $rc"
           if [ "$rc" -ne 0 ]; then
             echo "FATAL: silent uninstall did not run to completion (exit code $rc)"

@@ -784,6 +784,32 @@ def test_installer_smoke_configures_stdio_utf8() -> None:
     assert main_at < call_at < parser_at
 
 
+def test_workflow_guards_native_inno_paths_from_msys_conversion() -> None:
+    """Regression (rework-8): both native Inno executions (silent install
+    and silent uninstall) must export MSYS2_ARG_CONV_EXCL before invoking
+    the tool, otherwise Git Bash mangles the slash switches into
+    C:/Program Files/Git/... and Inno falls back to interactive dialogs.
+    The uninstaller must also be invoked with a bounded exit-code capture."""
+    text = (_REPO_ROOT / ".github" / "workflows"
+            / "windows-installer-build.yml").read_text(encoding="utf-8")
+
+    def step_body(step_id: str) -> str:
+        start = text.index(f"- id: {step_id}")
+        nxt = text.find("\n      - id:", start + 1)
+        return text[start: nxt if nxt != -1 else len(text)]
+
+    install = step_body("silent-install")
+    uninstall = step_body("uninstall-witness")
+    # guard precedes each native invocation
+    assert install.index('MSYS2_ARG_CONV_EXCL="*"') < install.index('"$SETUP"')
+    assert uninstall.index('MSYS2_ARG_CONV_EXCL="*"') < uninstall.index('"$UNINS"')
+    # uninstaller runs under a bounded if ... else rc=$? capture
+    assert 'if "$UNINS" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' in uninstall
+    assert "rc=0" in uninstall
+    assert "rc=$?" in uninstall
+    assert "uninstaller exit code: $rc" in uninstall
+
+
 def test_innosetup_pin_matches_docs_and_is_6x() -> None:
     inno = tomllib.loads(_INNO_FILE.read_text(encoding="utf-8"))["innosetup"]
     assert inno["version"].startswith("6."), "must stay on the pinned 6.x line"
