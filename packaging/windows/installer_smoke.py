@@ -34,7 +34,13 @@ when every one passes):
 
 Design rules (mirror the BOOT-01 witness): stdlib-only apart from the
 sibling ``provision`` module; ``CREATE_NO_WINDOW`` for subprocesses; every
-failure printed to stderr with evidence before a non-zero exit.
+failure printed to stderr with evidence before a non-zero exit.  Output is
+encoding-deterministic: this process reconfigures its own stdout/stderr to
+UTF-8 (``_configure_stdio``) and every child python runs under
+``PYTHONIOENCODING=utf-8``/``PYTHONUTF8=1`` (``_utf8_child_env``) with
+STRICT UTF-8 decoding of the captured pipes — no silent U+FFFD
+replacement, so a Windows charmap console can never raise
+``UnicodeEncodeError`` on a Unicode diagnostic.
 """
 
 from __future__ import annotations
@@ -61,6 +67,34 @@ class SmokeError(RuntimeError):
     """An installer smoke assertion failed (fail closed)."""
 
 
+def _configure_stdio() -> None:
+    """Reconfigure this process's stdout/stderr to UTF-8.
+
+    Guarantees that ``_log``/``print`` can never raise a Windows charmap
+    ``UnicodeEncodeError`` on any Unicode diagnostic (including U+FFFD).
+    Some stream types (e.g. pytest capture) lack ``reconfigure`` — those
+    are left untouched.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def _utf8_child_env(base: dict | None = None) -> dict:
+    """A NEW dict (copy of *base* or ``os.environ``) with deterministic
+    UTF-8 child python I/O: ``PYTHONIOENCODING=utf-8`` and
+    ``PYTHONUTF8=1`` force child pythons to write UTF-8 to the captured
+    pipes, matching the parent's strict UTF-8 decode.  The input dict is
+    never mutated.
+    """
+    env = dict(os.environ if base is None else base)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def _run(argv: list[str], *, timeout_s: int = 600, **kwargs) -> subprocess.CompletedProcess:
     subprocess_kwargs = dict(kwargs)
     if sys.platform == "win32" and "creationflags" not in subprocess_kwargs:
@@ -80,7 +114,8 @@ def _probe(python_exe: Path) -> dict:
     )
     proc = _run(
         [str(python_exe), "-c", probe],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=_utf8_child_env(),
+        capture_output=True, text=True, encoding="utf-8", errors="strict",
     )
     if proc.returncode != 0:
         raise SmokeError(
@@ -179,7 +214,11 @@ def _smoke_cli(install_root: Path) -> None:
     appenv = provision.appenv_dir(install_root)
     zealfie_exe = appenv / "Scripts" / "zealfie.exe"
     for label, flag in (("--version", "--version"), ("--help", "--help")):
-        proc = _run([str(zealfie_exe), flag], capture_output=True, text=True)
+        proc = _run(
+            [str(zealfie_exe), flag],
+            env=_utf8_child_env(),
+            capture_output=True, text=True, encoding="utf-8", errors="strict",
+        )
         if proc.returncode != 0:
             raise SmokeError(
                 f"zealfie.exe {flag} failed rc={proc.returncode}\n"
@@ -190,18 +229,26 @@ def _smoke_cli(install_root: Path) -> None:
 
 
 def _smoke_gui(install_root: Path) -> None:
-    """Bounded offscreen GUI smoke through the INSTALLED appenv python."""
+    """Bounded offscreen GUI smoke through the INSTALLED appenv python.
+
+    The child runs under the deterministic UTF-8 environment
+    (``_utf8_child_env`` + ``QT_QPA_PLATFORM=offscreen``) and its captured
+    output is decoded STRICTLY as UTF-8 — the child is guaranteed to write
+    UTF-8 (PYTHONUTF8=1), so no silent U+FFFD replacement is needed and the
+    PASS line logged by the parent can never contain a character the
+    Windows console cannot encode.
+    """
     smoke_script = Path(__file__).resolve().parent / "gui_smoke_offscreen.py"
     if not smoke_script.is_file():
         raise SmokeError(f"gui smoke script missing next to installer_smoke: "
                          f"{smoke_script}")
     work_root = install_root / "logs" / "gui-smoke-work"
-    env = dict(os.environ)
+    env = _utf8_child_env()
     env["QT_QPA_PLATFORM"] = "offscreen"
     proc = _run(
         [sys.executable, str(smoke_script), "--work-root", str(work_root)],
         env=env, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout_s=600,
+        errors="strict", timeout_s=600,
     )
     if proc.returncode != 0:
         raise SmokeError(
@@ -262,6 +309,8 @@ def _smoke_offline_provenance(install_root: Path, record) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # UTF-8 stdio first: no diagnostic/PASS line may trip a charmap error.
+    _configure_stdio()
     parser = argparse.ArgumentParser(
         prog="zealfie-installer-smoke",
         description="ZeAlfie installer installed-layout smoke (ZA-WIN-BOOT-02)",

@@ -25,6 +25,7 @@ test.  No ``integration`` / ``zealfie_slow`` markers.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 import tomllib
@@ -735,6 +736,52 @@ def test_iss_every_fatal_path_routes_through_failbootstrap() -> None:
                   "CPython installer exited non-zero",
                   "appenv bootstrap exited non-zero"):
         assert token in iss, f"fatal condition missing: {token}"
+
+
+def test_installer_smoke_utf8_child_env() -> None:
+    """_utf8_child_env returns a copy with deterministic UTF-8 child I/O
+    and never mutates its input."""
+    smoke = _load_module(
+        _WINDOWS_PKG / "installer_smoke.py", "zealfie_installer_smoke"
+    )
+    base = {"A": "B", "PYTHONIOENCODING": "latin-1"}
+    env = smoke._utf8_child_env(base)
+    assert env["A"] == "B"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["PYTHONUTF8"] == "1"
+    # input untouched
+    assert base == {"A": "B", "PYTHONIOENCODING": "latin-1"}
+    assert env is not base
+    # default = copy of os.environ, not the live mapping
+    default = smoke._utf8_child_env()
+    assert default is not os.environ
+    assert default["PYTHONUTF8"] == "1"
+
+
+def test_installer_smoke_decodes_strict_utf8_no_silent_replace() -> None:
+    """The GUI smoke capture must decode STRICT UTF-8 (child forced to UTF-8
+    via PYTHONIOENCODING/PYTHONUTF8) — no silent U+FFFD replacement."""
+    source = (_WINDOWS_PKG / "installer_smoke.py").read_text(encoding="utf-8")
+    assert 'errors="strict", timeout_s=600' in source  # GUI capture
+    gui_segment = source.split("def _smoke_gui", 1)[1]
+    assert 'errors="replace"' not in gui_segment.split("def ", 1)[0]
+    assert 'encoding="utf-8"' in source
+    assert "PYTHONIOENCODING" in source and "PYTHONUTF8" in source
+    assert "_utf8_child_env" in source
+
+
+def test_installer_smoke_configures_stdio_utf8() -> None:
+    """The smoke reconfigures its own stdout/stderr to UTF-8 before any
+    output, so a Unicode PASS/diagnostic line cannot trip a Windows charmap
+    UnicodeEncodeError."""
+    source = (_WINDOWS_PKG / "installer_smoke.py").read_text(encoding="utf-8")
+    assert "def _configure_stdio" in source
+    assert 'reconfigure(encoding="utf-8")' in source
+    # main() calls _configure_stdio() before argparse parsing
+    main_at = source.index("def main(")
+    call_at = source.index("_configure_stdio()", main_at)
+    parser_at = source.index("parser = argparse.ArgumentParser", main_at)
+    assert main_at < call_at < parser_at
 
 
 def test_innosetup_pin_matches_docs_and_is_6x() -> None:
