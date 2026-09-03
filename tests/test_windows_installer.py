@@ -1534,26 +1534,35 @@ def test_iss_uninstalldelete_covers_runtime_created_appenv_and_logs() -> None:
 
 
 def test_iss_uninstalldelete_cleanup_bounded_to_owned_namespaces() -> None:
-    """(ZA-WIN-UNINSTALL-01) The uninstall deletion contract is bounded to
-    the ZeAlfie-owned namespaces: the four {app} subtree entries AND exactly
-    the whole-tree {localappdata}\\zealfie managed app-data entry.  No
-    [UninstallRun], and no entry may broaden to {localappdata} as a whole
-    or to any non-ZeAlfie path ({userprofile}/Documents/Pictures...)."""
+    """(ZA-WIN-UNINSTALL-01 r1) The uninstall deletion contract is bounded to
+    the ZeAlfie-owned namespaces: five recursive filesandordirs entries
+    (the four {app} subtrees + the whole-tree {localappdata}\\zealfie
+    managed app-data tree) PLUS one final dirifempty entry removing the
+    now-empty {app} install root itself.  No [UninstallRun], and no entry
+    may broaden to {localappdata} as a whole or to any non-ZeAlfie path
+    ({userprofile}/Documents/Pictures...)."""
     iss = _iss_text()
     # anchor on the SECTION header line (the header prose also mentions
     # [UninstallDelete]); the section body carries the deletion ENTRIES
     uninst_sec = iss.split("\n[UninstallDelete]\n", 1)[1].split("\n[Code]\n", 1)[0]
     entries = [ln.strip() for ln in uninst_sec.splitlines()
                if ln.strip().startswith("Type:")]
-    # exactly five recursive whole-tree entries: the four {app} subtrees
-    # plus the whole ZeAlfie managed app-data tree
-    assert len(entries) == 5
-    app_entries = [e for e in entries if '"{app}\\' in e]
+    # six whole entries: five filesandordirs (four {app} subtrees + the
+    # whole ZeAlfie managed app-data tree) + one dirifempty {app} entry
+    assert len(entries) == 6
+    files_entries = [e for e in entries if e.startswith("Type: filesandordirs")]
+    assert len(files_entries) == 5
+    app_entries = [e for e in files_entries if '"{app}\\' in e]
     assert len(app_entries) == 4
     for subtree in ("{app}\\appenv", "{app}\\logs",
                     "{app}\\python", "{app}\\assets"):
         assert f'Type: filesandordirs; Name: "{subtree}"' in entries, subtree
     assert 'Type: filesandordirs; Name: "{localappdata}\\zealfie"' in entries
+    # the now-empty install root is removed LAST (after the subtree
+    # deletions, so it is empty by then) and only when empty
+    assert entries[-1] == 'Type: dirifempty; Name: "{app}"'
+    assert 'Type: dirifempty; Name: "{app}"' in entries
+    assert entries.count('Type: dirifempty; Name: "{app}"') == 1
     # cleanup can never escape the ZeAlfie-owned namespace: {app}-rooted or
     # exactly the whole {localappdata}\zealfie tree — never {localappdata}
     # itself (whole), never {userprofile}/Documents/any other path

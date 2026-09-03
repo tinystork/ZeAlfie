@@ -198,6 +198,7 @@ Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\assets"
 Type: filesandordirs; Name: "{localappdata}\zealfie"
+Type: dirifempty; Name: "{app}"
 
 [Code]
 // Set True by every fatal bootstrap condition.  Inno swallows exceptions
