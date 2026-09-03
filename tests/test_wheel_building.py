@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -75,9 +76,14 @@ def test_zealfie_wheel_contains_dist_info(zealfie_wheel: Path) -> None:
     assert "zealfie" in info.dist_info_dir
 
 
-def test_zealfie_wheel_version_is_0_0_5(zealfie_wheel: Path) -> None:
+def test_zealfie_wheel_version_matches_pyproject(zealfie_wheel: Path) -> None:
+    """The real wheel's version tracks pyproject.toml [project].version."""
     info = inspect_wheel(zealfie_wheel)
-    assert info.version == "0.0.6"
+    project_root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads(
+        (project_root / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert info.version == pyproject["project"]["version"]
 
 
 def test_zealfie_wheel_has_cli_entry_point(zealfie_wheel: Path) -> None:
