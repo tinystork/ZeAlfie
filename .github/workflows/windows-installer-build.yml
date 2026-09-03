@@ -186,8 +186,12 @@ jobs:
           # verify its SHA-256 against reproducibility.toml (fail closed)
           # and extract it to $ZEALFIE_STAGE/python with stdlib tarfile —
           # the exact same provisioning code path the bootstrap witness uses.
-          python packaging/windows/provision_windows.py provision-python \
-            --witness-root "$ZEALFIE_STAGE"
+          # NOTE: --witness-root is a GLOBAL option and MUST precede the
+          # subcommand (argparse rejects it afterwards — real-run regression
+          # 33763688411, fixed in rework-2).
+          python packaging/windows/provision_windows.py \
+            --witness-root "$ZEALFIE_STAGE" \
+            provision-python
           [ -f "$ZEALFIE_STAGE/python/python.exe" ] || { echo "FATAL: staged python.exe missing"; exit 1; }
           [ -f "$ZEALFIE_STAGE/python/pythonw.exe" ] || { echo "FATAL: staged pythonw.exe missing"; exit 1; }
           echo "PYTHON_DIR=$ZEALFIE_STAGE/python" >> "$GITHUB_ENV"

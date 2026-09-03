@@ -1505,3 +1505,62 @@ def test_iss_uninstalldelete_covers_runtime_created_appenv_and_logs() -> None:
     workflow = (_REPO_ROOT / ".github" / "workflows"
                 / "windows-installer-build.yml").read_text(encoding="utf-8")
     assert "application environment not removed by uninstall" in workflow
+
+
+def test_provision_windows_parser_contract_provision_python_and_record() -> None:
+    """(Rework-2, real-run regression 33763688411) --witness-root and
+    --record are GLOBAL options defined before the subparsers; argparse
+    rejects them AFTER any subcommand.  The CLI contract is asserted with
+    the REAL parser: global-first succeeds, subcommand-first exits 2."""
+    provision_windows = _load_module(
+        _WINDOWS_PKG / "provision_windows.py",
+        "zealfie_provision_windows_r2_parser",
+    )
+    parser = provision_windows._build_parser()
+    # global --witness-root BEFORE provision-python: valid
+    args = parser.parse_args(
+        ["--witness-root", r"C:\stage", "provision-python"]
+    )
+    assert args.command == "provision-python"
+    assert str(args.witness_root).lower() == r"c:\stage"
+    # subcommand BEFORE global --witness-root: argparse exits 2
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            ["provision-python", "--witness-root", r"C:\stage"]
+        )
+    assert exc.value.code == 2
+    # global --record BEFORE provision-python: valid
+    args = parser.parse_args(
+        ["--record", r"C:\stage\reproducibility.toml", "provision-python"]
+    )
+    assert args.command == "provision-python"
+    assert str(args.record).lower() == r"c:\stage\reproducibility.toml"
+    # subcommand BEFORE global --record: argparse exits 2
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            ["provision-python", "--record", r"C:\stage\reproducibility.toml"]
+        )
+    assert exc.value.code == 2
+
+
+def test_workflow_acquire_step_orders_global_witness_root_first() -> None:
+    """(Rework-2, real-run regression 33763688411) The
+    acquire-standalone-python step must pass --witness-root BEFORE the
+    provision-python subcommand.  This test FAILED against HEAD 042a7b4,
+    whose step contained 'provision-python \\' followed by
+    '--witness-root "$ZEALFIE_STAGE"' (reversed order)."""
+    workflow = (_REPO_ROOT / ".github" / "workflows"
+                / "windows-installer-build.yml").read_text(encoding="utf-8")
+    start = workflow.index("- id: acquire-standalone-python")
+    nxt = workflow.find("\n      - id:", start + 1)
+    step = workflow[start: nxt]
+    # canonical global-before-subcommand order present
+    assert "--witness-root \"$ZEALFIE_STAGE\"" in step
+    assert "provision-python" in step
+    witness = step.index("--witness-root")
+    subcommand = step.index("provision-python")
+    assert witness < subcommand, (
+        "--witness-root must precede the provision-python subcommand"
+    )
+    # the reversed (broken) call shape must NOT be present
+    assert "provision-python \\\n            --witness-root" not in step
