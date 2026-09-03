@@ -979,6 +979,66 @@ def test_side_effect_witness_start_menu_target() -> None:
     assert any("shortcut is missing" in f for f in findings)
 
 
+def test_side_effect_witness_package_cache_uninstaller_is_ok() -> None:
+    """Regression (rework-11): the per-user CPython Apps&Features entry's
+    Burn/bootstrap uninstaller lives in %LOCALAPPDATA%\\Package Cache (NOT
+    under {app}\python).  Presence in HKCU + PythonCore InstallPath binding
+    are the assertions; the uninstall-string location must NOT be one."""
+    baseline = _baseline_snapshot()
+    snapshot = _install_snapshot(
+        uninstall_hkcu={
+            "python 3.13.15 (64-bit)": {
+                "display_name": "Python 3.13.15 (64-bit)",
+                "install_location": None,
+                "uninstall_string": (
+                    "C:\\Users\\u\\AppData\\Local\\Package Cache\\"
+                    "{5F0F1A2B-...}\\python-3.13.15-amd64.exe /uninstall"
+                ),
+            },
+            "zealfie 0.1.0": {
+                "display_name": "ZeAlfie 0.1.0",
+                "install_location": _ROOT,
+                "uninstall_string": _ROOT + "\\unins000.exe",
+            },
+        },
+    )
+    assert _SEW.verify_install_findings(baseline, snapshot, _ROOT) == []
+
+
+def test_side_effect_witness_new_hklm_cpython_entry_is_finding() -> None:
+    """Regression (rework-11): a CPython Apps&Features entry NEWLY appearing
+    in HKLM (machine scope, absent from the baseline) is forbidden."""
+    baseline = _baseline_snapshot()
+    snapshot = _install_snapshot(
+        uninstall_hklm={
+            "python 3.13.15 (64-bit)": {
+                "display_name": "Python 3.13.15 (64-bit)",
+                "install_location": r"C:\Program Files\Python313",
+                "uninstall_string": None,
+            },
+        },
+    )
+    findings = _SEW.verify_install_findings(baseline, snapshot, _ROOT)
+    assert any("NEW machine-scope CPython Apps&Features" in f
+               for f in findings)
+
+
+def test_side_effect_witness_preexisting_hklm_cpython_is_not_a_finding() -> None:
+    """Baseline-delta semantics: a machine CPython that ALREADY existed at
+    baseline (runner preinstalled) must not be flagged."""
+    preexisting = {
+        "python 3.13.5 (64-bit)": {
+            "display_name": "Python 3.13.5 (64-bit)",
+            "install_location": r"C:\Program Files\Python313",
+            "uninstall_string": None,
+        },
+    }
+    baseline = _baseline_snapshot()
+    baseline["uninstall_hklm"] = dict(preexisting)
+    snapshot = _install_snapshot(uninstall_hklm=dict(preexisting))
+    assert _SEW.verify_install_findings(baseline, snapshot, _ROOT) == []
+
+
 def test_side_effect_witness_uninstall_deltas() -> None:
     baseline = _baseline_snapshot()
     # clean post-uninstall: owned state gone, provider state kept

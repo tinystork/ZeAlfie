@@ -278,18 +278,6 @@ def capture_snapshot(
     }
 
 
-def _entry_under(entry: dict | None, root: str) -> bool:
-    """True when a uninstall entry's location/string points under *root*."""
-    if not entry:
-        return False
-    want = _win_norm(root)
-    for key in ("install_location", "uninstall_string"):
-        value = entry.get(key)
-        if value and _win_norm(value).startswith(want):
-            return True
-    return False
-
-
 def _zealfie_entries(uninstall: dict) -> dict:
     return {k: v for k, v in uninstall.items() if "zealfie" in k}
 
@@ -359,23 +347,28 @@ def verify_install_findings(
             "forbidden: NEW machine-scope PythonCore 3.13 registration: "
             + repr(snap_core_hklm)
         )
+    # Provider uninstaller registration: a per-user CPython Apps&Features
+    # entry must EXIST in HKCU.  Its Burn/bootstrap uninstall executable
+    # legitimately lives in %LOCALAPPDATA%\Package Cache (NOT under
+    # {app}\python), so only PRESENCE is asserted here; the authoritative
+    # provider->runtime binding is the PythonCore InstallPath check above.
     hkcu_cpython = _cpython_entries(snapshot.get("uninstall_hkcu", {}))
-    if not any(
-        _entry_under(entry, private_python) for entry in hkcu_cpython.values()
-    ):
+    if not hkcu_cpython:
         findings.append(
-            "expected per-user CPython Apps&Features entry pointing into "
-            "the private install is missing"
+            "expected per-user CPython Apps&Features entry is missing"
         )
+    # Machine-scope CPython: baseline delta — any CPython Apps&Features
+    # entry NEWLY appearing in HKLM is forbidden (a per-user install must
+    # never introduce machine-scope registration).
     hklm_cpython = _cpython_entries(snapshot.get("uninstall_hklm", {}))
-    machine_pollution = [
-        name for name, entry in hklm_cpython.items()
-        if _entry_under(entry, private_python)
-    ]
+    base_hklm_cpython = _cpython_entries(baseline.get("uninstall_hklm", {}))
+    machine_pollution = sorted(
+        set(hklm_cpython) - set(base_hklm_cpython)
+    )
     if machine_pollution:
         findings.append(
-            "forbidden: machine-scope CPython registration points into the "
-            "private install: " + ", ".join(sorted(machine_pollution))
+            "forbidden: NEW machine-scope CPython Apps&Features "
+            "registration: " + ", ".join(machine_pollution)
         )
 
     # C. EXPECTED ZeAlfie shell

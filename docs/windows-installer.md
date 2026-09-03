@@ -242,10 +242,13 @@ machine-scope footprint of the installer:
   (user/machine PATH unchanged; no NEW `py.exe` launcher; no NEW/changed
   `.py` association), the expected user-scoped provider state (any
   `PythonCore\3.13` registration is USER-scoped and resolves to
-  `{app}\python`; any CPython Apps&Features/Uninstall entry is user-scoped
-  and points into the private install), and the expected ZeAlfie shell
-  (Start Menu shortcut targets `{app}\appenv\Scripts\zealfie-gui.exe`;
-  ZeAlfie uninstall registration is per-user);
+  `{app}\python` — the authoritative provider→runtime binding; a
+  per-user CPython Apps&Features entry EXISTS in HKCU — its Burn/
+  bootstrap uninstaller may live in `%LOCALAPPDATA%\Package Cache`,
+  so only presence is asserted; no NEW machine-scope CPython
+  registration), and the expected ZeAlfie shell (Start Menu shortcut
+  targets `{app}\appenv\Scripts\zealfie-gui.exe`; ZeAlfie uninstall
+  registration is per-user);
 * `verify-uninstall --baseline <json> --install-root <{app}> --out <json>` —
   asserts the Start Menu shortcut and the ZeAlfie installer-owned
   registration/assets are removed, the documented private-CPython provider
@@ -267,12 +270,19 @@ manages its own bookkeeping. What it leaves OUTSIDE `{app}` (now audited on
 REAL runs by the side-effect witness above, replacing the earlier
 "to-confirm-on-real-run" flag):
 
+* per-user registry data under
+  `HKCU\Software\Python\PythonCore\3.13\InstallPath` pointing to the
+  private `{app}\python` (the authoritative provider→runtime binding,
+  registered to the current user only);
 * an **Apps & Features (Add/Remove Programs) entry** for "Python 3.13.15
-  (64-bit)" under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`
-  plus per-user registry data under `HKCU\Software\Python\PythonCore\3.13`
-  (the per-user install is registered to the current user only);
-* its own uninstall metadata pointing into `{app}\python` (the python.org
-  uninstaller is reachable from Apps & Features);
+  (64-bit)" under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall` — its
+  Burn/bootstrap uninstall executable lives in the user's
+  `%LOCALAPPDATA%\Package Cache` (NOT under `{app}\python`); this is
+  provider bookkeeping, NOT PATH/launcher/association pollution.  This
+  behaviour was established by the real Windows side-effect audit run
+  `33748966706` (the audit itself only failed because the original
+  predicate required the uninstall metadata to point under `{app}\python`);
 * **no** PATH changes (`PrependPath=0`), **no** `py` launcher
   (`Include_launcher=0`), **no** file associations (`AssociateFiles=0`),
   **no** shortcuts (`Shortcuts=0`), **no** Start Menu/registry entries of
