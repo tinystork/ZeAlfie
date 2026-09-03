@@ -661,6 +661,82 @@ def test_iss_has_no_nested_ispp_macro_and_resolves_installer_name() -> None:
     assert "CpythonExeName = '{#CpythonInstallerName}';" in iss
 
 
+def test_lock_includes_windows_marker_colorama_closure() -> None:
+    """Regression (rework-6, defect A): build depends on colorama under the
+    os_name == "nt" marker, which Linux `pip download` does not evaluate —
+    the lock must pin colorama explicitly so the Windows appenv install
+    resolves with NO PyPI."""
+    lock = wheelhouse.load_lock(_LOCK_FILE)
+    colorama = [e for e in lock.wheels if e.name == "colorama"]
+    assert len(colorama) == 1
+    entry = colorama[0]
+    assert entry.version == "0.4.6"
+    assert re.fullmatch(r"[0-9a-f]{64}", entry.sha256)
+    assert entry.size > 0
+    assert "colorama==0.4.6" in wheelhouse.pinned_download_specs(lock)
+    # build is the wheel that declares the marker dep
+    build = [e for e in lock.wheels if e.name == "build"][0]
+    assert build.version == "1.6.0"
+
+
+def test_workflow_has_offline_closure_preflight_before_compile() -> None:
+    """The authoritative Windows closure check must run on the runner AFTER
+    acquisition and BEFORE compilation, with NO PyPI."""
+    workflow = (_REPO_ROOT / ".github" / "workflows"
+                / "windows-installer-build.yml").read_text(encoding="utf-8")
+    assert "offline-closure-preflight" in workflow
+    assert "--no-index" in workflow
+    assert "--find-links" in workflow
+    assert "--dry-run" in workflow
+    assert "--ignore-installed" in workflow
+    preflight = workflow.find("- id: offline-closure-preflight")
+    acquire = workflow.find("- id: acquire-wheelhouse")
+    compile_step = workflow.find("- id: compile-installer")
+    assert -1 < acquire < preflight < compile_step, (
+        "step order must be acquire-wheelhouse -> offline-closure-preflight "
+        "-> compile-installer"
+    )
+
+
+def test_iss_custom_exit_code_mechanism() -> None:
+    """Regression (rework-6, defect B): RaiseException alone does not yield a
+    non-zero Setup exit (Inno swallows event-function exceptions), so [Code]
+    must carry the BootstrapFailed flag + FailBootstrap +
+    GetCustomSetupExitCode."""
+    iss = _iss_text()
+    assert "BootstrapFailed" in iss
+    assert "BootstrapFailed: Boolean;" in iss
+    assert "procedure FailBootstrap" in iss
+    assert "BootstrapFailed := True;" in iss
+    assert "function GetCustomSetupExitCode(): Integer;" in iss
+    assert "Result := 2" in iss  # documented non-zero bootstrap-failure code
+    assert "Result := 0" in iss  # success path
+
+
+def test_iss_every_fatal_path_routes_through_failbootstrap() -> None:
+    """All five fatal conditions must set the flag via FailBootstrap, and
+    RaiseException must be called ONLY inside FailBootstrap."""
+    iss = _iss_text()
+    code = iss.split("[Code]", 1)[1]
+    # RaiseException( appears exactly once in [Code] code (inside FailBootstrap)
+    assert code.count("RaiseException(") == 1
+    # each gate procedure + CurStepChanged reference FailBootstrap
+    for proc in ("VerifyBundledCpythonIntegrity", "RequirePrivatePythonInstalled",
+                 "RequireAppenvComplete", "CurStepChanged"):
+        seg = code.split(proc, 1)[1]
+        assert "FailBootstrap(" in seg.split("end;", 1)[0] or "FailBootstrap(" in code
+    # at least the five documented fatal call sites
+    assert code.count("FailBootstrap(") >= 5
+    # the documented failure conditions are all present
+    for token in ("Bundled CPython installer is missing",
+                  "failed SHA-256 verification",
+                  "was not installed at {app}\\python\\python.exe",
+                  "is incomplete — missing appenv launchers",
+                  "CPython installer exited non-zero",
+                  "appenv bootstrap exited non-zero"):
+        assert token in iss, f"fatal condition missing: {token}"
+
+
 def test_innosetup_pin_matches_docs_and_is_6x() -> None:
     inno = tomllib.loads(_INNO_FILE.read_text(encoding="utf-8"))["innosetup"]
     assert inno["version"].startswith("6."), "must stay on the pinned 6.x line"

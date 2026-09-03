@@ -16,13 +16,25 @@
 #       --implementation cp --abi cp313 \
 #       packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45
 #
+# Windows-marker closure note: Linux `pip download` selects Windows wheels
+# but does NOT evaluate environment markers such as `os_name == "nt"`, so
+# it would omit `colorama` (a dependency of `build`, marked os_name == "nt"
+# — the ONLY platform-marker runtime dep in this closure; setuptools'
+# marker deps are test/check/type extras only, never installed by default).
+# colorama==0.4.6 was therefore downloaded explicitly (same win_amd64/cp313
+# flags) and pinned below.  The CI `offline-closure-preflight` step
+# (windows-installer-build.yml, after acquire-wheelhouse) is the
+# AUTHORITATIVE Windows closure check: `pip install --no-index --find-links
+# --dry-run --ignore-installed <zealfie wheel>` on the Windows runner fails
+# non-zero if any dependency is absent from the staged wheelhouse.
+#
 # (the same five top-level requirements the zealfie wheel declares as its
-# runtime dependencies in pyproject.toml, so the resolved set is exactly the
-# set the appenv needs).  Every per-wheel SHA-256 below was computed from
-# the real downloaded file (sha256sum).  The zealfie wheel itself is built
-# locally at acquisition time and therefore carries NO pinned sha256 — its
-# digest is computed by the acquisition step and recorded in the CI
-# provenance artifact instead.
+# runtime dependencies in pyproject.toml).  Every per-wheel SHA-256 below
+# was computed from the real downloaded file (sha256sum).  The zealfie
+# wheel itself is built locally at acquisition time and therefore carries
+# NO pinned sha256 — its digest is computed by the acquisition step and
+# recorded in the CI provenance artifact instead.  See the "Windows-marker
+# closure note" below for why colorama is pinned explicitly.
 #
 # Acquisition re-downloads with --no-deps <name>==<version> for each pinned
 # wheel and VERIFIES filename + SHA-256 + size against this file (fail
@@ -53,7 +65,7 @@ requirements = [
   "setuptools>=77",
   "wheel>=0.45",
 ]
-pip_command = "pip download --dest <dir> --only-binary=:all: --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45"
+pip_command = "pip download --dest <dir> --only-binary=:all: --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45 ; plus colorama==0.4.6 downloaded explicitly with the same flags (Windows-only os_name=='nt' dep of build; Linux pip does not evaluate that marker). CI offline-closure-preflight (--dry-run --ignore-installed --no-index --find-links on the Windows runner) is the authoritative closure check."
 
 [zealfie]
 # The freshly-built zealfie wheel is ADDED to the wheelhouse by the
@@ -71,6 +83,15 @@ name = "build"
 version = "1.6.0"
 sha256 = "f7aaf1ebbb79178a02ba248bb524f2176b256017e17e8e4bd4289c7b38cc2bad"
 size = 31187
+
+[wheel."colorama-0.4.6-py2.py3-none-any.whl"]
+# Windows-only transitive of build (os_name == "nt" marker) — resolved on
+# Linux the marker is not evaluated, so colorama is pinned explicitly; the
+# CI offline-closure-preflight re-verifies the full Windows closure.
+name = "colorama"
+version = "0.4.6"
+sha256 = "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+size = 25335
 
 [wheel."packaging-26.3-py3-none-any.whl"]
 name = "packaging"

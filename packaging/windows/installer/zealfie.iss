@@ -22,21 +22,23 @@
 ; tests (tests/test_windows_installer.py) and by the CI workflow.
 ;
 ; Fail-closed posture:
+;   * Every fatal condition sets the [Code] BootstrapFailed flag via
+;     FailBootstrap and GetCustomSetupExitCode returns 2, so Setup exits
+;     NON-ZERO even though Inno swallows exceptions raised from event
+;     functions (RaiseException alone does not guarantee a non-zero exit).
 ;   * At ssPostInstall, before the bundled CPython installer runs, its
 ;     SHA-256 is verified in [Code] (GetSHA256OfFile) against the pinned
-;     digest — a mismatch raises an exception that aborts Setup (non-zero
-;     exit).
+;     digest — a mismatch fails the bootstrap.
 ;   * Every bootstrap child process is launched with Exec + SW_HIDE +
 ;     ewWaitUntilTerminated and its EXIT CODE is observed: the python.org
 ;     installer must return 0/3010 and the appenv bootstrap python must
-;     return 0 — any other result raises an exception (Setup aborts
-;     non-zero; the declarative [Run] section is NOT used because it never
-;     checks child exit codes).
+;     return 0 — any other result fails the bootstrap (the declarative
+;     [Run] section is NOT used because it never checks child exit codes).
 ;   * After the CPython install, {app}\python\python.exe MUST exist.
 ;   * After the offline appenv build, the four launchers
 ;     {app}\appenv\Scripts\{python.exe,pythonw.exe,zealfie.exe,
-;     zealfie-gui.exe} MUST all exist — otherwise Setup aborts.  There is
-;     never a silent fallback to a system Python.
+;     zealfie-gui.exe} MUST all exist — otherwise the bootstrap fails.
+;     There is never a silent fallback to a system Python.
 ;   * Hidden console != hidden failure: subprocesses are invisible
 ;     (SW_HIDE + CREATE_NO_WINDOW inside the Python bootstrap), but errors
 ;     surface via the Setup log, the {app}\logs files and the non-zero
@@ -150,9 +152,25 @@ const
   CpythonExeName = '{#CpythonInstallerName}';
   CpythonInstallProps = '{#CpythonInstallProperties}';
 
+// Set True by every fatal bootstrap condition.  Inno swallows exceptions
+// raised from event functions ('CurStepChanged raised an exception' in the
+// Setup log) and would otherwise still exit 0, so the flag drives
+// GetCustomSetupExitCode below to return a NON-ZERO Setup exit code.
+var
+  BootstrapFailed: Boolean;
+
+// Every fatal path funnels through here: record the failure flag, log it,
+// then raise.  RaiseException must never be called anywhere else in [Code].
+procedure FailBootstrap(const Msg: String);
+begin
+  BootstrapFailed := True;
+  Log('[zealfie] BOOTSTRAP FAILED: ' + Msg);
+  RaiseException(Msg);
+end;
+
 { Fail-closed integrity gate: the bundled CPython installer must match the
   pinned SHA-256 from packaging/windows/reproducibility.toml.  A mismatch
-  raises an exception -> Setup aborts with a non-zero exit. }
+  marks the bootstrap failed -> non-zero Setup exit. }
 procedure VerifyBundledCpythonIntegrity;
 var
   FileName: String;
@@ -161,11 +179,11 @@ begin
   FileName := ExpandConstant('{app}\assets\cpython\' + CpythonExeName);
   Log('[zealfie] verifying bundled CPython installer SHA-256: ' + FileName);
   if not FileExists(FileName) then
-    RaiseException('Bundled CPython installer is missing: ' + FileName);
+    FailBootstrap('Bundled CPython installer is missing: ' + FileName);
   Digest := LowerCase(GetSHA256OfFile(FileName));
   Log('[zealfie] bundled CPython installer SHA-256: ' + Digest);
   if Digest <> CpythonSha256 then
-    RaiseException('Bundled CPython installer failed SHA-256 verification: expected ' + CpythonSha256 + ', computed ' + Digest + '. Installation aborted (fail closed).');
+    FailBootstrap('Bundled CPython installer failed SHA-256 verification: expected ' + CpythonSha256 + ', computed ' + Digest + '. Installation aborted (fail closed).');
   Log('[zealfie] bundled CPython installer SHA-256 verified OK');
 end;
 
@@ -175,7 +193,7 @@ end;
 procedure RequirePrivatePythonInstalled;
 begin
   if not FileExists(ExpandConstant('{app}\python\python.exe')) then
-    RaiseException('The private CPython runtime was not installed at {app}\python\python.exe. Installation aborted (fail closed — no fallback to a system Python).');
+    FailBootstrap('The private CPython runtime was not installed at {app}\python\python.exe. Installation aborted (fail closed — no fallback to a system Python).');
   Log('[zealfie] private CPython present: {app}\python\python.exe');
 end;
 
@@ -195,14 +213,14 @@ begin
   if not FileExists(ExpandConstant('{app}\appenv\Scripts\zealfie-gui.exe')) then
     Missing := Missing + ' zealfie-gui.exe';
   if Missing <> '' then
-    RaiseException('The offline application environment is incomplete — missing appenv launchers:' + Missing + '. Installation aborted (fail closed).');
+    FailBootstrap('The offline application environment is incomplete — missing appenv launchers:' + Missing + '. Installation aborted (fail closed).');
   Log('[zealfie] appenv complete: python.exe, pythonw.exe, zealfie.exe, zealfie-gui.exe all present');
 end;
 
 // Run a bootstrap child process hidden (SW_HIDE), wait for it, and return
 // True ONLY when it ran AND its exit code was 0.  The declarative [Run]
 // section never observes child exit codes, so the bootstrap is driven here
-// where every failure can abort Setup (non-zero exit).
+// where every failure can set BootstrapFailed -> non-zero Setup exit.
 function RunCheckedZero(const Filename, Params, WorkingDir: String): Boolean;
 var
   ResultCode: Integer;
@@ -234,8 +252,9 @@ begin
 end;
 
 // The installer's bootstrap is executed here (after the files are in
-// place) so that every child exit code is observed and any failure aborts
-// Setup with a non-zero exit — never a silent "success" screen.
+// place) so that every child exit code is observed and any failure sets
+// BootstrapFailed -> Setup exits non-zero via GetCustomSetupExitCode —
+// never a silent "success" exit code.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   AppDir: String;
@@ -252,7 +271,7 @@ begin
          '/quiet /norestart ' + CpythonInstallProps +
          ' TargetDir="' + AppDir + '\python"' +
          ' /log "' + AppDir + '\logs\cpython-install.log"') then
-      RaiseException('The private CPython installer exited non-zero (see the Setup log and ' + AppDir + '\logs\cpython-install.log). Installation aborted (fail closed).');
+      FailBootstrap('The private CPython installer exited non-zero (see the Setup log and ' + AppDir + '\logs\cpython-install.log). Installation aborted (fail closed).');
 
     // 3) The ACTUAL installed interpreter must exist (never assumed).
     RequirePrivatePythonInstalled;
@@ -267,11 +286,24 @@ begin
          ' --witness-root "' + AppDir + '"' +
          ' make-appenv --offline-wheelhouse "' + AppDir + '\assets\wheelhouse"',
          AppDir + '\assets\bootstrap') then
-      RaiseException('The offline appenv bootstrap exited non-zero (see ' + AppDir + '\logs\appenv-pip-install.log). Installation aborted (fail closed).');
+      FailBootstrap('The offline appenv bootstrap exited non-zero (see ' + AppDir + '\logs\appenv-pip-install.log). Installation aborted (fail closed).');
 
     // 5) Completeness gate: all four appenv launchers must exist.
     RequireAppenvComplete;
 
     Log('[zealfie] offline appenv complete — ZeAlfie installed');
   end;
+end;
+
+// Non-zero Setup exit code when any bootstrap step failed.  Inno swallows
+// exceptions raised from event functions, so RaiseException alone does NOT
+// guarantee a non-zero Setup exit; the BootstrapFailed flag is the
+// authoritative failure signal.
+// 2 = ZeAlfie bootstrap failed (private CPython / offline appenv).
+function GetCustomSetupExitCode(): Integer;
+begin
+  if BootstrapFailed then
+    Result := 2
+  else
+    Result := 0;
 end;

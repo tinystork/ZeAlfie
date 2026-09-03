@@ -17,6 +17,11 @@
 #     -> build the zealfie wheel
 #     -> acquire the locked wheelhouse (pip download --no-deps, exact pins)
 #        and verify every SHA-256 against wheelhouse.lock.toml
+#     -> offline-closure preflight on the Windows runner: pip install
+#        --no-index --find-links --dry-run --ignore-installed <zealfie wheel>
+#        — the authoritative Windows closure check (evaluates os_name ==
+#        "nt" markers such as build's colorama dep) and must pass with NO
+#        PyPI before compilation
 #     -> verify the bundled CPython installer SHA-256 against
 #        reproducibility.toml (the .iss embeds the same digest; the Setup
 #        re-verifies it at install time)
@@ -146,6 +151,17 @@ jobs:
             --zealfie-wheel "$wheel" | tee "$ZEALFIE_STAGE/logs/acquire-provenance.json"
           # fail closed if the script did not report ok
           grep -q '"status": "ok"' "$ZEALFIE_STAGE/logs/acquire-provenance.json"
+
+      - id: offline-closure-preflight
+        name: Verify the offline wheelhouse closure resolves on Windows (no PyPI)
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel=$(ls "$ZEALFIE_STAGE"/zealfie-dist/zealfie-*.whl | head -n 1)
+          python -m pip install --disable-pip-version-check --no-index \
+            --find-links "$ZEALFIE_STAGE/wheelhouse" \
+            --dry-run --ignore-installed "$wheel" \
+            2>&1 | tee "$ZEALFIE_STAGE/logs/offline-closure-preflight.log"
 
       - id: verify-cpython-installer
         name: Download + verify the bundled CPython installer SHA-256
@@ -333,6 +349,7 @@ jobs:
           OUT_INNO: "${{ steps.provision-innosetup.outcome }}"
           OUT_BUILD: "${{ steps.build-wheel.outcome }}"
           OUT_ACQUIRE: "${{ steps.acquire-wheelhouse.outcome }}"
+          OUT_CLOSURE: "${{ steps.offline-closure-preflight.outcome }}"
           OUT_CPYTHON: "${{ steps.verify-cpython-installer.outcome }}"
           OUT_COMPILE: "${{ steps.compile-installer.outcome }}"
           OUT_INSTALL: "${{ steps.silent-install.outcome }}"
@@ -358,6 +375,7 @@ jobs:
             echo "| Provision Inno Setup 6.7.3 | ${OUT_INNO:-NOT REACHED} |"
             echo "| Build zealfie wheel | ${OUT_BUILD:-NOT REACHED} |"
             echo "| Acquire locked wheelhouse | ${OUT_ACQUIRE:-NOT REACHED} |"
+            echo "| Offline closure preflight | ${OUT_CLOSURE:-NOT REACHED} |"
             echo "| Verify CPython installer | ${OUT_CPYTHON:-NOT REACHED} |"
             echo "| Compile Setup.exe | ${OUT_COMPILE:-NOT REACHED} |"
             echo "| Silent install | ${OUT_INSTALL:-NOT REACHED} |"
