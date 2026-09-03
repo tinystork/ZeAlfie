@@ -485,6 +485,77 @@ def test_iss_offline_contract_and_gates_present() -> None:
         assert launcher in iss
 
 
+def test_no_pascal_brace_comment_embeds_installer_constant() -> None:
+    """Regression (rework-4): Inno Pascal `{ ... }` comments end at the first
+    `}` — a comment body embedding an installer constant like `{app}` closes
+    the comment early and the trailing text is parsed as code.  No brace
+    comment may embed an installer constant token; `{app}` inside
+    single-quoted string literals is legal and must be ignored."""
+    iss = _iss_text()
+    assert "[Code]" in iss
+    code_lines = iss.splitlines()
+    start = next(i for i, line in enumerate(code_lines)
+                 if line.strip() == "[Code]")
+    in_brace = False
+    offenders: list[str] = []
+    for abs_no in range(start + 1, len(code_lines)):
+        line = code_lines[abs_no]
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if in_brace:
+                # inside a { ... } brace comment: a constant token (the very
+                # pattern this test forbids) would end the comment at its }
+                if ch == "}":
+                    in_brace = False
+                    i += 1
+                elif ch == "{" and i + 1 < len(line) and (
+                    line[i + 1] == "#" or line[i + 1].isalpha()
+                ):
+                    offenders.append(
+                        f"line {abs_no + 1}: installer constant inside a "
+                        f"Pascal brace comment: ...{line[max(0, i - 20):i + 24]}..."
+                    )
+                    # in real Pascal the token's } would close the comment
+                    end = line.find("}", i + 1)
+                    if end != -1:
+                        in_brace = False
+                        i = end + 1
+                    else:
+                        in_brace = False
+                        i = len(line)
+                else:
+                    i += 1
+            elif ch == "'":
+                # single-quoted string literal: may legally contain {app}
+                i += 1
+                while i < len(line):
+                    if line[i] == "'":
+                        if i + 1 < len(line) and line[i + 1] == "'":
+                            i += 2  # doubled apostrophe inside the string
+                            continue
+                        i += 1
+                        break
+                    i += 1
+            elif line.startswith("//", i):
+                i = len(line)  # // line comment: nothing to scan
+            elif ch == "{":
+                in_brace = True
+                i += 1
+            else:
+                i += 1
+    assert not offenders, (
+        "Pascal brace comments must not embed installer constants:\n"
+        + "\n".join(offenders)
+    )
+    # the corrected // comment is present verbatim
+    assert "// After the silent per-user CPython install the ACTUAL interpreter must" in iss
+    assert "// exist at {app}\\python\\python.exe" in iss
+    assert not any(
+        line.lstrip().startswith("{ After the silent per-user") for line in code_lines
+    )
+
+
 def test_iss_has_no_nested_ispp_macro_and_resolves_installer_name() -> None:
     """Regression (rework-3): ISPP does NOT re-expand {#...} inside another
     #define value, so the CPython installer filename must use the string

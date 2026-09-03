@@ -177,9 +177,9 @@ begin
   Log('[zealfie] bundled CPython installer SHA-256 verified OK');
 end;
 
-{ After the silent per-user CPython install the ACTUAL interpreter must
-  exist at {app}\python\python.exe — never assumed, never a fallback to a
-  system Python. }
+// After the silent per-user CPython install the ACTUAL interpreter must
+// exist at {app}\python\python.exe — never assumed, never a fallback to a
+// system Python.
 procedure RequirePrivatePythonInstalled;
 begin
   if not FileExists(ExpandConstant('{app}\python\python.exe')) then
