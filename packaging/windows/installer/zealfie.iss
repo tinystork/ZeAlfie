@@ -53,7 +53,7 @@
 #ifndef ZeAlfieCpythonSha256
   #define ZeAlfieCpythonSha256 "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403"
 #endif
-#define CpythonInstallerName "python-{#ZeAlfieCpythonVersion}-amd64.exe"
+#define CpythonInstallerName "python-" + ZeAlfieCpythonVersion + "-amd64.exe"
 ; Silent per-user CPython install properties — order mirrors
 ; reproducibility.toml [install] (switches are added in the [Run] entry).
 #define CpythonInstallProperties "InstallAllUsers=0 PrependPath=0 Include_launcher=0 AssociateFiles=0 Shortcuts=0 Include_pip=1 Include_venv=1 Include_test=0 Include_doc=0 Include_tcltk=0"

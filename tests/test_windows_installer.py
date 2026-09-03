@@ -485,6 +485,29 @@ def test_iss_offline_contract_and_gates_present() -> None:
         assert launcher in iss
 
 
+def test_iss_has_no_nested_ispp_macro_and_resolves_installer_name() -> None:
+    """Regression (rework-3): ISPP does NOT re-expand {#...} inside another
+    #define value, so the CPython installer filename must use the string
+    concatenation idiom and no #define line may embed a literal {#."""
+    iss = _iss_text()
+    # 1) guard against the nested-macro form returning: scan every #define
+    for line in iss.splitlines():
+        if line.lstrip().startswith("#define"):
+            assert "{#" not in line, f"nested ISPP macro in: {line}"
+    # 2) the corrected concatenation form is present verbatim
+    assert ('#define CpythonInstallerName "python-" + ZeAlfieCpythonVersion'
+            ' + "-amd64.exe"') in iss
+    # 3) the + pieces resolve exactly to the pinned installer filename
+    record = tomllib.loads(_RECORD_FILE.read_text(encoding="utf-8"))
+    version = record["cpython"]["version"]
+    assert f'ZeAlfieCpythonVersion "{version}"' in iss
+    assert "".join(("python-", version, "-amd64.exe")) == (
+        f"python-{version}-amd64.exe"
+    )
+    # the define feeds both the [Run] filename and the [Code] const
+    assert "CpythonExeName = '{#CpythonInstallerName}';" in iss
+
+
 def test_innosetup_pin_matches_docs_and_is_6x() -> None:
     inno = tomllib.loads(_INNO_FILE.read_text(encoding="utf-8"))["innosetup"]
     assert inno["version"].startswith("6."), "must stay on the pinned 6.x line"
