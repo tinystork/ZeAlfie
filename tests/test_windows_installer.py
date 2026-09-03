@@ -500,3 +500,77 @@ def test_innosetup_pin_matches_docs_and_is_6x() -> None:
     doc = (_REPO_ROOT / "docs" / "windows-installer.md").read_text(encoding="utf-8")
     assert inno["version"] in doc
     assert inno["sha256"][:8] in doc
+
+
+# ---------------------------------------------------------------------------
+# Inno Setup compiler version pin (innosetup_version.py, ZA-WIN-BOOT-02 r1)
+# ---------------------------------------------------------------------------
+
+
+_IV = _load_module(
+    _WINDOWS_PKG / "innosetup_version.py", "zealfie_innosetup_version"
+)
+
+
+def test_normalize_innosetup_version_variants() -> None:
+    assert _IV.normalize_innosetup_version("6.7.3") == "6.7.3"
+    assert _IV.normalize_innosetup_version("6.7.3.0") == "6.7.3"
+    assert _IV.normalize_innosetup_version(" 6.7.3 \r\n") == "6.7.3"
+    assert _IV.normalize_innosetup_version("6.7.3 (whatever)") == "6.7.3"
+    assert _IV.normalize_innosetup_version("") == ""
+    assert _IV.normalize_innosetup_version(None) == ""
+    assert _IV.normalize_innosetup_version("garbage") == ""
+    assert _IV.normalize_innosetup_version("7.1.0") == "7.1.0"
+
+
+def test_pinned_innosetup_version_reads_real_record() -> None:
+    assert _IV.pinned_innosetup_version() == "6.7.3"
+    record = tomllib.loads(_INNO_FILE.read_text(encoding="utf-8"))
+    assert _IV.pinned_innosetup_version(_INNO_FILE) == record["innosetup"]["version"]
+
+
+def test_verify_innosetup_version_fileversion_match() -> None:
+    norm, evidence = _IV.verify_innosetup_version("6.7.3", "6.7.3", "6.7.3")
+    assert norm == "6.7.3"
+    assert evidence == "FileVersion='6.7.3'"
+
+
+def test_verify_innosetup_version_productversion_fallback() -> None:
+    # FileVersion empty/absent -> ProductVersion is used
+    norm, evidence = _IV.verify_innosetup_version("", "6.7.3.0", "6.7.3")
+    assert norm == "6.7.3"
+    assert evidence == "ProductVersion='6.7.3'"
+
+
+def test_verify_innosetup_version_fileversion_mismatch_raises() -> None:
+    with pytest.raises(_IV.InnoVersionError) as exc:
+        _IV.verify_innosetup_version("6.7.2", "6.7.3", "6.7.3")
+    assert "does not match the pinned version" in str(exc.value)
+
+
+def test_verify_innosetup_version_both_absent_raises() -> None:
+    with pytest.raises(_IV.InnoVersionError):
+        _IV.verify_innosetup_version("", None, "6.7.3")
+    with pytest.raises(_IV.InnoVersionError):
+        _IV.verify_innosetup_version(None, "garbage", "6.7.3")
+
+
+def test_verify_innosetup_version_pinned_garbage_raises() -> None:
+    with pytest.raises(_IV.InnoVersionError):
+        _IV.verify_innosetup_version("6.7.3", "6.7.3", "not-a-version")
+
+
+def test_workflow_uses_pe_version_probe_not_iscc_banner() -> None:
+    """The CI must pin the compiler via PE FileVersion/ProductVersion, never
+    via the `ISCC /?` banner (which omits the patch level)."""
+    workflow = (_REPO_ROOT / ".github" / "workflows"
+                / "windows-installer-build.yml").read_text(encoding="utf-8")
+    # the broken banner grep is gone ...
+    assert 'grep -o "6\\.7\\.3"' not in workflow
+    assert '"$ISCC" /?' not in workflow
+    # ... and the PE-resource read + Python pin verification is present
+    assert "VersionInfo.FileVersion" in workflow
+    assert "VersionInfo.ProductVersion" in workflow
+    assert "inno-compiler-version-normalized" in workflow
+    assert "import innosetup_version as iv" in workflow
+    assert "iv.verify_innosetup_version" in workflow

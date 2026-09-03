@@ -108,15 +108,28 @@ jobs:
           ISCC="$ZEALFIE_STAGE/innosetup/is/ISCC.exe"
           [ -f "$ISCC" ] || { echo "FATAL: ISCC.exe not found after install: $ISCC"; exit 1; }
           echo "ISCC=$ISCC" >> "$GITHUB_ENV"
-          # Fail closed: the compiler must report the PINNED version.
-          VERSION_PROBE="$("$ISCC" /? 2>&1 | head -n 20 | grep -o "6\.7\.3" | head -n 1 || true)"
-          echo "inno-compiler-version-probe=$VERSION_PROBE"
-          "$ISCC" /? 2>&1 | head -n 5 || true
-          if [ "$VERSION_PROBE" != "6.7.3" ]; then
-            echo "FATAL: Inno Setup compiler version mismatch — expected 6.7.3 (packaging/windows/installer/innosetup.toml)"
-            exit 1
-          fi
-          echo "inno-compiler=Inno Setup Compiler 6.7.3 (verified)" >> "$GITHUB_ENV"
+          # Fail closed: read the compiler's exact version from the PE version
+          # resource (FileVersion/ProductVersion). `ISCC /?` only prints
+          # "Inno Setup 6 Command-Line Compiler" (no patch level), so it must
+          # NOT be used to pin the version.
+          FILE_VERSION="$(powershell.exe -NoProfile -Command "(Get-Item -LiteralPath '$ISCC').VersionInfo.FileVersion" 2>/dev/null | tr -d '\r' | xargs)"
+          PRODUCT_VERSION="$(powershell.exe -NoProfile -Command "(Get-Item -LiteralPath '$ISCC').VersionInfo.ProductVersion" 2>/dev/null | tr -d '\r' | xargs)"
+          echo "inno-compiler-file-version=$FILE_VERSION"
+          echo "inno-compiler-product-version=$PRODUCT_VERSION"
+          python - "$FILE_VERSION" "$PRODUCT_VERSION" <<'PY'
+          import sys
+          sys.path.insert(0, "packaging/windows")
+          import innosetup_version as iv
+          pinned = iv.pinned_innosetup_version()
+          try:
+              norm, evidence = iv.verify_innosetup_version(sys.argv[1], sys.argv[2], pinned)
+          except iv.InnoVersionError as exc:
+              print(f"FATAL: {exc}", file=sys.stderr)
+              sys.exit(1)
+          print(f"inno-compiler-version-normalized={norm}")
+          print(f"inno-compiler-version-evidence={evidence}")
+          PY
+          echo "inno-compiler=Inno Setup Compiler (pinned version verified via PE FileVersion/ProductVersion)" >> "$GITHUB_ENV"
 
       - id: build-wheel
         name: Build the zealfie wheel
