@@ -22,19 +22,25 @@
 ; tests (tests/test_windows_installer.py) and by the CI workflow.
 ;
 ; Fail-closed posture:
-;   * Before the bundled CPython installer runs, its SHA-256 is verified in
-;     [Code] (GetSHA256OfFile) against the pinned digest — a mismatch raises
-;     an exception that aborts Setup (non-zero exit, rollback).
+;   * At ssPostInstall, before the bundled CPython installer runs, its
+;     SHA-256 is verified in [Code] (GetSHA256OfFile) against the pinned
+;     digest — a mismatch raises an exception that aborts Setup (non-zero
+;     exit).
+;   * Every bootstrap child process is launched with Exec + SW_HIDE +
+;     ewWaitUntilTerminated and its EXIT CODE is observed: the python.org
+;     installer must return 0/3010 and the appenv bootstrap python must
+;     return 0 — any other result raises an exception (Setup aborts
+;     non-zero; the declarative [Run] section is NOT used because it never
+;     checks child exit codes).
 ;   * After the CPython install, {app}\python\python.exe MUST exist.
 ;   * After the offline appenv build, the four launchers
 ;     {app}\appenv\Scripts\{python.exe,pythonw.exe,zealfie.exe,
 ;     zealfie-gui.exe} MUST all exist — otherwise Setup aborts.  There is
 ;     never a silent fallback to a system Python.
-;   * All bootstrap subprocesses run hidden (Flags: runhidden / SW_HIDE +
-;     CREATE_NO_WINDOW inside the Python bootstrap); hidden console !=
-;     hidden failure — errors surface via the Setup log, the {app}\logs
-;     files and the non-zero Setup exit code (raised exceptions become
-;     "Fatal exception during installation process" -> exit code 4).
+;   * Hidden console != hidden failure: subprocesses are invisible
+;     (SW_HIDE + CREATE_NO_WINDOW inside the Python bootstrap), but errors
+;     surface via the Setup log, the {app}\logs files and the non-zero
+;     Setup exit code.
 ;
 ; Non-goals respected: no PATH/launcher/file-association/global-shortcut
 ; pollution, no Authenticode signing, no public Release, no frozen single
@@ -55,7 +61,8 @@
 #endif
 #define CpythonInstallerName "python-" + ZeAlfieCpythonVersion + "-amd64.exe"
 ; Silent per-user CPython install properties — order mirrors
-; reproducibility.toml [install] (switches are added in the [Run] entry).
+; reproducibility.toml [install] (switches are added by the [Code]
+; ssPostInstall bootstrap).
 #define CpythonInstallProperties "InstallAllUsers=0 PrependPath=0 Include_launcher=0 AssociateFiles=0 Shortcuts=0 Include_pip=1 Include_venv=1 Include_test=0 Include_doc=0 Include_tcltk=0"
 
 ; ---- Build inputs (absolute paths supplied by the CI workflow via /D=) ----
@@ -114,7 +121,7 @@ WizardStyle=modern
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Dirs]
-; Created before the [Run] steps so the python.org installer and the
+; Created before file extraction so the python.org installer and the
 ; Python bootstrap can write their logs here (bootstrap also mkdir -p it).
 Name: "{app}\logs"
 
@@ -137,21 +144,6 @@ Source: "{#IconFile}"; DestDir: "{app}\assets"; DestName: "zealfie.ico"; Flags: 
 ; Python/PATH/CWD/source-tree dependency.
 Name: "{autoprograms}\ZeAlfie"; Filename: "{app}\appenv\Scripts\zealfie-gui.exe"; IconFilename: "{app}\assets\zealfie.ico"; WorkingDir: "{app}"; Comment: "Launch ZeAlfie"
 
-[Run]
-; 1) Verify the bundled CPython installer's SHA-256 (fail closed) and run a
-;    silent per-user install into {app}\python.  AfterInstall verifies the
-;    ACTUAL installed interpreter path before anything else continues.
-Filename: "{app}\assets\cpython\{#CpythonInstallerName}"; \
-    Parameters: "/quiet /norestart {#CpythonInstallProperties} TargetDir=""{app}\python"" /log ""{app}\logs\cpython-install.log"""; \
-    WorkingDir: "{app}"; StatusMsg: "Installing the private Python runtime..."; \
-    Flags: runhidden; BeforeInstall: VerifyBundledCpythonIntegrity; AfterInstall: RequirePrivatePythonInstalled
-; 2) Build the appenv from THAT private python and install ZeAlfie from the
-;    bundled wheelhouse ONLY (--no-index --find-links): fully offline.
-Filename: "{app}\python\python.exe"; \
-    Parameters: """{app}\assets\bootstrap\provision_windows.py"" make-appenv --witness-root ""{app}"" --offline-wheelhouse ""{app}\assets\wheelhouse"""; \
-    WorkingDir: "{app}\assets\bootstrap"; StatusMsg: "Building the offline application environment..."; \
-    Flags: runhidden logoutput; AfterInstall: RequireAppenvComplete
-
 [Code]
 const
   CpythonSha256 = '{#ZeAlfieCpythonSha256}';
@@ -160,7 +152,7 @@ const
 
 { Fail-closed integrity gate: the bundled CPython installer must match the
   pinned SHA-256 from packaging/windows/reproducibility.toml.  A mismatch
-  raises an exception -> Setup aborts (non-zero exit, rollback). }
+  raises an exception -> Setup aborts with a non-zero exit. }
 procedure VerifyBundledCpythonIntegrity;
 var
   FileName: String;
@@ -187,8 +179,8 @@ begin
   Log('[zealfie] private CPython present: {app}\python\python.exe');
 end;
 
-{ Completeness gate: the offline appenv must contain all four launchers
-  before Setup reports success. }
+// Completeness gate: the offline appenv must contain all four launchers
+// before Setup reports success.
 procedure RequireAppenvComplete;
 var
   Missing: String;
@@ -205,4 +197,81 @@ begin
   if Missing <> '' then
     RaiseException('The offline application environment is incomplete — missing appenv launchers:' + Missing + '. Installation aborted (fail closed).');
   Log('[zealfie] appenv complete: python.exe, pythonw.exe, zealfie.exe, zealfie-gui.exe all present');
+end;
+
+// Run a bootstrap child process hidden (SW_HIDE), wait for it, and return
+// True ONLY when it ran AND its exit code was 0.  The declarative [Run]
+// section never observes child exit codes, so the bootstrap is driven here
+// where every failure can abort Setup (non-zero exit).
+function RunCheckedZero(const Filename, Params, WorkingDir: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  Log('[zealfie] running hidden: ' + Filename + ' ' + Params);
+  if not Exec(Filename, Params, WorkingDir, SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
+    Log('[zealfie] failed to launch: ' + Filename);
+    Exit;
+  end;
+  Log('[zealfie] exit code ' + IntToStr(ResultCode) + ' from: ' + Filename);
+  Result := (ResultCode = 0);
+end;
+
+// Like RunCheckedZero but accepts the python.org installer's documented
+// success codes 0 and 3010 ("success, reboot advised").
+function RunCheckedCpython(const Filename, Params: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  Log('[zealfie] running hidden CPython installer: ' + Filename + ' ' + Params);
+  if not Exec(Filename, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
+    Log('[zealfie] failed to launch the CPython installer: ' + Filename);
+    Exit;
+  end;
+  Log('[zealfie] CPython installer exit code: ' + IntToStr(ResultCode));
+  Result := (ResultCode = 0) or (ResultCode = 3010);
+end;
+
+// The installer's bootstrap is executed here (after the files are in
+// place) so that every child exit code is observed and any failure aborts
+// Setup with a non-zero exit — never a silent "success" screen.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  AppDir: String;
+begin
+  if CurStep = ssPostInstall then begin
+    AppDir := ExpandConstant('{app}');
+
+    // 1) SHA-256 gate on the bundled CPython installer (fail closed).
+    VerifyBundledCpythonIntegrity;
+
+    // 2) Silent per-user install into {app}\python (0/3010 accepted).
+    if not RunCheckedCpython(
+         AppDir + '\assets\cpython\' + CpythonExeName,
+         '/quiet /norestart ' + CpythonInstallProps +
+         ' TargetDir="' + AppDir + '\python"' +
+         ' /log "' + AppDir + '\logs\cpython-install.log"') then
+      RaiseException('The private CPython installer exited non-zero (see the Setup log and ' + AppDir + '\logs\cpython-install.log). Installation aborted (fail closed).');
+
+    // 3) The ACTUAL installed interpreter must exist (never assumed).
+    RequirePrivatePythonInstalled;
+
+    // 4) Build the appenv from THAT private python, installing ZeAlfie from
+    //    the bundled wheelhouse ONLY (--no-index --find-links): offline.
+    //    NOTE: --witness-root is a global option and MUST precede the
+    //    make-appenv subcommand (argparse rejects it afterwards).
+    if not RunCheckedZero(
+         AppDir + '\python\python.exe',
+         '"' + AppDir + '\assets\bootstrap\provision_windows.py"' +
+         ' --witness-root "' + AppDir + '"' +
+         ' make-appenv --offline-wheelhouse "' + AppDir + '\assets\wheelhouse"',
+         AppDir + '\assets\bootstrap') then
+      RaiseException('The offline appenv bootstrap exited non-zero (see ' + AppDir + '\logs\appenv-pip-install.log). Installation aborted (fail closed).');
+
+    // 5) Completeness gate: all four appenv launchers must exist.
+    RequireAppenvComplete;
+
+    Log('[zealfie] offline appenv complete — ZeAlfie installed');
+  end;
 end;

@@ -485,6 +485,88 @@ def test_iss_offline_contract_and_gates_present() -> None:
         assert launcher in iss
 
 
+def test_provision_windows_argparse_global_option_before_subcommand() -> None:
+    """Regression (rework-5, defect 1): --witness-root is a GLOBAL option
+    defined before the subparsers, so argparse rejects it AFTER
+    make-appenv.  The installer must pass it before the subcommand."""
+    provision_windows = _load_module(
+        _WINDOWS_PKG / "provision_windows.py", "zealfie_provision_windows_r5"
+    )
+    parser = provision_windows._build_parser()
+    # correct order (the installer contract): global option first
+    args = parser.parse_args(
+        ["--witness-root", r"C:\app", "make-appenv",
+         "--offline-wheelhouse", r"C:\app\assets\wheelhouse"]
+    )
+    assert args.command == "make-appenv"
+    assert str(args.witness_root).lower().endswith("c:\\app") or str(
+        args.witness_root
+    ) == r"C:\app"
+    assert str(args.offline_wheelhouse) == r"C:\app\assets\wheelhouse"
+    assert args.wheel is None  # offline path derives the wheel from the wheelhouse
+    # wrong order (the r5 failure): subcommand first -> argparse exits 2
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            ["make-appenv", "--witness-root", r"C:\app",
+             "--offline-wheelhouse", r"C:\app\assets\wheelhouse"]
+        )
+    assert exc.value.code == 2
+
+
+def test_iss_bootstrap_argv_orders_witness_root_before_make_appenv() -> None:
+    """Regression (rework-5, defect 1) at the .iss level: --witness-root is
+    a global option and must precede the make-appenv subcommand."""
+    iss = _iss_text()
+    first_witness = iss.find("--witness-root")
+    first_make = iss.find("make-appenv")
+    assert first_witness != -1 and first_make != -1
+    assert first_witness < first_make, (
+        "--witness-root must precede make-appenv in the bootstrap argv"
+    )
+    assert "make-appenv --witness-root" not in iss
+
+
+def test_iss_code_checks_child_exit_codes() -> None:
+    """Regression (rework-5, defect 2): the bootstrap must observe every
+    child exit code via Exec + ewWaitUntilTerminated + ResultCode."""
+    iss = _iss_text()
+    assert "Exec(" in iss
+    assert "ewWaitUntilTerminated" in iss
+    assert "ResultCode" in iss
+    assert "(ResultCode = 0)" in iss  # RunCheckedZero success comparison
+    assert "3010" in iss  # python.org installer 'success, reboot advised'
+
+
+def test_iss_failure_couples_to_nonzero_setup_and_run_section_gone() -> None:
+    """Regression (rework-5, defect 2): a failed bootstrap must abort Setup
+    with a non-zero exit (RaiseException in CurStepChanged at ssPostInstall)
+    — the declarative [Run] section (which never checks exit codes) is gone."""
+    iss = _iss_text()
+    assert "CurStepChanged" in iss
+    assert "ssPostInstall" in iss
+    assert "RaiseException" in iss
+    assert "RunCheckedZero" in iss
+    assert "RunCheckedCpython" in iss
+    assert "SW_HIDE" in iss
+    assert not re.search(r"^\[Run\]", iss, re.M), "[Run] section must be gone"
+
+
+def test_iss_success_path_preserves_layout_and_gates() -> None:
+    """The Exec-based success path must preserve the full installer
+    contract (layout, gates, offline wheelhouse, per-user posture)."""
+    iss = _iss_text()
+    for token in ("offline-wheelhouse", "--witness-root", "{app}\\python",
+                  "{app}\\appenv", "VerifyBundledCpythonIntegrity",
+                  "GetSHA256OfFile", "RequirePrivatePythonInstalled",
+                  "RequireAppenvComplete", "PrivilegesRequired=lowest",
+                  "ArchitecturesAllowed=x64os", "zealfie.ico",
+                  "{autoprograms}", "provision_windows.py"):
+        assert token in iss, f"installer contract token missing: {token}"
+    for launcher in ("python.exe", "pythonw.exe", "zealfie.exe",
+                     "zealfie-gui.exe"):
+        assert launcher in iss
+
+
 def test_no_pascal_brace_comment_embeds_installer_constant() -> None:
     """Regression (rework-4): Inno Pascal `{ ... }` comments end at the first
     `}` — a comment body embedding an installer constant like `{app}` closes
