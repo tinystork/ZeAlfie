@@ -207,6 +207,13 @@ jobs:
           echo "SETUP=$SETUP" >> "$GITHUB_ENV"
           ls -la "$ZEALFIE_STAGE/setup-output"
 
+      - id: side-effect-baseline
+        name: Side-effect baseline (machine-scope footprint)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python packaging/windows/side_effect_witness.py baseline \
+            --out "$ZEALFIE_STAGE/setup-output/side-effect-baseline.json"
       - id: silent-install
         name: Silent install on the fresh runner (per-user, default dir)
         shell: bash
@@ -241,6 +248,15 @@ jobs:
           "$APP/appenv/Scripts/python.exe" "$APP/assets/bootstrap/installer_smoke.py" \
             --install-root "$APP"
 
+      - id: side-effect-install-audit
+        name: Side-effect install audit (PATH/launcher/associations/registry deltas)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python packaging/windows/side_effect_witness.py verify-install \
+            --baseline "$ZEALFIE_STAGE/setup-output/side-effect-baseline.json" \
+            --install-root "$ZEALFIE_INSTALL_ROOT" \
+            --out "$ZEALFIE_STAGE/setup-output/side-effect-install-audit.json"
       - id: uninstall-witness
         name: Bounded silent uninstall witness
         shell: bash
@@ -282,6 +298,15 @@ jobs:
           if [ -f "$LNK" ]; then echo "FATAL: Start Menu shortcut still present after uninstall"; exit 1; fi
           echo "uninstall witness PASS (assets removed, nested CPython state preserved, shortcut removed)"
 
+      - id: side-effect-uninstall-audit
+        name: Side-effect uninstall audit (owned state removed, provider state kept)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python packaging/windows/side_effect_witness.py verify-uninstall \
+            --baseline "$ZEALFIE_STAGE/setup-output/side-effect-baseline.json" \
+            --install-root "$ZEALFIE_INSTALL_ROOT" \
+            --out "$ZEALFIE_STAGE/setup-output/side-effect-uninstall-audit.json"
       - id: provenance
         name: Provenance + checksums
         shell: bash
@@ -366,6 +391,9 @@ jobs:
           OUT_INSTALL: "${{ steps.silent-install.outcome }}"
           OUT_SMOKE: "${{ steps.installer-smoke.outcome }}"
           OUT_UNINSTALL: "${{ steps.uninstall-witness.outcome }}"
+          OUT_SE_BASELINE: "${{ steps.side-effect-baseline.outcome }}"
+          OUT_SE_INSTALL: "${{ steps.side-effect-install-audit.outcome }}"
+          OUT_SE_UNINSTALL: "${{ steps.side-effect-uninstall-audit.outcome }}"
         run: |
           {
             echo "## ZeAlfie Windows installer build (ZA-WIN-BOOT-02)"
@@ -392,4 +420,7 @@ jobs:
             echo "| Silent install | ${OUT_INSTALL:-NOT REACHED} |"
             echo "| Installer smoke | ${OUT_SMOKE:-NOT REACHED} |"
             echo "| Uninstall witness | ${OUT_UNINSTALL:-NOT REACHED} |"
+            echo "| Side-effect baseline | ${OUT_SE_BASELINE:-NOT REACHED} |"
+            echo "| Side-effect install audit | ${OUT_SE_INSTALL:-NOT REACHED} |"
+            echo "| Side-effect uninstall audit | ${OUT_SE_UNINSTALL:-NOT REACHED} |"
           } >> "$GITHUB_STEP_SUMMARY"

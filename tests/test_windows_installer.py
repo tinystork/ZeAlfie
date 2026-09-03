@@ -857,6 +857,174 @@ def test_workflow_acquire_writes_pure_json_provenance_file() -> None:
     assert "tee \"$ZEALFIE_STAGE/logs/acquire-provenance.json\"" not in step
 
 
+_SEW = _load_module(
+    _WINDOWS_PKG / "side_effect_witness.py", "zealfie_side_effect_witness"
+)
+
+_ROOT = r"C:\Users\u\AppData\Local\Programs\ZeAlfie"
+
+
+def _baseline_snapshot() -> dict:
+    return {
+        "schema": 1,
+        "user_path": ["c:\\windows\\system32"],
+        "machine_path": ["c:\\windows\\system32"],
+        "py_launcher_path": None,
+        "py_association_progid": None,
+        "pythoncore_3_13_hkcu_install_path": None,
+        "pythoncore_3_13_hklm_install_path": None,
+        "uninstall_hkcu": {},
+        "uninstall_hklm": {},
+        "start_menu_shortcut_exists": False,
+        "start_menu_shortcut_target": None,
+        "runtime_exists": False,
+    }
+
+
+def _install_snapshot(root: str = _ROOT, **overrides) -> dict:
+    snap = {
+        "schema": 1,
+        "user_path": ["c:\\windows\\system32"],
+        "machine_path": ["c:\\windows\\system32"],
+        "py_launcher_path": None,
+        "py_association_progid": None,
+        "pythoncore_3_13_hkcu_install_path": root + "\\python",
+        "pythoncore_3_13_hklm_install_path": None,
+        "uninstall_hkcu": {
+            "python 3.13.15 (64-bit)": {
+                "display_name": "Python 3.13.15 (64-bit)",
+                "install_location": root + "\\python",
+                "uninstall_string": root + "\\python\\uninstall.exe",
+            },
+            "zealfie 0.1.0": {
+                "display_name": "ZeAlfie 0.1.0",
+                "install_location": root,
+                "uninstall_string": root + "\\unins000.exe",
+            },
+        },
+        "uninstall_hklm": {},
+        "start_menu_shortcut_exists": True,
+        "start_menu_shortcut_target": (
+            root + "\\appenv\\Scripts\\zealfie-gui.exe"
+        ),
+        "runtime_exists": False,
+    }
+    snap.update(overrides)
+    return snap
+
+
+def test_side_effect_witness_clean_install_has_no_findings() -> None:
+    baseline = _baseline_snapshot()
+    snapshot = _install_snapshot()
+    assert _SEW.verify_install_findings(baseline, snapshot, _ROOT) == []
+
+
+def test_side_effect_witness_path_changes_are_findings() -> None:
+    baseline = _baseline_snapshot()
+    # user PATH changed
+    snapshot = _install_snapshot(user_path=["c:\\windows\\system32",
+                                            "c:\\evil"])
+    findings = _SEW.verify_install_findings(baseline, snapshot, _ROOT)
+    assert any("user PATH" in f for f in findings)
+    # machine PATH changed
+    snapshot = _install_snapshot(machine_path=["c:\\other"])
+    findings = _SEW.verify_install_findings(baseline, snapshot, _ROOT)
+    assert any("machine PATH" in f for f in findings)
+
+
+def test_side_effect_witness_new_py_launcher_and_association() -> None:
+    baseline = _baseline_snapshot()
+    snap = _install_snapshot(
+        py_launcher_path="C:\\Users\\u\\AppData\\Local\\Programs\\Python\\"
+                        "Launcher\\py.exe"
+    )
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any("py.exe launcher" in f for f in findings)
+
+    snap = _install_snapshot(py_association_progid="Python.File")
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any(".py file association" in f for f in findings)
+
+
+def test_side_effect_witness_user_pythoncore_and_machine_scope() -> None:
+    baseline = _baseline_snapshot()
+    # user-scoped PythonCore resolving to {app}\python is EXPECTED, not pollution
+    snap = _install_snapshot()
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert not any("PythonCore" in f for f in findings)
+    # wrong resolution IS a finding
+    snap = _install_snapshot(pythoncore_3_13_hkcu_install_path=r"C:\elsewhere")
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any("does not resolve" in f for f in findings)
+    # NEW machine-scope registration is forbidden
+    snap = _install_snapshot(
+        pythoncore_3_13_hklm_install_path=r"C:\Program Files\Python313"
+    )
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any("machine-scope PythonCore" in f for f in findings)
+
+
+def test_side_effect_witness_start_menu_target() -> None:
+    baseline = _baseline_snapshot()
+    # correct appenv target -> no finding; wrong target -> finding
+    snap = _install_snapshot()
+    assert _SEW.verify_install_findings(baseline, snap, _ROOT) == []
+    snap = _install_snapshot(
+        start_menu_shortcut_target=r"C:\Windows\System32\python.exe"
+    )
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any("shortcut target" in f for f in findings)
+    snap = _install_snapshot(start_menu_shortcut_exists=False)
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any("shortcut is missing" in f for f in findings)
+
+
+def test_side_effect_witness_uninstall_deltas() -> None:
+    baseline = _baseline_snapshot()
+    # clean post-uninstall: owned state gone, provider state kept
+    snap = _install_snapshot(
+        start_menu_shortcut_exists=False,
+        start_menu_shortcut_target=None,
+        uninstall_hkcu={"python 3.13.15 (64-bit)": {
+            "display_name": "Python 3.13.15 (64-bit)",
+            "install_location": _ROOT + "\\python",
+            "uninstall_string": _ROOT + "\\python\\uninstall.exe",
+        }},
+        owned_assets=False,
+        private_python_exists=True,
+    )
+    assert _SEW.verify_uninstall_findings(baseline, snap, _ROOT) == []
+    # shortcut still present -> finding
+    snap2 = dict(snap, start_menu_shortcut_exists=True)
+    assert any("shortcut still present" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap2, _ROOT))
+    # asset still present -> finding
+    snap3 = dict(snap, owned_assets=True)
+    assert any("asset still present" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap3, _ROOT))
+    # private CPython removed -> finding (documented preservation violated)
+    snap4 = dict(snap, private_python_exists=False)
+    assert any("private CPython unexpectedly removed" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap4, _ROOT))
+    # shared runtime touched -> finding
+    snap5 = dict(snap, runtime_exists=True)
+    assert any("runtime" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap5, _ROOT))
+
+
+def test_workflow_side_effect_steps_present_in_order() -> None:
+    text = (_REPO_ROOT / ".github" / "workflows"
+            / "windows-installer-build.yml").read_text(encoding="utf-8")
+    ids = ["side-effect-baseline", "silent-install", "installer-smoke",
+           "side-effect-install-audit", "uninstall-witness",
+           "side-effect-uninstall-audit", "provenance"]
+    positions = [text.index("- id: " + sid) for sid in ids]
+    assert positions == sorted(positions), "side-effect step order broken"
+    assert "side-effect-baseline.json" in text
+    assert "side-effect-install-audit.json" in text
+    assert "side-effect-uninstall-audit.json" in text
+
+
 def test_innosetup_pin_matches_docs_and_is_6x() -> None:
     inno = tomllib.loads(_INNO_FILE.read_text(encoding="utf-8"))["innosetup"]
     assert inno["version"].startswith("6."), "must stay on the pinned 6.x line"
