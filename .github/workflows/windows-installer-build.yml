@@ -148,8 +148,10 @@ jobs:
           wheel=$(ls "$ZEALFIE_STAGE"/zealfie-dist/zealfie-*.whl | head -n 1)
           python packaging/windows/acquire_wheelhouse.py \
             --dest "$ZEALFIE_STAGE/wheelhouse" \
-            --zealfie-wheel "$wheel" | tee "$ZEALFIE_STAGE/logs/acquire-provenance.json"
-          # fail closed if the script did not report ok
+            --zealfie-wheel "$wheel" \
+            --provenance-out "$ZEALFIE_STAGE/logs/acquire-provenance.json" \
+            2>&1 | tee "$ZEALFIE_STAGE/logs/acquire.log"
+          # fail closed if the provenance file does not report ok
           grep -q '"status": "ok"' "$ZEALFIE_STAGE/logs/acquire-provenance.json"
 
       - id: offline-closure-preflight
@@ -293,13 +295,14 @@ jobs:
           echo "setup size:   $SIZE"
           echo "SETUP_SHA=$SHA" >> "$GITHUB_ENV"
           echo "SETUP_SIZE=$SIZE" >> "$GITHUB_ENV"
-          python - <<'PY'
+          # GITHUB_ENV is not visible within the current step, so the SHA/size
+          # are ALSO passed directly to this step's Python via the environment.
+          SETUP_SHA="$SHA" SETUP_SIZE="$SIZE" python - <<'PY'
           import json, os
-          wheel = {}
-          try:
-              wheel = json.load(open(os.path.join(os.environ["ZEALFIE_STAGE"], "logs", "acquire-provenance.json")))
-          except Exception:
-              wheel = {"status": "unavailable"}
+          with open(os.path.join(os.environ["ZEALFIE_STAGE"], "logs",
+                                 "acquire-provenance.json"),
+                    encoding="utf-8") as fh:
+              wheel = json.load(fh)
           prov = {
               "artifact": "ZeAlfie-Setup-0.1.0-dev.exe",
               "zealfie_version": "0.1.0",
@@ -307,8 +310,8 @@ jobs:
               "inno_setup": "6.7.3 (pinned, packaging/windows/installer/innosetup.toml)",
               "cpython": "3.13.15 (sha256 edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403)",
               "install": "per-user, offline (bundled wheelhouse, pip --no-index --find-links), no PATH/launcher/associations",
-              "setup_sha256": os.environ.get("SETUP_SHA", ""),
-              "setup_size": int(os.environ.get("SETUP_SIZE", "0")),
+              "setup_sha256": os.environ["SETUP_SHA"],
+              "setup_size": int(os.environ["SETUP_SIZE"]),
               "wheelhouse": wheel,
           }
           out = os.path.join(os.environ["ZEALFIE_STAGE"], "setup-output", "provenance.json")

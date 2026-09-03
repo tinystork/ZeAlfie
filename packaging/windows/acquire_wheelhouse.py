@@ -135,6 +135,22 @@ def step_add_zealfie_wheel(
     return digest
 
 
+def _write_provenance(summary: dict, out_path: Path | None) -> None:
+    """Emit the machine-readable provenance summary.
+
+    With ``out_path``: writes PURE JSON (no ``[acquire]`` prefix) to that
+    file (creating parents); without it: prints the JSON to stdout
+    (backward-compatible with the historical console-only behaviour).
+    """
+    payload = json.dumps(summary, indent=2)
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(payload + "\n")
+    else:
+        print(payload)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python packaging/windows/acquire_wheelhouse.py",
@@ -146,6 +162,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="output wheelhouse directory (created if absent)")
     parser.add_argument("--zealfie-wheel", type=Path, required=True,
                         help="freshly-built zealfie wheel to add")
+    parser.add_argument(
+        "--provenance-out", type=Path, default=None,
+        help="write the machine-readable provenance summary (pure JSON) to "
+             "this file instead of stdout (stdout stays human console log)",
+    )
     args = parser.parse_args(argv)
 
     lock_path = args.lock or wheelhouse_lock.default_lock_path()
@@ -171,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     zealfie_size = (staging / lock.zealfie_wheel.filename).stat().st_size
-    print(json.dumps({
+    provenance_summary = {
         "status": "ok",
         "zealfie_version": lock.zealfie_version,
         "source_commit": lock.source_commit,
@@ -183,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
             "size": zealfie_size,
         },
         "wheelhouse": str(staging.resolve()),
-    }, indent=2))
+    }
+    _write_provenance(provenance_summary, args.provenance_out)
     return 0
 
 

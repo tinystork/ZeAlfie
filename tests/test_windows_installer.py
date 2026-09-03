@@ -25,6 +25,7 @@ test.  No ``integration`` / ``zealfie_slow`` markers.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -808,6 +809,52 @@ def test_workflow_guards_native_inno_paths_from_msys_conversion() -> None:
     assert "rc=0" in uninstall
     assert "rc=$?" in uninstall
     assert "uninstaller exit code: $rc" in uninstall
+
+
+def test_acquire_wheelhouse_provenance_out_writes_pure_json(tmp_path: Path) -> None:
+    """--provenance-out must produce a PURE-JSON file (round-trip through
+    json.loads, no [acquire] console prefix)."""
+    acquire = _load_module(
+        _WINDOWS_PKG / "acquire_wheelhouse.py", "zealfie_acquire_wheelhouse"
+    )
+    out = tmp_path / "nested" / "provenance.json"
+    acquire._write_provenance({"status": "ok", "a": 1}, out)
+    assert out.is_file()
+    assert json.loads(out.read_text(encoding="utf-8")) == {"status": "ok", "a": 1}
+    assert "[acquire]" not in out.read_text(encoding="utf-8")
+    source = (_WINDOWS_PKG / "acquire_wheelhouse.py").read_text(encoding="utf-8")
+    assert "--provenance-out" in source
+
+
+def test_workflow_provenance_fails_closed_and_passes_sha_size_directly() -> None:
+    """The provenance step must fail closed (no 'unavailable' fallback) and
+    receive SETUP_SHA/SETUP_SIZE directly (GITHUB_ENV is not visible within
+    the same step)."""
+    text = (_REPO_ROOT / ".github" / "workflows"
+            / "windows-installer-build.yml").read_text(encoding="utf-8")
+    start = text.index("- id: provenance")
+    nxt = text.find("\n      - id:", start + 1)
+    step = text[start: nxt]
+    assert 'SETUP_SHA="$SHA" SETUP_SIZE="$SIZE" python' in step
+    assert '"setup_sha256": os.environ["SETUP_SHA"]' in step
+    assert '"setup_size": int(os.environ["SETUP_SIZE"])' in step
+    assert "json.load(fh)" in step
+    assert '"status": "unavailable"' not in step
+    assert 'os.environ.get("GITHUB_SHA", "")' in step  # top-level source_commit
+
+
+def test_workflow_acquire_writes_pure_json_provenance_file() -> None:
+    """The acquire step must write the JSON provenance to its own file and
+    tee only the human console log to acquire.log."""
+    text = (_REPO_ROOT / ".github" / "workflows"
+            / "windows-installer-build.yml").read_text(encoding="utf-8")
+    start = text.index("- id: acquire-wheelhouse")
+    nxt = text.find("\n      - id:", start + 1)
+    step = text[start: nxt]
+    assert "--provenance-out" in step
+    assert "acquire-provenance.json" in step
+    assert 'tee "$ZEALFIE_STAGE/logs/acquire.log"' in step
+    assert "tee \"$ZEALFIE_STAGE/logs/acquire-provenance.json\"" not in step
 
 
 def test_innosetup_pin_matches_docs_and_is_6x() -> None:
