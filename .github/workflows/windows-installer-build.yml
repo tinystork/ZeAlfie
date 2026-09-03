@@ -1,0 +1,358 @@
+# ZeAlfie Windows standalone INSTALLER build — bounded CI witness (ZA-WIN-BOOT-02).
+#
+# Builds the REAL native Windows installer ZeAlfie-Setup-<version>-dev.exe
+# (Inno Setup 6.7.3, pinned) that turns a normal user machine into the
+# proven ZA-WIN-BOOT-01 layout (private pinned CPython 3.13.15 -> appenv ->
+# ZeAlfie) WITHOUT freezing the app (no PyInstaller/Nuitka) and with a FULLY
+# OFFLINE user install (bundled SHA-256-locked wheelhouse, pip
+# --no-index --find-links, no PyPI on the user machine).
+#
+# Triggers: workflow_dispatch AND push on the feature branch (a push
+# trigger is part of the design — not an afterthought bootstrap).
+#
+# Sequence (every step must succeed on its own; fail closed):
+#   checkout
+#     -> provision + verify the PINNED Inno Setup compiler (exact version
+#        logged BEFORE compilation; absent/different = job failure)
+#     -> build the zealfie wheel
+#     -> acquire the locked wheelhouse (pip download --no-deps, exact pins)
+#        and verify every SHA-256 against wheelhouse.lock.toml
+#     -> verify the bundled CPython installer SHA-256 against
+#        reproducibility.toml (the .iss embeds the same digest; the Setup
+#        re-verifies it at install time)
+#     -> compile packaging/windows/installer/zealfie.iss
+#     -> SILENT install on the fresh runner (per-user, {localappdata}\Programs\ZeAlfie)
+#     -> installer install/provenance smoke from the INSTALLED appenv
+#        (layout + provenance + CLI + offscreen GUI + offline pip evidence)
+#     -> bounded silent uninstall witness (unins000.exe /VERYSILENT)
+#     -> upload ZeAlfie-Setup*.exe + SHA-256 + provenance.json as an
+#        Actions ARTIFACT (never a Release)
+#
+# No release, no tag, no signing, no secrets.  The existing shared runtime
+# (%LOCALAPPDATA%\zealfie\runtime) is never touched by the installer, and
+# the CI never creates one (the GUI smoke uses a throwaway runtime root).
+#
+# Action majors pinned at implementation time (2026-09-03):
+#   actions/checkout        -> v7.0.1 (3d3c42e5aac5ba805825da76410c181273ba90b1)
+#   actions/setup-python    -> v7.0.0 (5fda3b95a4ea91299a34e894583c3862153e4b97)
+#   actions/upload-artifact -> v7.0.1 (043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+name: "windows installer build"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-standalone-bootstrap
+
+permissions:
+  contents: read
+
+jobs:
+  windows-installer-build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - id: stage
+        name: Define build staging paths
+        shell: bash
+        run: |
+          echo "ZEALFIE_STAGE=$RUNNER_TEMP/zealfie-installer-build" >> "$GITHUB_ENV"
+          echo "ZEALFIE_INSTALL_ROOT=$LOCALAPPDATA/Programs/ZeAlfie" >> "$GITHUB_ENV"
+
+      - id: checkout
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: setup-python
+        name: Setup driver Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - id: host-identity
+        name: Host identity
+        shell: bash
+        run: |
+          uname -a || true
+          python --version
+          python -c "import platform; print(platform.platform())"
+          echo "runner.os=${{ runner.os }} runner.arch=${{ runner.arch }}"
+          mkdir -p "$ZEALFIE_STAGE"/{innosetup,zealfie-dist,wheelhouse,cpython,setup-output,logs}
+
+      - id: provision-innosetup
+        name: Provision pinned Inno Setup 6.7.3 (download + SHA-256 verify + silent install)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # git-bash would otherwise mangle slash-prefixed tool arguments
+          export MSYS2_ARG_CONV_EXCL="*"
+          python - "$ZEALFIE_STAGE/innosetup" <<'PY'
+          import hashlib, os, sys, tomllib, urllib.request
+          from pathlib import Path
+          stage = Path(sys.argv[1])
+          record = tomllib.load(open("packaging/windows/installer/innosetup.toml", "rb"))["innosetup"]
+          target = stage / record["installer_filename"]
+          if not target.is_file():
+              print(f"[inno] downloading {record['installer_url']}")
+              urllib.request.urlretrieve(record["installer_url"], target)
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          print(f"[inno] downloaded {target.name} ({target.stat().st_size} bytes)")
+          print(f"[inno] sha256 {digest}")
+          if digest != record["sha256"]:
+              raise SystemExit(f"FATAL: Inno Setup installer SHA-256 mismatch: expected {record['sha256']}, got {digest}")
+          print(f"[inno] SHA-256 verified against packaging/windows/installer/innosetup.toml")
+          PY
+          # Silent per-user install into the staging area (no admin needed).
+          "$ZEALFIE_STAGE/innosetup/innosetup-6.7.3.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER "/DIR=$ZEALFIE_STAGE/innosetup/is" >/dev/null 2>&1 || { echo "FATAL: Inno Setup installer failed"; exit 1; }
+          ISCC="$ZEALFIE_STAGE/innosetup/is/ISCC.exe"
+          [ -f "$ISCC" ] || { echo "FATAL: ISCC.exe not found after install: $ISCC"; exit 1; }
+          echo "ISCC=$ISCC" >> "$GITHUB_ENV"
+          # Fail closed: the compiler must report the PINNED version.
+          VERSION_PROBE="$("$ISCC" /? 2>&1 | head -n 20 | grep -o "6\.7\.3" | head -n 1 || true)"
+          echo "inno-compiler-version-probe=$VERSION_PROBE"
+          "$ISCC" /? 2>&1 | head -n 5 || true
+          if [ "$VERSION_PROBE" != "6.7.3" ]; then
+            echo "FATAL: Inno Setup compiler version mismatch — expected 6.7.3 (packaging/windows/installer/innosetup.toml)"
+            exit 1
+          fi
+          echo "inno-compiler=Inno Setup Compiler 6.7.3 (verified)" >> "$GITHUB_ENV"
+
+      - id: build-wheel
+        name: Build the zealfie wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet build
+          python -m build --wheel --outdir "$ZEALFIE_STAGE/zealfie-dist"
+          ls -la "$ZEALFIE_STAGE/zealfie-dist"
+
+      - id: acquire-wheelhouse
+        name: Acquire the locked offline wheelhouse (download exact pins + verify SHA-256)
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel=$(ls "$ZEALFIE_STAGE"/zealfie-dist/zealfie-*.whl | head -n 1)
+          python packaging/windows/acquire_wheelhouse.py \
+            --dest "$ZEALFIE_STAGE/wheelhouse" \
+            --zealfie-wheel "$wheel" | tee "$ZEALFIE_STAGE/logs/acquire-provenance.json"
+          # fail closed if the script did not report ok
+          grep -q '"status": "ok"' "$ZEALFIE_STAGE/logs/acquire-provenance.json"
+
+      - id: verify-cpython-installer
+        name: Download + verify the bundled CPython installer SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "$ZEALFIE_STAGE/cpython" <<'PY'
+          import hashlib, sys, tomllib, urllib.request
+          from pathlib import Path
+          outdir = Path(sys.argv[1])
+          record = tomllib.load(open("packaging/windows/reproducibility.toml", "rb"))
+          cpy = record["cpython"]
+          target = outdir / cpy["installer_filename"]
+          if not target.is_file():
+              print(f"[cpython] downloading {cpy['installer_url']}")
+              urllib.request.urlretrieve(cpy["installer_url"], target)
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          print(f"[cpython] {target.name} ({target.stat().st_size} bytes) sha256 {digest}")
+          if digest != cpy["sha256"]:
+              raise SystemExit(f"FATAL: CPython installer SHA-256 mismatch: expected {cpy['sha256']}, got {digest}")
+          print("[cpython] SHA-256 verified against packaging/windows/reproducibility.toml")
+          PY
+          echo "CPYTHON_INSTALLER=$(ls "$ZEALFIE_STAGE"/cpython/python-3.13.15-amd64.exe)" >> "$GITHUB_ENV"
+
+      - id: compile-installer
+        name: Compile ZeAlfie-Setup.exe (Inno Setup 6.7.3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MSYS2_ARG_CONV_EXCL="*"
+          mkdir -p "$ZEALFIE_STAGE/setup-output"
+          "$ISCC" \
+            "/DCpythonInstaller=$CPYTHON_INSTALLER" \
+            "/DWheelhouseDir=$ZEALFIE_STAGE/wheelhouse" \
+            "/DBootstrapDir=${GITHUB_WORKSPACE}/packaging/windows" \
+            "/DIconFile=${GITHUB_WORKSPACE}/src/zealfie/icon/zealfie.ico" \
+            "/DOutputDir=$ZEALFIE_STAGE/setup-output" \
+            "${GITHUB_WORKSPACE}/packaging/windows/installer/zealfie.iss" 2>&1 | tee "$ZEALFIE_STAGE/logs/iscc-compile.log"
+          SETUP="$ZEALFIE_STAGE/setup-output/ZeAlfie-Setup-0.1.0-dev.exe"
+          [ -f "$SETUP" ] || { echo "FATAL: Setup.exe not produced"; exit 1; }
+          echo "SETUP=$SETUP" >> "$GITHUB_ENV"
+          ls -la "$ZEALFIE_STAGE/setup-output"
+
+      - id: silent-install
+        name: Silent install on the fresh runner (per-user, default dir)
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          export MSYS2_ARG_CONV_EXCL="*"
+          "$SETUP" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="$ZEALFIE_STAGE/logs/setup-install.log"
+          rc=$?
+          echo "setup.exe exit code: $rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "FATAL: silent install did not run to completion (exit code $rc)"
+            exit 1
+          fi
+          echo "=== installed layout (top level) ==="
+          ls -la "$ZEALFIE_INSTALL_ROOT"
+          echo "=== assets ==="
+          ls -la "$ZEALFIE_INSTALL_ROOT/assets" || true
+
+      - id: installer-smoke
+        name: Installer smoke (installed layout + provenance + CLI + offscreen GUI + offline evidence)
+        shell: bash
+        timeout-minutes: 15
+        env:
+          QT_QPA_PLATFORM: "offscreen"
+        run: |
+          set -euo pipefail
+          APP="$ZEALFIE_INSTALL_ROOT"
+          [ -f "$APP/python/python.exe" ]
+          [ -f "$APP/appenv/Scripts/python.exe" ]
+          [ -f "$APP/appenv/Scripts/pythonw.exe" ]
+          "$APP/appenv/Scripts/python.exe" "$APP/assets/bootstrap/installer_smoke.py" \
+            --install-root "$APP"
+
+      - id: uninstall-witness
+        name: Bounded silent uninstall witness
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          APP="$ZEALFIE_INSTALL_ROOT"
+          UNINS="$APP/unins000.exe"
+          [ -f "$UNINS" ] || { echo "FATAL: uninstaller not found: $UNINS"; exit 1; }
+          "$UNINS" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="$ZEALFIE_STAGE/logs/setup-uninstall.log"
+          rc=$?
+          echo "uninstaller exit code: $rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "FATAL: silent uninstall did not run to completion (exit code $rc)"
+            exit 1
+          fi
+          # Wait for the uninstaller clone to finish deleting itself (bounded).
+          for i in $(seq 1 60); do
+            [ ! -f "$UNINS" ] && break
+            sleep 1
+          done
+          # Installer-owned assets must be gone; the nested CPython install is
+          # intentionally left in place (documented platform-provider state).
+          if [ -f "$APP/assets/zealfie.ico" ]; then
+            echo "FATAL: installer-owned asset still present after uninstall: $APP/assets/zealfie.ico"
+            exit 1
+          fi
+          [ -f "$APP/python/python.exe" ] || { echo "FATAL: private CPython unexpectedly removed by uninstall"; exit 1; }
+          # Start Menu shortcut removed by the uninstaller.
+          LNK="$APPDATA/Microsoft/Windows/Start Menu/Programs/ZeAlfie.lnk"
+          if [ -f "$LNK" ]; then echo "FATAL: Start Menu shortcut still present after uninstall"; exit 1; fi
+          echo "uninstall witness PASS (assets removed, nested CPython state preserved, shortcut removed)"
+
+      - id: provenance
+        name: Provenance + checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          SETUP="$ZEALFIE_STAGE/setup-output/ZeAlfie-Setup-0.1.0-dev.exe"
+          SHA=$(python -c "import hashlib;print(hashlib.sha256(open(r'$SETUP','rb').read()).hexdigest())")
+          SIZE=$(stat -c %s "$SETUP")
+          echo "$SHA  ZeAlfie-Setup-0.1.0-dev.exe" > "$ZEALFIE_STAGE/setup-output/ZeAlfie-Setup-0.1.0-dev.exe.sha256"
+          echo "setup sha256: $SHA"
+          echo "setup size:   $SIZE"
+          echo "SETUP_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "SETUP_SIZE=$SIZE" >> "$GITHUB_ENV"
+          python - <<'PY'
+          import json, os
+          wheel = {}
+          try:
+              wheel = json.load(open(os.path.join(os.environ["ZEALFIE_STAGE"], "logs", "acquire-provenance.json")))
+          except Exception:
+              wheel = {"status": "unavailable"}
+          prov = {
+              "artifact": "ZeAlfie-Setup-0.1.0-dev.exe",
+              "zealfie_version": "0.1.0",
+              "source_commit": os.environ.get("GITHUB_SHA", ""),
+              "inno_setup": "6.7.3 (pinned, packaging/windows/installer/innosetup.toml)",
+              "cpython": "3.13.15 (sha256 edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403)",
+              "install": "per-user, offline (bundled wheelhouse, pip --no-index --find-links), no PATH/launcher/associations",
+              "setup_sha256": os.environ.get("SETUP_SHA", ""),
+              "setup_size": int(os.environ.get("SETUP_SIZE", "0")),
+              "wheelhouse": wheel,
+          }
+          out = os.path.join(os.environ["ZEALFIE_STAGE"], "setup-output", "provenance.json")
+          with open(out, "w", encoding="utf-8") as fh:
+              json.dump(prov, fh, indent=2)
+          print("provenance written:", out)
+          PY
+
+      - id: upload-artifacts
+        name: Upload Setup.exe + SHA-256 + provenance as an ARTIFACT
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zealfie-setup-0.1.0-dev
+          path: |
+            ${{ runner.temp }}/zealfie-installer-build/setup-output/*
+            ${{ runner.temp }}/zealfie-installer-build/logs/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - id: diagnostics
+        name: Failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== install root ==="
+          ls -laR "$ZEALFIE_INSTALL_ROOT" 2>/dev/null | head -n 160 || true
+          echo "=== appenv pip log ==="
+          tail -n 60 "$ZEALFIE_INSTALL_ROOT/logs/appenv-pip-install.log" 2>/dev/null || true
+          echo "=== cpython install log ==="
+          tail -n 40 "$ZEALFIE_INSTALL_ROOT/logs/cpython-install.log" 2>/dev/null || true
+          echo "=== iscc compile log ==="
+          tail -n 40 "$ZEALFIE_STAGE/logs/iscc-compile.log" 2>/dev/null || true
+          echo "=== setup install log ==="
+          tail -n 60 "$ZEALFIE_STAGE/logs/setup-install.log" 2>/dev/null || true
+          echo "=== acquire log ==="
+          tail -n 20 "$ZEALFIE_STAGE/logs/acquire-provenance.json" 2>/dev/null || true
+
+      - id: step-summary
+        name: Step summary
+        if: always()
+        shell: bash
+        env:
+          OUT_CHECKOUT: "${{ steps.checkout.outcome }}"
+          OUT_SETUP: "${{ steps.setup-python.outcome }}"
+          OUT_INNO: "${{ steps.provision-innosetup.outcome }}"
+          OUT_BUILD: "${{ steps.build-wheel.outcome }}"
+          OUT_ACQUIRE: "${{ steps.acquire-wheelhouse.outcome }}"
+          OUT_CPYTHON: "${{ steps.verify-cpython-installer.outcome }}"
+          OUT_COMPILE: "${{ steps.compile-installer.outcome }}"
+          OUT_INSTALL: "${{ steps.silent-install.outcome }}"
+          OUT_SMOKE: "${{ steps.installer-smoke.outcome }}"
+          OUT_UNINSTALL: "${{ steps.uninstall-witness.outcome }}"
+        run: |
+          {
+            echo "## ZeAlfie Windows installer build (ZA-WIN-BOOT-02)"
+            echo "**Native Inno Setup 6.7.3 installer wrapping the proven private-CPython -> appenv layout. Fully OFFLINE user install (bundled wheelhouse, --no-index). Artifact only — no Release, no signing.**"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Runner | ${{ runner.os }} ${{ runner.arch }} |"
+            echo "| ZeAlfie HEAD | ${{ github.sha }} |"
+            echo "| Inno Setup | 6.7.3 (pinned) |"
+            echo "| CPython | 3.13.15 (sha256-verified, embedded + re-verified at install) |"
+            echo "| Setup artifact | ZeAlfie-Setup-0.1.0-dev.exe (sha256 \`${{ env.SETUP_SHA }}\`) |"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Checkout | ${OUT_CHECKOUT:-NOT REACHED} |"
+            echo "| Setup driver Python | ${OUT_SETUP:-NOT REACHED} |"
+            echo "| Provision Inno Setup 6.7.3 | ${OUT_INNO:-NOT REACHED} |"
+            echo "| Build zealfie wheel | ${OUT_BUILD:-NOT REACHED} |"
+            echo "| Acquire locked wheelhouse | ${OUT_ACQUIRE:-NOT REACHED} |"
+            echo "| Verify CPython installer | ${OUT_CPYTHON:-NOT REACHED} |"
+            echo "| Compile Setup.exe | ${OUT_COMPILE:-NOT REACHED} |"
+            echo "| Silent install | ${OUT_INSTALL:-NOT REACHED} |"
+            echo "| Installer smoke | ${OUT_SMOKE:-NOT REACHED} |"
+            echo "| Uninstall witness | ${OUT_UNINSTALL:-NOT REACHED} |"
+          } >> "$GITHUB_STEP_SUMMARY"

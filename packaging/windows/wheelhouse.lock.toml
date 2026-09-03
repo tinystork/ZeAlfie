@@ -1,0 +1,121 @@
+# ZeAlfie Windows installer — EXACT offline wheelhouse dependency lock (ZA-WIN-BOOT-02).
+#
+# This lock pins the concrete Windows x64 / CPython 3.13 wheel set that the
+# ZeAlfie installer bundles into {app}\assets\wheelhouse.  The installer's
+# pip runs FULLY OFFLINE: `pip install --no-index --find-links <wheelhouse>
+# <zealfie wheel>` — PyPI is never contacted on the user machine, so this
+# lock (plus the SHA-256 verification in acquire_wheelhouse.py) IS the
+# supply-chain contract of the offline install.
+#
+# The list below was NOT guessed and NOT copied from any other document: it
+# was produced by a REAL resolution executed on 2026-09-03 with pip 25.1.1
+# on Linux, downloading the actual Windows wheels:
+#
+#   pip download --dest <dir> --only-binary=:all: \
+#       --platform win_amd64 --python-version 3.13 \
+#       --implementation cp --abi cp313 \
+#       packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45
+#
+# (the same five top-level requirements the zealfie wheel declares as its
+# runtime dependencies in pyproject.toml, so the resolved set is exactly the
+# set the appenv needs).  Every per-wheel SHA-256 below was computed from
+# the real downloaded file (sha256sum).  The zealfie wheel itself is built
+# locally at acquisition time and therefore carries NO pinned sha256 — its
+# digest is computed by the acquisition step and recorded in the CI
+# provenance artifact instead.
+#
+# Acquisition re-downloads with --no-deps <name>==<version> for each pinned
+# wheel and VERIFIES filename + SHA-256 + size against this file (fail
+# closed on any drift).  See docs/windows-installer.md and
+# packaging/windows/acquire_wheelhouse.py.
+
+[metadata]
+# ZeAlfie version whose wheel this lock bootstraps.
+zealfie_version = "0.1.0"
+# Source commit of the zealfie wheel payload (ZeAlfie src tree; HEAD of
+# feature/windows-standalone-bootstrap at lock generation; identical src
+# payload to the ZA-WIN-BOOT-01 record revision a1a777a2df0).
+source_commit = "94f0b5164deb4b9e2ad1bd34dc910e89066b734b"
+# pip download target tags (resolution flags; the PySide6 family ships
+# cp310-abi3 wheels which satisfy the cp313 request via the stable ABI).
+platform_tag = "win_amd64"
+python_tag = "cp313"
+abi_tag = "cp313"
+generated = "2026-09-03"
+cpython_version = "3.13.15"
+cpython_installer_sha256 = "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403"
+# The exact resolution requirement list (top-level, matching pyproject.toml
+# [project].dependencies of zealfie) ...
+requirements = [
+  "packaging>=24",
+  "PySide6>=6",
+  "build>=1.2",
+  "setuptools>=77",
+  "wheel>=0.45",
+]
+pip_command = "pip download --dest <dir> --only-binary=:all: --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45"
+
+[zealfie]
+# The freshly-built zealfie wheel is ADDED to the wheelhouse by the
+# acquisition step (it can never be downloaded), so it deliberately has no
+# sha256 here — only filename/version/source metadata.
+name = "zealfie"
+version = "0.1.0"
+wheel_filename = "zealfie-0.1.0-py3-none-any.whl"
+source_commit = "94f0b5164deb4b9e2ad1bd34dc910e89066b734b"
+source = "local-build"
+
+# One table per pinned downloadable wheel, keyed by exact filename.
+[wheel."build-1.6.0-py3-none-any.whl"]
+name = "build"
+version = "1.6.0"
+sha256 = "f7aaf1ebbb79178a02ba248bb524f2176b256017e17e8e4bd4289c7b38cc2bad"
+size = 31187
+
+[wheel."packaging-26.3-py3-none-any.whl"]
+name = "packaging"
+version = "26.3"
+sha256 = "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+size = 129956
+
+[wheel."pyproject_hooks-1.2.0-py3-none-any.whl"]
+name = "pyproject-hooks"
+version = "1.2.0"
+sha256 = "9e5c6bfa8dcc30091c74b0cf803c81fdd29d94f01992a7707bc97babb1141913"
+size = 10216
+
+[wheel."pyside6-6.11.2-cp310-abi3-win_amd64.whl"]
+name = "PySide6"
+version = "6.11.2"
+sha256 = "3201d67e3c10be2eaedd3910ff0f02351eca7e88c95a291cde5e7f2f55ef207f"
+size = 578382
+
+[wheel."pyside6_addons-6.11.2-cp310-abi3-win_amd64.whl"]
+name = "PySide6-Addons"
+version = "6.11.2"
+sha256 = "f449ea4431da20e7b86752cca8d166f93434516fe417f981c27e5f8e1b554407"
+size = 168208836
+
+[wheel."pyside6_essentials-6.11.2-cp310-abi3-win_amd64.whl"]
+name = "PySide6-Essentials"
+version = "6.11.2"
+sha256 = "c8a29def77032773a30879f7f24415b5395ad08592d147c170824ef4c735dfc1"
+size = 76913043
+
+[wheel."setuptools-84.0.0-py3-none-any.whl"]
+name = "setuptools"
+version = "84.0.0"
+sha256 = "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+size = 818216
+
+[wheel."shiboken6-6.11.2-cp310-abi3-win_amd64.whl"]
+name = "shiboken6"
+version = "6.11.2"
+sha256 = "6ab0eba1c904455df621f9a6df3ca2bb896bab8670572d2bc4e37804ae91f19a"
+size = 1226578
+
+[wheel."wheel-0.48.0-py3-none-any.whl"]
+name = "wheel"
+version = "0.48.0"
+sha256 = "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab"
+size = 33320

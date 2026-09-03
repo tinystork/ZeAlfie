@@ -188,3 +188,9 @@ change was required for ZA-WIN-BOOT-01.
 * Real-Windows interactive run of the witness (the `.github/workflows/`
   witness is the bounded CI proof; run it via **workflow_dispatch** on
   `windows-latest`).
+
+> **ZA-WIN-BOOT-02 supersedes the installer line above:** the native Inno
+> Setup installer (`ZeAlfie-Setup.exe`), offline wheelhouse, Start Menu
+> shortcut, uninstaller and CI witness now exist — see
+> [`docs/windows-installer.md`](windows-installer.md). The BOOT-01 witness
+> above remains the accepted architecture proof; BOOT-02 wraps it.

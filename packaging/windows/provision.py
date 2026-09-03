@@ -62,6 +62,9 @@ __all__ = [
     "build_install_argv",
     "venv_create_argv",
     "pip_install_wheel_argv",
+    "pip_install_wheel_offline_argv",
+    "appenv_launcher_names",
+    "missing_appenv_launchers",
     "interpreter_probe_argv",
     "parse_pyvenv_cfg",
     "pyvenv_cfg_home",
@@ -413,6 +416,79 @@ def pip_install_wheel_argv(
         "--no-cache-dir",
         str(wheel_path),
     ]
+
+
+def pip_install_wheel_offline_argv(
+    venv_python: str | os.PathLike[str],
+    wheel_path: str | os.PathLike[str],
+    wheelhouse_dir: str | os.PathLike[str],
+) -> list[str]:
+    """Build the OFFLINE appenv pip command (ZA-WIN-BOOT-02).
+
+    Equivalent to the installer contract::
+
+        <appenv python> -m pip install \\
+            --no-index --find-links <bundled-wheelhouse> <zealfie wheel>
+
+    ``--no-index`` forbids PyPI entirely and ``--find-links`` restricts the
+    only allowed source to the bundled (SHA-256-verified) wheelhouse, so the
+    user installation is fully offline — no network is ever touched and a
+    missing wheel is a hard failure, never a silent index fallback.  The
+    extra flags mirror :func:`pip_install_wheel_argv` (deterministic pip,
+    self-contained install).
+    """
+    return [
+        str(venv_python),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-cache-dir",
+        "--no-index",
+        "--find-links",
+        str(wheelhouse_dir),
+        str(wheel_path),
+    ]
+
+
+#: The four launchers whose presence defines a COMPLETE appenv for the
+#: standalone installer contract (ZA-WIN-BOOT-02): the console and windowed
+#: interpreters plus the console and windowed ZeAlfie entry points.
+_APPENV_LAUNCHER_NAMES: tuple[str, ...] = (
+    "python.exe",
+    "pythonw.exe",
+    "zealfie.exe",
+    "zealfie-gui.exe",
+)
+
+
+def appenv_launcher_names() -> tuple[str, ...]:
+    """Names of the four launchers a complete Windows appenv must contain."""
+    return _APPENV_LAUNCHER_NAMES
+
+
+def missing_appenv_launchers(
+    witness_root: str | os.PathLike[str],
+    *,
+    _exists: Callable[[Path], bool] | None = None,
+) -> list[str]:
+    """Return the appenv ``Scripts`` launchers that are MISSING.
+
+    Checks the four installer-contract launchers under the Windows venv
+    layout ``<root>\\appenv\\Scripts\\.``  An empty list means the appenv
+    is complete.  ``_exists`` is an injectable seam for hermetic tests;
+    by default the real filesystem is consulted (Windows-only layout — on a
+    POSIX host this always reports missing, which is correct because a POSIX
+    venv has no ``Scripts`` directory and is never a Windows appenv).
+    """
+    scripts = appenv_scripts_dir(witness_root)
+    missing: list[str] = []
+    for name in _APPENV_LAUNCHER_NAMES:
+        path = scripts / name
+        exists = _exists(path) if _exists is not None else path.is_file()
+        if not exists:
+            missing.append(ntpath.join("Scripts", name))
+    return missing
 
 
 def interpreter_probe_argv(python_exe: str | os.PathLike[str]) -> list[str]:

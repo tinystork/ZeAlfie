@@ -8,7 +8,11 @@ ZA-WIN-BOOT-01.  Executes the REAL provisioning steps on a Windows machine
                        silent per-user install into <root>\\python -> verify
                        the ACTUAL installed interpreter path, never assume.
     make-appenv        <root>\\python\\python.exe -m venv <root>\\appenv ->
-                       install the built ZeAlfie wheel (+deps) into appenv.
+                       install the built ZeAlfie wheel into appenv (deps from
+                       PyPI, BOOT-01) — or, with
+                       --offline-wheelhouse <dir>, FULLY OFFLINE via
+                       ``pip install --no-index --find-links <dir>``
+                       (BOOT-02 installer path).
     witness            isolation assertions + runtime-child capability
                        witness, executed BY the appenv python.
     smoke-cli          appenv\\Scripts\\zealfie.exe --version / --help.
@@ -163,8 +167,18 @@ def step_provision_python(record, witness_root: Path, installer: Path | None) ->
     print(f"[provision-python] sys.base_prefix={report['base_prefix']!r}")
 
 
-def step_make_appenv(record, witness_root: Path, wheel: Path) -> None:
-    """Create the appenv from the private python and install the wheel."""
+def step_make_appenv(record, witness_root: Path, wheel: Path,
+                    offline_wheelhouse: Path | None = None) -> None:
+    """Create the appenv from the private python and install the wheel.
+
+    Two install paths (ZA-WIN-BOOT-01/02):
+
+    * ``offline_wheelhouse is None`` — the ZA-WIN-BOOT-01 witness path:
+      dependencies resolved from PyPI (network available on the runner);
+    * ``offline_wheelhouse`` set — the ZA-WIN-BOOT-02 installer path:
+      ``pip install --no-index --find-links <wheelhouse> <zealfie wheel>``
+      (fully OFFLINE, no PyPI at install time).
+    """
     private_exe = provision.private_python_exe(witness_root)
     appenv = provision.appenv_dir(witness_root)
     appenv_python = provision.appenv_python_exe(witness_root)
@@ -174,6 +188,28 @@ def step_make_appenv(record, witness_root: Path, wheel: Path) -> None:
     if not private_exe.is_file():
         raise StepError(f"private python missing: {private_exe} — run "
                         "provision-python first")
+
+    if offline_wheelhouse is not None:
+        if not offline_wheelhouse.is_dir():
+            raise StepError(
+                f"offline wheelhouse missing: {offline_wheelhouse}"
+            )
+        if wheel is None:
+            # The zealfie wheel ships INSIDE the bundled wheelhouse: pick
+            # the canonical wheel for the pinned zealfie version.
+            candidates = sorted(offline_wheelhouse.glob("zealfie-*.whl"))
+            if len(candidates) != 1:
+                raise StepError(
+                    f"expected exactly one zealfie wheel under the bundled "
+                    f"wheelhouse, found {len(candidates)}: "
+                    + ", ".join(p.name for p in candidates)
+                )
+            wheel = candidates[0]
+        elif not wheel.is_file():
+            raise StepError(f"wheel not found: {wheel}")
+    elif wheel is None:
+        raise StepError("make-appenv requires --wheel (online) or "
+                        "--offline-wheelhouse (offline)")
     if not wheel.is_file():
         raise StepError(f"wheel not found: {wheel}")
 
@@ -194,13 +230,37 @@ def step_make_appenv(record, witness_root: Path, wheel: Path) -> None:
         )
     print(f"[make-appenv] appenv interpreter present: {appenv_python}")
 
-    print(f"[make-appenv] installing wheel {wheel} into appenv (deps from PyPI)")
-    pip_log = logs / "appenv-pip-install.log"
-    proc = _run(
-        provision.pip_install_wheel_argv(appenv_python, wheel),
-        stdout=open(pip_log, "w", encoding="utf-8"),
-        stderr=subprocess.STDOUT,
-    )
+    if offline_wheelhouse is not None:
+        pip_log = logs / "appenv-pip-install.log"
+        argv = provision.pip_install_wheel_offline_argv(
+            appenv_python, wheel, offline_wheelhouse
+        )
+        print("[make-appenv] installing wheel OFFLINE "
+              f"(--no-index --find-links {offline_wheelhouse}): {wheel.name}")
+        # Record the EXACT executed argv in the pip log BEFORE pip runs: the
+        # offline contract is later proven from this banner (newer pip no
+        # longer prints "Ignoring indexes" to stdout, so the log must carry
+        # the authoritative evidence of the --no-index --find-links call).
+        banner = "[zealfie-offline] argv: " + " ".join(str(a) for a in argv) + "\n"
+        with open(pip_log, "w", encoding="utf-8") as fh:
+            fh.write(banner)
+    else:
+        pip_log = logs / "appenv-pip-install.log"
+        argv = provision.pip_install_wheel_argv(appenv_python, wheel)
+        print(f"[make-appenv] installing wheel {wheel} into appenv (deps from PyPI)")
+    if offline_wheelhouse is not None:
+        # append pip's own output under the banner written above
+        proc = _run(
+            argv,
+            stdout=open(pip_log, "a", encoding="utf-8"),
+            stderr=subprocess.STDOUT,
+        )
+    else:
+        proc = _run(
+            argv,
+            stdout=open(pip_log, "w", encoding="utf-8"),
+            stderr=subprocess.STDOUT,
+        )
     if proc.returncode != 0:
         tail = "\n".join(pip_log.read_text(
             encoding="utf-8", errors="replace"
@@ -208,13 +268,19 @@ def step_make_appenv(record, witness_root: Path, wheel: Path) -> None:
         raise StepError(f"wheel install failed rc={proc.returncode}\n{tail}")
     print("[make-appenv] wheel installed")
 
-    for launcher in ("zealfie.exe", "zealfie-gui.exe"):
-        path = appenv / "Scripts" / launcher
-        if not path.is_file():
-            raise StepError(
-                f"expected appenv launcher missing after install: {path}"
-            )
-        print(f"[make-appenv] launcher present: {path}")
+    # The installer contract requires a COMPLETE appenv: both interpreters
+    # and both ZeAlfie entry points present before success is reported.
+    # (The BOOT-01 witness only asserted the two ZeAlfie launchers; the
+    # full four-file gate is enforced on BOTH paths here so the installer
+    # and the witness share one completeness primitive.)
+    missing = provision.missing_appenv_launchers(witness_root)
+    if missing:
+        raise StepError(
+            "appenv incomplete after install — missing launchers: "
+            + ", ".join(missing)
+        )
+    for name in provision.appenv_launcher_names():
+        print(f"[make-appenv] launcher present: appenv\\Scripts\\{name}")
 
 
 def step_witness(witness_root: Path, child_root: Path) -> None:
@@ -346,7 +412,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="reuse a local installer copy instead of downloading")
 
     p_app = sub.add_parser("make-appenv", help="create appenv and install the wheel")
-    p_app.add_argument("--wheel", type=Path, required=True)
+    p_app.add_argument("--wheel", type=Path, default=None,
+                       help="zealfie wheel to install (online path, BOOT-01)")
+    p_app.add_argument(
+        "--offline-wheelhouse", type=Path, default=None,
+        metavar="DIR",
+        help="bundled wheelhouse for the OFFLINE install path "
+             "(--no-index --find-links DIR); the zealfie wheel is then "
+             "taken from DIR unless --wheel is also given",
+    )
 
     sub.add_parser("witness", help="isolation + runtime-child witness (appenv python)")
 
@@ -375,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
             record, witness_root, getattr(args, "installer", None)
         ),
         "make-appenv": lambda: step_make_appenv(
-            record, witness_root, getattr(args, "wheel", None)
+            record, witness_root, getattr(args, "wheel", None),
+            offline_wheelhouse=getattr(args, "offline_wheelhouse", None),
         ),
         "witness": lambda: step_witness(witness_root, child_root),
         "smoke-cli": lambda: step_smoke_cli(witness_root),
@@ -384,8 +459,10 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if args.command == "all":
-        if getattr(args, "wheel", None) is None:
-            print("error: 'all' requires --wheel", file=sys.stderr)
+        if (getattr(args, "wheel", None) is None
+                and getattr(args, "offline_wheelhouse", None) is None):
+            print("error: 'all' requires --wheel or --offline-wheelhouse",
+                  file=sys.stderr)
             return 2
         selected = ["provision-python", "make-appenv", "witness",
                     "smoke-cli", "smoke-gui"]

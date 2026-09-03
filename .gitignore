@@ -222,3 +222,8 @@ __marimo__/
 
 # Legacy ZeSeestarStacker runtime settings
 /seestar_settings.json
+
+# ZA-WIN-BOOT-02: Windows installer build outputs (never committed; the
+# wheelhouse is generated/acquired in CI, the Setup.exe is compiled in CI)
+/packaging/windows/wheelhouse/
+/packaging/windows/installer/Output/
