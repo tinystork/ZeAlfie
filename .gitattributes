@@ -1,0 +1,6 @@
+# Verbatim third-party license text, copied byte-for-byte from the
+# SHA-256-verified python-build-standalone archive.  The upstream text
+# carries trailing spaces and a trailing blank line; keep the bytes exact
+# and disable the cosmetic whitespace checks for it so `git diff --check`
+# stays clean.
+packaging/windows/licenses/CPython-PSF-LICENSE.txt whitespace=-blank-at-eol,-blank-at-eof
