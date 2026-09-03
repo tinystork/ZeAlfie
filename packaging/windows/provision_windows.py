@@ -1,12 +1,14 @@
 """ZeAlfie Windows standalone bootstrap — thin runnable entrypoint.
 
-ZA-WIN-BOOT-01.  Executes the REAL provisioning steps on a Windows machine
-(driven by the GitHub ``windows-bootstrap-witness`` workflow or by a human):
+ZA-WIN-BOOT-01 + ZA-WIN-BOOT-03B.  Executes the REAL provisioning steps
+on a Windows machine (driven by the GitHub ``windows-bootstrap-witness``
+workflow, by the installer CI build's acquire step, or by a human):
 
-    provision-python   download pinned CPython 3.13 installer -> verify its
-                       SHA-256 against reproducibility.toml (fail closed) ->
-                       silent per-user install into <root>\\python -> verify
-                       the ACTUAL installed interpreter path, never assume.
+    provision-python   download pinned python-build-standalone archive ->
+                       verify its SHA-256 against reproducibility.toml
+                       (fail closed) -> extract it to <root>\\python
+                       (stdlib tarfile) -> verify BOTH python.exe AND
+                       pythonw.exe exist, never assume.
     make-appenv        <root>\\python\\python.exe -m venv <root>\\appenv ->
                        install the built ZeAlfie wheel into appenv (deps from
                        PyPI, BOOT-01) — or, with
@@ -55,7 +57,6 @@ import provision  # type: ignore[import-not-found]  # same-directory module
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 _DOWNLOAD_CHUNK = 65536
-_INSTALLER_OK_RETURNCODES = (0, 3010)  # 3010 = success, reboot advised
 
 
 class StepError(RuntimeError):
@@ -112,9 +113,17 @@ def _probe(python_exe: Path) -> dict:
 
 
 def step_provision_python(record, witness_root: Path, installer: Path | None) -> None:
-    """Download (or reuse) the pinned installer, verify SHA-256, install."""
+    """Download (or reuse) the pinned standalone archive, verify, extract.
+
+    The python-build-standalone substrate is plain files: there is NO
+    installer to execute, so the step verifies the archive SHA-256 (fail
+    closed), extracts it with stdlib tarfile into ``<root>\\python`` and
+    verifies BOTH ``python.exe`` AND ``pythonw.exe`` exist — never assumed,
+    never a fallback to a runner/system Python.
+    """
     private_dir = provision.private_python_dir(witness_root)
     private_exe = provision.private_python_exe(witness_root)
+    private_w = provision.private_pythonw_exe(witness_root)
     downloads = witness_root / "downloads"
     logs = _log_dir(witness_root)
     downloads.mkdir(parents=True, exist_ok=True)
@@ -128,42 +137,34 @@ def step_provision_python(record, witness_root: Path, installer: Path | None) ->
             print(f"[provision-python] downloaded {installer} "
                   f"({installer.stat().st_size} bytes)")
         else:
-            print(f"[provision-python] reusing cached installer {installer}")
+            print(f"[provision-python] reusing cached archive {installer}")
 
-    # Fail closed on hash mismatch — never install an unverified payload.
-    actual = provision.verify_installer_sha256(installer, record=record)
+    # Fail closed on hash mismatch — never extract an unverified payload.
+    actual = provision.verify_archive_sha256(installer, record=record)
     print(f"[provision-python] sha256 verified: {actual}")
 
-    install_log = logs / "python-install.log"
-    argv = [str(installer), *provision.build_install_argv(
-        record, target_dir=private_dir, log_path=install_log
-    )]
-    print("[provision-python] running silent per-user install into "
-          f"{private_dir}")
-    proc = _run(argv)
-    if proc.returncode not in _INSTALLER_OK_RETURNCODES:
-        tail = ""
-        if install_log.is_file():
-            tail = "\n".join(install_log.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()[-40:])
-        raise StepError(
-            f"python.org installer failed rc={proc.returncode}\n{tail}"
-        )
-    print(f"[provision-python] installer rc={proc.returncode} (0/3010 = ok)")
+    # Record the extraction evidence for diagnostics.
+    extract_log = logs / "python-extract.log"
+    with open(extract_log, "w", encoding="utf-8") as fh:
+        fh.write(f"archive={installer.name}\n")
+        fh.write(f"sha256={actual}\n")
+        fh.write(f"size={installer.stat().st_size}\n")
+        fh.write(f"dest={private_dir}\n")
+    print(f"[provision-python] extracting {installer.name} -> {private_dir}")
+    provision.extract_python_tarball(installer, witness_root)
 
-    # Verify the ACTUAL installed interpreter path — never assume.
-    if not private_exe.is_file():
-        listing = "\n".join(
-            str(p) for p in sorted(private_dir.rglob("python*.exe"))
-        ) or "(no python*.exe found under the target dir)"
-        raise StepError(
-            f"private interpreter not found at expected path {private_exe}\n"
-            f"found under {private_dir}:\n{listing}"
-        )
+    # Verify the ACTUAL extracted interpreter paths — never assume.
+    for label, exe in (("python.exe", private_exe),
+                       ("pythonw.exe", private_w)):
+        if not exe.is_file():
+            raise StepError(
+                f"private interpreter not found at expected path {exe} "
+                f"(after extracting {installer.name})"
+            )
+        print(f"[provision-python] private interpreter verified: {exe}")
     report = _probe(private_exe)
-    print("[provision-python] private interpreter verified: "
-          f"{private_exe} (Python {report['version']})")
+    print(f"[provision-python] private python reports Python "
+          f"{report['version']}")
     print(f"[provision-python] sys.base_prefix={report['base_prefix']!r}")
 
 
@@ -407,9 +408,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_prov = sub.add_parser("provision-python", help="download+verify+install private CPython")
+    p_prov = sub.add_parser("provision-python", help="download+verify+extract private CPython")
     p_prov.add_argument("--installer", type=Path, default=None,
-                        help="reuse a local installer copy instead of downloading")
+                        help="reuse a local archive copy instead of downloading")
 
     p_app = sub.add_parser("make-appenv", help="create appenv and install the wheel")
     p_app.add_argument("--wheel", type=Path, default=None,
@@ -441,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[bootstrap] zealfie {record.zealfie_version} @ {record.zealfie_revision[:12]}")
     print(f"[bootstrap] pinned CPython {record.cpython_version} "
-          f"({record.architecture}) sha256={record.sha256[:16]}...")
+          f"({record.target_triple}) sha256={record.sha256[:16]}...")
     print(f"[bootstrap] witness root: {witness_root}")
 
     steps = {

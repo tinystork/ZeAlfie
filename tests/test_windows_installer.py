@@ -10,10 +10,15 @@ Covers, from ``packaging/windows/wheelhouse_lock.py`` and the refactored
   exercises the REAL file-hashing code path;
 * the offline pip install argv builder
   (``--no-index --find-links <wheelhouse> <zealfie wheel>``);
-* the installer completeness primitive (four appenv launchers);
-* .iss <-> reproducibility pins coupling: the CPython version + SHA-256 and
-  the install properties embedded in ``packaging/windows/installer/zealfie.iss``
-  MUST equal ``reproducibility.toml``, and the Inno toolchain pin
+* the installer completeness primitives (four appenv launchers + the
+  private-runtime python.exe/pythonw.exe/Lib requirement);
+* the python-build-standalone substrate record: pin + metadata
+  consistency, archive digest verification pass/fail, and SAFE tar
+  extraction to the private layout (tiny synthetic tarballs, no download);
+* .iss <-> reproducibility coupling (ZA-WIN-BOOT-03B): the .iss must embed
+  the extracted runtime (``/DPythonDir`` -> ``{app}\\python``) with NO
+  python.org EXE/Burn/``3010`` path left, gate on BOTH private interpreters,
+  and use ``python -m pip`` only; the Inno toolchain pin
   (``installer/innosetup.toml``) must be consistent with the docs/CI.
 
 All tests are FAST and hermetic: no real private Python, no Windows, no
@@ -72,7 +77,13 @@ _ISS_FILE = _WINDOWS_PKG / "installer" / "zealfie.iss"
 _INNO_FILE = _WINDOWS_PKG / "installer" / "innosetup.toml"
 
 _SOURCE_COMMIT = "94f0b5164deb4b9e2ad1bd34dc910e89066b734b"
+# Legacy python.org installer digest recorded in wheelhouse.lock.toml
+# metadata (the environment the wheelhouse was resolved under).  The
+# substrate pin is now the python-build-standalone ARCHIVE digest below.
 _CPYTHON_SHA = "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403"
+_PBS_SHA = "9bcc038a0bf180612ed56dec93d4977d035e80b8d9320ef51a38c287baf134b7"
+_PBS_FILENAME = ("cpython-3.13.15+20260901-x86_64-pc-windows-msvc-"
+                 "install_only.tar.gz")
 
 
 def _mini_lock(tmp_path: Path, filename: str = "w-1.0-py3-none-any.whl",
@@ -190,11 +201,19 @@ def test_real_lock_loads_and_metadata_is_consistent() -> None:
     assert lock.zealfie_wheel.filename in wheelhouse.expected_filenames(lock)
 
 
-def test_real_lock_cpython_pin_matches_reproducibility_record() -> None:
+def test_real_lock_cpython_metadata_decoupled_from_substrate_pin() -> None:
+    """(ZA-WIN-BOOT-03B) The wheelhouse lock's informational cpython fields
+    describe the python.org-installer era in which the wheelhouse was
+    resolved; reproducibility.toml now pins the python-build-standalone
+    ARCHIVE (a different artifact).  Version stays coupled; the digests are
+    deliberately decoupled and must BOTH be valid 64-hex digests."""
     record = tomllib.loads(_RECORD_FILE.read_text(encoding="utf-8"))
     lock = wheelhouse.load_lock(_LOCK_FILE)
     assert lock.cpython_version == record["cpython"]["version"]
-    assert lock.cpython_installer_sha256 == record["cpython"]["sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", lock.cpython_installer_sha256)
+    assert lock.cpython_installer_sha256 == _CPYTHON_SHA  # frozen historical
+    assert record["cpython"]["sha256"] == _PBS_SHA  # standalone archive pin
+    assert lock.cpython_installer_sha256 != record["cpython"]["sha256"]
     # lock requirements mirror the zealfie wheel's runtime dependency list
     # (pyproject.toml [project].dependencies)
     assert set(lock.requirements) == {
@@ -434,35 +453,49 @@ def _iss_text() -> str:
     return _ISS_FILE.read_text(encoding="utf-8")
 
 
-def test_iss_embeds_the_record_cpython_version_and_sha256() -> None:
-    record = tomllib.loads(_RECORD_FILE.read_text(encoding="utf-8"))
+def test_iss_bundles_extracted_runtime_not_an_exe() -> None:
+    """(ZA-WIN-BOOT-03B) The .iss embeds the ALREADY-EXTRACTED standalone
+    runtime via /DPythonDir -> {app}\\python (recursive); there is NO
+    python.org EXE define, digest const, Burn/MSI step or 0/3010 handling
+    left anywhere."""
     iss = _iss_text()
-    version = record["cpython"]["version"]
-    sha = record["cpython"]["sha256"]
-    # the ISPP defines embed the record values verbatim ...
-    assert f'ZeAlfieCpythonVersion "{version}"' in iss
-    assert f'ZeAlfieCpythonSha256 "{sha}"' in iss
-    # ... and the [Code] const used by the install-time verification is
-    # defined FROM that define (ISPP-expanded at compile time).
-    assert "CpythonSha256 = '{#ZeAlfieCpythonSha256}';" in iss
-    assert "CpythonExeName = '{#CpythonInstallerName}';" in iss
+    assert "#ifndef PythonDir" in iss
+    assert '#error "PythonDir not defined' in iss
+    assert r'Source: "{#PythonDir}\*"; DestDir: "{app}\python"' in iss
+    assert "recursesubdirs" in iss
+    # no legacy CPython-installer surface
+    assert "ZeAlfieCpythonVersion" not in iss
+    assert "ZeAlfieCpythonSha256" not in iss
+    assert "CpythonInstaller" not in iss
+    assert "python-3.13.15-amd64.exe" not in iss
+    assert "CpythonExeName" not in iss
+    assert "CpythonSha256" not in iss
+    assert "GetSHA256OfFile" not in iss
+    assert "3010" not in iss
+    # [Code]+[Files] carry no Burn/MSI machinery (header prose may still
+    # explain WHY the EXE era ended)
+    code_files = iss.split("[Code]", 1)[1]
+    assert "Burn" not in code_files
+    assert "msiexec" not in code_files.lower()
+    assert "RunCheckedCpython" not in code_files
 
-
-def test_iss_embeds_the_full_pinned_install_properties() -> None:
-    record = tomllib.loads(_RECORD_FILE.read_text(encoding="utf-8"))
-    properties = record["install"]["properties"]
+def test_iss_posture_no_installer_properties_remain() -> None:
+    """(ZA-WIN-BOOT-03B) With plain-file extraction there are no python.org
+    silent-install properties to embed; the per-user / non-admin / x64-only
+    posture is preserved structurally."""
     iss = _iss_text()
-    assert "InstallAllUsers=0" in iss
-    assert "InstallAllUsers=1" not in iss
-    assert "PrependPath=0" in iss and "PrependPath=1" not in iss
-    for prop in properties:
-        assert prop in iss, f"install property {prop} missing from zealfie.iss"
-    # per-user / non-admin / x64-only posture
+    assert "InstallAllUsers" not in iss
+    assert "PrependPath" not in iss
+    assert "Include_launcher" not in iss
+    assert "AssociateFiles" not in iss
+    assert "Shortcuts=0" not in iss
     assert "PrivilegesRequired=lowest" in iss
     assert "ArchitecturesAllowed=x64os" in iss
     assert "ArchitecturesInstallIn64BitMode=x64os" in iss
     # default per-user dir
     assert "DefaultDirName={localappdata}\\Programs\\ZeAlfie" in iss
+    # per-user only, no /ALLUSERS path
+    assert "PrivilegesRequiredOverridesAllowed" not in iss
 
 
 def test_iss_has_stable_single_appid() -> None:
@@ -479,12 +512,14 @@ def test_iss_has_stable_single_appid() -> None:
 def test_iss_offline_contract_and_gates_present() -> None:
     iss = _iss_text()
     assert "offline-wheelhouse" in iss
-    for gate in ("VerifyBundledCpythonIntegrity", "RequirePrivatePythonInstalled",
-                 "RequireAppenvComplete", "GetSHA256OfFile", "RaiseException"):
+    for gate in ("RequirePrivatePythonFiles", "RequireAppenvComplete",
+                 "RaiseException", "FailBootstrap"):
         assert gate in iss, f"{gate} missing from zealfie.iss [Code]"
     for launcher in ("python.exe", "pythonw.exe", "zealfie.exe",
                      "zealfie-gui.exe"):
         assert launcher in iss
+    # the two private interpreters are gated separately in [Code]
+    assert "python\\python.exe" in iss and "python\\pythonw.exe" in iss
 
 
 def test_provision_windows_argparse_global_option_before_subcommand() -> None:
@@ -530,13 +565,15 @@ def test_iss_bootstrap_argv_orders_witness_root_before_make_appenv() -> None:
 
 def test_iss_code_checks_child_exit_codes() -> None:
     """Regression (rework-5, defect 2): the bootstrap must observe every
-    child exit code via Exec + ewWaitUntilTerminated + ResultCode."""
+    child exit code via Exec + ewWaitUntilTerminated + ResultCode; the
+    python.org 0/3010 special-casing is GONE (nothing runs an installer)."""
     iss = _iss_text()
     assert "Exec(" in iss
     assert "ewWaitUntilTerminated" in iss
     assert "ResultCode" in iss
     assert "(ResultCode = 0)" in iss  # RunCheckedZero success comparison
-    assert "3010" in iss  # python.org installer 'success, reboot advised'
+    assert "RunCheckedCpython" not in iss
+    assert "3010" not in iss
 
 
 def test_iss_failure_couples_to_nonzero_setup_and_run_section_gone() -> None:
@@ -548,7 +585,7 @@ def test_iss_failure_couples_to_nonzero_setup_and_run_section_gone() -> None:
     assert "ssPostInstall" in iss
     assert "RaiseException" in iss
     assert "RunCheckedZero" in iss
-    assert "RunCheckedCpython" in iss
+    assert "RunCheckedCpython" not in iss
     assert "SW_HIDE" in iss
     assert not re.search(r"^\[Run\]", iss, re.M), "[Run] section must be gone"
 
@@ -558,11 +595,11 @@ def test_iss_success_path_preserves_layout_and_gates() -> None:
     contract (layout, gates, offline wheelhouse, per-user posture)."""
     iss = _iss_text()
     for token in ("offline-wheelhouse", "--witness-root", "{app}\\python",
-                  "{app}\\appenv", "VerifyBundledCpythonIntegrity",
-                  "GetSHA256OfFile", "RequirePrivatePythonInstalled",
+                  "{app}\\appenv", "RequirePrivatePythonFiles",
+                  "{app}\\python\\python.exe",
                   "RequireAppenvComplete", "PrivilegesRequired=lowest",
                   "ArchitecturesAllowed=x64os", "zealfie.ico",
-                  "{autoprograms}", "provision_windows.py"):
+                  "{autoprograms}", "provision_windows.py", "licenses"):
         assert token in iss, f"installer contract token missing: {token}"
     for launcher in ("python.exe", "pythonw.exe", "zealfie.exe",
                      "zealfie-gui.exe"):
@@ -632,35 +669,30 @@ def test_no_pascal_brace_comment_embeds_installer_constant() -> None:
         "Pascal brace comments must not embed installer constants:\n"
         + "\n".join(offenders)
     )
-    # the corrected // comment is present verbatim
-    assert "// After the silent per-user CPython install the ACTUAL interpreter must" in iss
-    assert "// exist at {app}\\python\\python.exe" in iss
-    assert not any(
-        line.lstrip().startswith("{ After the silent per-user") for line in code_lines
-    )
+    # the corrected // comments are present verbatim (no brace comment may
+    # embed an installer constant)
+    assert "// Fail-closed gate: the private standalone runtime must be in place as" in iss
+    assert "// REAL files — BOTH the console interpreter AND the windowed interpreter" in iss
+    assert "// (pythonw.exe is a hard functional requirement of the windowed GUI" in iss
+    assert not any(line.lstrip().startswith("{ After the silent per-user")
+                   for line in code_lines)
 
-
-def test_iss_has_no_nested_ispp_macro_and_resolves_installer_name() -> None:
-    """Regression (rework-3): ISPP does NOT re-expand {#...} inside another
-    #define value, so the CPython installer filename must use the string
-    concatenation idiom and no #define line may embed a literal {#."""
+def test_iss_pythondir_define_is_a_plain_build_input() -> None:
+    """(ZA-WIN-BOOT-03B) The runtime source is the CI-staged extracted tree
+    passed as /DPythonDir (a plain build input with an #error guard) — no
+    filename-concatenation macro, no version/sha define, no nested ISPP
+    macro, no dead CPython-installer name resolution."""
     iss = _iss_text()
-    # 1) guard against the nested-macro form returning: scan every #define
     for line in iss.splitlines():
         if line.lstrip().startswith("#define"):
             assert "{#" not in line, f"nested ISPP macro in: {line}"
-    # 2) the corrected concatenation form is present verbatim
-    assert ('#define CpythonInstallerName "python-" + ZeAlfieCpythonVersion'
-            ' + "-amd64.exe"') in iss
-    # 3) the + pieces resolve exactly to the pinned installer filename
-    record = tomllib.loads(_RECORD_FILE.read_text(encoding="utf-8"))
-    version = record["cpython"]["version"]
-    assert f'ZeAlfieCpythonVersion "{version}"' in iss
-    assert "".join(("python-", version, "-amd64.exe")) == (
-        f"python-{version}-amd64.exe"
-    )
-    # the define feeds both the [Run] filename and the [Code] const
-    assert "CpythonExeName = '{#CpythonInstallerName}';" in iss
+    assert "#ifndef PythonDir" in iss
+    assert "#define ZeAlfieVersion" in iss
+    assert "CpythonInstallerName" not in iss
+    assert "ZeAlfieCpythonVersion" not in iss
+    assert "CpythonExeName" not in iss
+    # PythonDir is referenced by the [Files] recursion source
+    assert 'Source: "{#PythonDir}\\*"' in iss
 
 
 def test_lock_includes_windows_marker_colorama_closure() -> None:
@@ -716,27 +748,26 @@ def test_iss_custom_exit_code_mechanism() -> None:
 
 
 def test_iss_every_fatal_path_routes_through_failbootstrap() -> None:
-    """All five fatal conditions must set the flag via FailBootstrap, and
+    """All fatal conditions must set the flag via FailBootstrap, and
     RaiseException must be called ONLY inside FailBootstrap."""
     iss = _iss_text()
     code = iss.split("[Code]", 1)[1]
     # RaiseException( appears exactly once in [Code] code (inside FailBootstrap)
     assert code.count("RaiseException(") == 1
     # each gate procedure + CurStepChanged reference FailBootstrap
-    for proc in ("VerifyBundledCpythonIntegrity", "RequirePrivatePythonInstalled",
-                 "RequireAppenvComplete", "CurStepChanged"):
+    for proc in ("RequirePrivatePythonFiles", "RequireAppenvComplete",
+                 "CurStepChanged"):
         seg = code.split(proc, 1)[1]
         assert "FailBootstrap(" in seg.split("end;", 1)[0] or "FailBootstrap(" in code
-    # at least the five documented fatal call sites
-    assert code.count("FailBootstrap(") >= 5
-    # the documented failure conditions are all present
-    for token in ("Bundled CPython installer is missing",
-                  "failed SHA-256 verification",
-                  "was not installed at {app}\\python\\python.exe",
+    # at least the documented fatal call sites
+    assert code.count("FailBootstrap(") >= 4
+    # the documented failure conditions are all present (no EXE-era wording)
+    for token in ("The private Python runtime is incomplete at {app}\\python",
                   "is incomplete — missing appenv launchers",
-                  "CPython installer exited non-zero",
-                  "appenv bootstrap exited non-zero"):
+                  "offline appenv bootstrap exited non-zero"):
         assert token in iss, f"fatal condition missing: {token}"
+    assert "failed SHA-256 verification" not in iss
+    assert "CPython installer exited non-zero" not in iss
 
 
 def test_installer_smoke_utf8_child_env() -> None:
@@ -870,6 +901,7 @@ def _baseline_snapshot() -> dict:
         "user_path": ["c:\\windows\\system32"],
         "machine_path": ["c:\\windows\\system32"],
         "py_launcher_path": None,
+        "py_0p": None,
         "py_association_progid": None,
         "pythoncore_3_13_hkcu_install_path": None,
         "pythoncore_3_13_hklm_install_path": None,
@@ -881,27 +913,30 @@ def _baseline_snapshot() -> dict:
     }
 
 
+def _zealfie_hkcu(root: str = _ROOT) -> dict:
+    return {
+        "zealfie 0.1.0": {
+            "display_name": "ZeAlfie 0.1.0",
+            "install_location": root,
+            "uninstall_string": root + "\\unins000.exe",
+        },
+    }
+
+
 def _install_snapshot(root: str = _ROOT, **overrides) -> dict:
+    """Post-install snapshot under NO-provider semantics (ZA-WIN-BOOT-03B):
+    the host footprint is byte-identical to the baseline (NO PythonCore,
+    NO CPython Apps&Features entry) and only the ZeAlfie shell appeared."""
     snap = {
         "schema": 1,
         "user_path": ["c:\\windows\\system32"],
         "machine_path": ["c:\\windows\\system32"],
         "py_launcher_path": None,
+        "py_0p": None,
         "py_association_progid": None,
-        "pythoncore_3_13_hkcu_install_path": root + "\\python",
+        "pythoncore_3_13_hkcu_install_path": None,
         "pythoncore_3_13_hklm_install_path": None,
-        "uninstall_hkcu": {
-            "python 3.13.15 (64-bit)": {
-                "display_name": "Python 3.13.15 (64-bit)",
-                "install_location": root + "\\python",
-                "uninstall_string": root + "\\python\\uninstall.exe",
-            },
-            "zealfie 0.1.0": {
-                "display_name": "ZeAlfie 0.1.0",
-                "install_location": root,
-                "uninstall_string": root + "\\unins000.exe",
-            },
-        },
+        "uninstall_hkcu": _zealfie_hkcu(root),
         "uninstall_hklm": {},
         "start_menu_shortcut_exists": True,
         "start_menu_shortcut_target": (
@@ -914,6 +949,8 @@ def _install_snapshot(root: str = _ROOT, **overrides) -> dict:
 
 
 def test_side_effect_witness_clean_install_has_no_findings() -> None:
+    """No-provider semantics: a clean install creates NO PythonCore /
+    CPython Apps&Features state — the ZeAlfie shell is the only footprint."""
     baseline = _baseline_snapshot()
     snapshot = _install_snapshot()
     assert _SEW.verify_install_findings(baseline, snapshot, _ROOT) == []
@@ -932,7 +969,7 @@ def test_side_effect_witness_path_changes_are_findings() -> None:
     assert any("machine PATH" in f for f in findings)
 
 
-def test_side_effect_witness_new_py_launcher_and_association() -> None:
+def test_side_effect_witness_new_py_launcher_association_and_py0p() -> None:
     baseline = _baseline_snapshot()
     snap = _install_snapshot(
         py_launcher_path="C:\\Users\\u\\AppData\\Local\\Programs\\Python\\"
@@ -945,45 +982,62 @@ def test_side_effect_witness_new_py_launcher_and_association() -> None:
     findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
     assert any(".py file association" in f for f in findings)
 
+    # py -0p registration list changed -> finding (strengthened witness)
+    baseline_py = _baseline_snapshot()
+    baseline_py["py_launcher_path"] = r"C:\Windows\py.exe"
+    baseline_py["py_0p"] = [" -V:3.13        *  C:\\...\\Python313\\python.exe"]
+    snap = _install_snapshot(
+        py_launcher_path=r"C:\Windows\py.exe",
+        py_0p=[" -V:3.13        *  C:\\...\\Python313\\python.exe",
+               " -V:3.11                 C:\\...\\Python311\\python.exe"],
+    )
+    findings = _SEW.verify_install_findings(baseline_py, snap, _ROOT)
+    assert any("py -0p" in f for f in findings)
 
-def test_side_effect_witness_user_pythoncore_and_machine_scope() -> None:
+
+def test_side_effect_witness_no_new_pythoncore_state() -> None:
+    """(ZA-WIN-BOOT-03B) The standalone substrate creates NO PythonCore
+    state: a NEW HKCU or HKLM PythonCore 3.13 registration is forbidden,
+    while a pre-existing registration left byte-identical is tolerated."""
     baseline = _baseline_snapshot()
-    # user-scoped PythonCore resolving to {app}\python is EXPECTED, not pollution
+    # clean: no PythonCore anywhere -> no finding
     snap = _install_snapshot()
     findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
     assert not any("PythonCore" in f for f in findings)
-    # wrong resolution IS a finding
-    snap = _install_snapshot(pythoncore_3_13_hkcu_install_path=r"C:\elsewhere")
+    # NEW user-scoped PythonCore IS a finding now (no-provider semantics)
+    snap = _install_snapshot(pythoncore_3_13_hkcu_install_path=_ROOT + "\\python")
     findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
-    assert any("does not resolve" in f for f in findings)
+    assert any("PythonCore" in f for f in findings)
     # NEW machine-scope registration is forbidden
     snap = _install_snapshot(
         pythoncore_3_13_hklm_install_path=r"C:\Program Files\Python313"
     )
     findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
     assert any("machine-scope PythonCore" in f for f in findings)
-
-
-def test_side_effect_witness_start_menu_target() -> None:
-    baseline = _baseline_snapshot()
-    # correct appenv target -> no finding; wrong target -> finding
-    snap = _install_snapshot()
-    assert _SEW.verify_install_findings(baseline, snap, _ROOT) == []
+    # pre-existing registration unchanged (baseline-delta) -> no finding
+    host_py = {"user_path": ["c:\\windows\\system32"],
+               "machine_path": ["c:\\windows\\system32"],
+               "py_launcher_path": None, "py_0p": None,
+               "py_association_progid": None,
+               "pythoncore_3_13_hkcu_install_path": (
+                   r"C:\Users\u\AppData\Local\Programs\Python\Python313"),
+               "pythoncore_3_13_hklm_install_path": None,
+               "uninstall_hkcu": {}, "uninstall_hklm": {},
+               "start_menu_shortcut_exists": False,
+               "start_menu_shortcut_target": None, "runtime_exists": False}
     snap = _install_snapshot(
-        start_menu_shortcut_target=r"C:\Windows\System32\python.exe"
+        pythoncore_3_13_hkcu_install_path=(
+            r"C:\Users\u\AppData\Local\Programs\Python\Python313")
     )
-    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
-    assert any("shortcut target" in f for f in findings)
-    snap = _install_snapshot(start_menu_shortcut_exists=False)
-    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
-    assert any("shortcut is missing" in f for f in findings)
+    findings = _SEW.verify_install_findings(host_py, snap, _ROOT)
+    assert not any("PythonCore" in f for f in findings)
 
 
-def test_side_effect_witness_package_cache_uninstaller_is_ok() -> None:
-    """Regression (rework-11): the per-user CPython Apps&Features entry's
-    Burn/bootstrap uninstaller lives in %LOCALAPPDATA%\\Package Cache (NOT
-    under {app}\python).  Presence in HKCU + PythonCore InstallPath binding
-    are the assertions; the uninstall-string location must NOT be one."""
+def test_side_effect_witness_new_per_user_cpython_entry_is_finding() -> None:
+    """Regression (rework-11 inverted by BOOT-03B): with the standalone
+    substrate a NEW per-user CPython Apps&Features entry (even one whose
+    uninstaller lives in %LOCALAPPDATA%\\Package Cache) is FORBIDDEN —
+    there is no python.org provider bookkeeping any more."""
     baseline = _baseline_snapshot()
     snapshot = _install_snapshot(
         uninstall_hkcu={
@@ -995,19 +1049,35 @@ def test_side_effect_witness_package_cache_uninstaller_is_ok() -> None:
                     "{5F0F1A2B-...}\\python-3.13.15-amd64.exe /uninstall"
                 ),
             },
-            "zealfie 0.1.0": {
-                "display_name": "ZeAlfie 0.1.0",
-                "install_location": _ROOT,
-                "uninstall_string": _ROOT + "\\unins000.exe",
-            },
+            **_zealfie_hkcu(),
         },
+    )
+    findings = _SEW.verify_install_findings(baseline, snapshot, _ROOT)
+    assert any("per-user CPython Apps&Features" in f for f in findings)
+
+
+def test_side_effect_witness_preexisting_hkcu_cpython_is_not_a_finding() -> None:
+    """Baseline-delta: a per-user host CPython entry that ALREADY existed at
+    baseline and is byte-identical afterwards is tolerated."""
+    preexisting = {
+        "python 3.13.15 (64-bit)": {
+            "display_name": "Python 3.13.15 (64-bit)",
+            "install_location": r"C:\Users\u\AppData\Local\Programs\Python\Python313",
+            "uninstall_string": (
+                r"C:\Users\u\AppData\Local\Programs\Python\Python313\uninstall.exe"),
+        },
+    }
+    baseline = _baseline_snapshot()
+    baseline["uninstall_hkcu"] = dict(preexisting)
+    snapshot = _install_snapshot(
+        uninstall_hkcu={**dict(preexisting), **_zealfie_hkcu()}
     )
     assert _SEW.verify_install_findings(baseline, snapshot, _ROOT) == []
 
 
 def test_side_effect_witness_new_hklm_cpython_entry_is_finding() -> None:
-    """Regression (rework-11): a CPython Apps&Features entry NEWLY appearing
-    in HKLM (machine scope, absent from the baseline) is forbidden."""
+    """A CPython Apps&Features entry NEWLY appearing in HKLM (machine scope,
+    absent from the baseline) is forbidden."""
     baseline = _baseline_snapshot()
     snapshot = _install_snapshot(
         uninstall_hklm={
@@ -1019,7 +1089,7 @@ def test_side_effect_witness_new_hklm_cpython_entry_is_finding() -> None:
         },
     )
     findings = _SEW.verify_install_findings(baseline, snapshot, _ROOT)
-    assert any("NEW machine-scope CPython Apps&Features" in f
+    assert any("machine-scope CPython Apps&Features" in f
                for f in findings)
 
 
@@ -1039,37 +1109,99 @@ def test_side_effect_witness_preexisting_hklm_cpython_is_not_a_finding() -> None
     assert _SEW.verify_install_findings(baseline, snapshot, _ROOT) == []
 
 
-def test_side_effect_witness_uninstall_deltas() -> None:
+def test_side_effect_witness_changed_existing_cpython_entry_is_finding() -> None:
+    """An existing host CPython entry whose values change is forbidden (the
+    substrate must not touch the host's registrations)."""
+    entry = {
+        "python 3.13.5 (64-bit)": {
+            "display_name": "Python 3.13.5 (64-bit)",
+            "install_location": r"C:\Program Files\Python313",
+            "uninstall_string": r"C:\Program Files\Python313\uninstall.exe",
+        },
+    }
     baseline = _baseline_snapshot()
-    # clean post-uninstall: owned state gone, provider state kept
-    snap = _install_snapshot(
-        start_menu_shortcut_exists=False,
-        start_menu_shortcut_target=None,
-        uninstall_hkcu={"python 3.13.15 (64-bit)": {
-            "display_name": "Python 3.13.15 (64-bit)",
-            "install_location": _ROOT + "\\python",
-            "uninstall_string": _ROOT + "\\python\\uninstall.exe",
-        }},
-        owned_assets=False,
-        private_python_exists=True,
+    baseline["uninstall_hklm"] = dict(entry)
+    altered = dict(entry)
+    altered["python 3.13.5 (64-bit)"] = dict(
+        entry["python 3.13.5 (64-bit)"], install_location=r"C:\Elsewhere"
     )
+    snapshot = _install_snapshot(uninstall_hklm=altered)
+    findings = _SEW.verify_install_findings(baseline, snapshot, _ROOT)
+    assert any("CPython Apps&Features" in f for f in findings)
+
+
+def test_side_effect_witness_start_menu_target() -> None:
+    baseline = _baseline_snapshot()
+    # correct appenv target -> no finding; wrong target -> finding
+    snap = _install_snapshot()
+    assert _SEW.verify_install_findings(baseline, snap, _ROOT) == []
+    snap = _install_snapshot(
+        start_menu_shortcut_target=r"C:\Windows\System32\python.exe"
+    )
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any("shortcut target" in f for f in findings)
+    snap = _install_snapshot(start_menu_shortcut_exists=False)
+    findings = _SEW.verify_install_findings(baseline, snap, _ROOT)
+    assert any("shortcut is missing" in f for f in findings)
+
+
+def test_side_effect_witness_uninstall_deltas() -> None:
+    """(ZA-WIN-BOOT-03B) After uninstall EVERYTHING installer-owned is gone
+    — shortcut, ZeAlfie registration, assets, private {app}\\python AND
+    {app}\\appenv — and the host footprint is byte-identical to baseline."""
+    baseline = _baseline_snapshot()
+    # clean post-uninstall snapshot (host untouched, nothing left)
+    snap = {
+        "schema": 1,
+        "user_path": ["c:\\windows\\system32"],
+        "machine_path": ["c:\\windows\\system32"],
+        "py_launcher_path": None,
+        "py_0p": None,
+        "py_association_progid": None,
+        "pythoncore_3_13_hkcu_install_path": None,
+        "pythoncore_3_13_hklm_install_path": None,
+        "uninstall_hkcu": {},
+        "uninstall_hklm": {},
+        "start_menu_shortcut_exists": False,
+        "start_menu_shortcut_target": None,
+        "runtime_exists": False,
+        "owned_assets": False,
+        "private_python_exists": False,
+        "appenv_exists": False,
+    }
     assert _SEW.verify_uninstall_findings(baseline, snap, _ROOT) == []
-    # shortcut still present -> finding
-    snap2 = dict(snap, start_menu_shortcut_exists=True)
-    assert any("shortcut still present" in f
+    # private runtime preserved -> finding (removed WITH the installer now)
+    snap2 = dict(snap, private_python_exists=True)
+    assert any("private runtime still present" in f
                for f in _SEW.verify_uninstall_findings(baseline, snap2, _ROOT))
-    # asset still present -> finding
-    snap3 = dict(snap, owned_assets=True)
-    assert any("asset still present" in f
+    # appenv preserved -> finding
+    snap3 = dict(snap, appenv_exists=True)
+    assert any("application environment still present" in f
                for f in _SEW.verify_uninstall_findings(baseline, snap3, _ROOT))
-    # private CPython removed -> finding (documented preservation violated)
-    snap4 = dict(snap, private_python_exists=False)
-    assert any("private CPython unexpectedly removed" in f
+    # shortcut still present -> finding
+    snap4 = dict(snap, start_menu_shortcut_exists=True)
+    assert any("shortcut still present" in f
                for f in _SEW.verify_uninstall_findings(baseline, snap4, _ROOT))
-    # shared runtime touched -> finding
-    snap5 = dict(snap, runtime_exists=True)
-    assert any("runtime" in f
+    # ZeAlfie registration still present -> finding
+    snap5 = dict(snap, uninstall_hkcu=_zealfie_hkcu())
+    assert any("ZeAlfie uninstall registration still present" in f
                for f in _SEW.verify_uninstall_findings(baseline, snap5, _ROOT))
+    # asset still present -> finding
+    snap6 = dict(snap, owned_assets=True)
+    assert any("asset still present" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap6, _ROOT))
+    # shared runtime touched -> finding
+    snap7 = dict(snap, runtime_exists=True)
+    assert any("runtime" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap7, _ROOT))
+    # host PATH changed by uninstall -> finding
+    snap8 = dict(snap, user_path=["c:\\windows\\system32", "c:\\evil"])
+    assert any("user PATH" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap8, _ROOT))
+    # host CPython registration touched by uninstall -> finding
+    snap9 = dict(snap, pythoncore_3_13_hklm_install_path=r"C:\Program Files\Python313")
+    assert any("PythonCore" in f
+               for f in _SEW.verify_uninstall_findings(baseline, snap9, _ROOT))
 
 
 def test_workflow_side_effect_steps_present_in_order() -> None:
@@ -1124,3 +1256,224 @@ def test_workflow_uses_cryptographic_toolchain_provenance() -> None:
     assert "import innosetup_version" not in workflow
     assert 'grep -o "6\\.7\\.3"' not in workflow
     assert '"$ISCC" /?' not in workflow
+
+
+# ---------------------------------------------------------------------------
+# python-build-standalone substrate (ZA-WIN-BOOT-03B) — hermetic
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_install_only_tarball(
+    tmp_path: Path,
+    *,
+    with_pythonw: bool = True,
+    with_python: bool = True,
+    with_lib: bool = True,
+    extra_member: tuple[str, bytes] | None = None,
+) -> Path:
+    """Build a tiny synthetic install_only tar.gz whose layout mirrors the
+    real python-build-standalone archive (top-level ``python/``).  Member
+    modes are set explicitly so extraction works on POSIX hosts."""
+    import io
+    import tarfile
+
+    def _add(tar: tarfile.TarFile, name: str, data: bytes = b"",
+             *, is_dir: bool = False) -> None:
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mode = 0o755 if is_dir else 0o644
+        if is_dir:
+            info.type = tarfile.DIRTYPE
+            info.size = 0
+        tar.addfile(info, io.BytesIO(data) if data else None)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _add(tar, "python/", is_dir=True)
+        if with_python:
+            _add(tar, "python/python.exe", b"console-interpreter")
+        if with_pythonw:
+            _add(tar, "python/pythonw.exe", b"windowed-interpreter")
+        if with_lib:
+            _add(tar, "python/Lib/", is_dir=True)
+            _add(tar, "python/Lib/os.py", b"stdlib")
+            _add(tar, "python/Lib/site-packages/pip/__init__.py", b"pip")
+        if extra_member is not None:
+            name, data = extra_member
+            _add(tar, name, data)
+    path = tmp_path / "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_record_pins_standalone_substrate_metadata() -> None:
+    """The REAL committed record pins the python-build-standalone archive
+    with a consistent filename/URL/tag/triple/size contract."""
+    record = tomllib.loads(_RECORD_FILE.read_text(encoding="utf-8"))
+    cpy = record["cpython"]
+    assert cpy["substrate"] == "python-build-standalone"
+    assert cpy["upstream_repo"] == "astral-sh/python-build-standalone"
+    assert cpy["release_tag"] == "20260901"
+    assert cpy["target_triple"] == "x86_64-pc-windows-msvc"
+    assert cpy["version"] == "3.13.15"
+    assert cpy["installer_filename"] == _PBS_FILENAME
+    assert cpy["sha256"] == _PBS_SHA
+    assert cpy["size"] == 47042104
+    expected_url = (
+        "https://github.com/astral-sh/python-build-standalone/releases/"
+        f"download/20260901/{_PBS_FILENAME.replace('+', '%2B')}"
+    )
+    assert cpy["installer_url"] == expected_url
+    # no legacy EXE fields survive in the RECORD VALUES (prose comments may
+    # still explain the replacement history)
+    all_values = []
+    for table in record.values():
+        for value in table.values():
+            if isinstance(value, str):
+                all_values.append(value)
+            elif isinstance(value, list):
+                all_values.extend(str(v) for v in value)
+    assert "python-3.13.15-amd64.exe" not in " ".join(all_values)
+    assert "installer properties" not in " ".join(all_values)
+
+def test_record_loads_and_archive_digest_verify_pass_fail(tmp_path) -> None:
+    """Digest verification (fail closed) against the loader's record."""
+    archive = tmp_path / _PBS_FILENAME
+    archive.write_bytes(b"pinned-archive-bytes")
+    record = provision.load_record(_RECORD_FILE)
+    with pytest.raises(provision.HashMismatchError):
+        provision.verify_archive_sha256(archive, record=record)
+    # a digest that DOES match must pass
+    from hashlib import sha256
+
+    good = tmp_path / "good-archive.tar.gz"
+    good.write_bytes(b"payload")
+    expected = sha256(b"payload").hexdigest()
+    assert provision.verify_archive_sha256(good, expected) == expected
+
+
+def test_extract_python_tarball_produces_complete_layout(tmp_path: Path) -> None:
+    """Extraction of a synthetic install_only tar produces
+    python.exe + pythonw.exe + Lib (the complete private runtime)."""
+    archive = _synthetic_install_only_tarball(tmp_path)
+    private = provision.extract_python_tarball(archive, tmp_path / "out")
+    assert private == tmp_path / "out" / "python"
+    for name in ("python.exe", "pythonw.exe"):
+        assert (private / name).is_file(), name
+    assert (private / "Lib" / "os.py").is_file()
+    assert (private / "Lib" / "site-packages" / "pip" / "__init__.py").is_file()
+    assert provision.missing_private_python_files(tmp_path / "out") == []
+
+
+def test_extract_python_tarball_fails_closed_without_pythonw(tmp_path: Path) -> None:
+    """A tarball WITHOUT pythonw.exe must be rejected (hard functional
+    requirement of the windowed GUI launcher)."""
+    archive = _synthetic_install_only_tarball(tmp_path, with_pythonw=False)
+    with pytest.raises(provision.ExtractionError, match="pythonw.exe"):
+        provision.extract_python_tarball(archive, tmp_path / "out")
+
+
+def test_extract_python_tarball_fails_closed_without_python_or_lib(
+    tmp_path: Path,
+) -> None:
+    archive = _synthetic_install_only_tarball(tmp_path, with_python=False)
+    with pytest.raises(provision.ExtractionError, match="python.exe"):
+        provision.extract_python_tarball(archive, tmp_path / "out1")
+    archive = _synthetic_install_only_tarball(tmp_path, with_lib=False)
+    with pytest.raises(provision.ExtractionError, match="Lib"):
+        provision.extract_python_tarball(archive, tmp_path / "out2")
+
+
+def test_extract_python_tarball_rejects_unsafe_member(tmp_path: Path) -> None:
+    """Defence in depth: a member escaping python/ (path traversal or an
+    unexpected top-level entry) fails closed."""
+    archive = _synthetic_install_only_tarball(
+        tmp_path,
+        extra_member=("python/../../evil.txt", b"boom"),
+    )
+    with pytest.raises(provision.ExtractionError, match="unsafe"):
+        provision.extract_python_tarball(archive, tmp_path / "out1")
+    archive = _synthetic_install_only_tarball(
+        tmp_path,
+        extra_member=("other/file.txt", b"boom"),
+    )
+    with pytest.raises(provision.ExtractionError, match="unexpected"):
+        provision.extract_python_tarball(archive, tmp_path / "out2")
+
+
+def test_no_pythonorg_exe_or_3010_path_remains_in_iss_and_workflow() -> None:
+    """Source-level assertion: no python.org EXE / Burn / 0/3010 / bundled
+    installer path survives in the .iss or the installer CI workflow."""
+    iss = _iss_text()
+    workflow = (_REPO_ROOT / ".github" / "workflows"
+                / "windows-installer-build.yml").read_text(encoding="utf-8")
+    for text in (iss, workflow):
+        assert "python-3.13.15-amd64.exe" not in text
+        assert "3010" not in text
+        assert "verify-cpython-installer" not in text
+        assert "CpythonInstaller" not in text
+        assert "/DCpythonInstaller" not in text
+        assert "RunCheckedCpython" not in text
+        assert "InstallAllUsers" not in text
+        assert "TargetDir=" not in text
+
+
+def test_no_pip_exe_and_module_invocation_only() -> None:
+    """The bootstrap must use ``python -m pip`` (module invocation) — no
+    pip.exe, no PATH discovery — in every packaging/windows module."""
+    for module in ("provision.py", "provision_windows.py", "installer_smoke.py"):
+        source = (_WINDOWS_PKG / module).read_text(encoding="utf-8")
+        assert "pip.exe" not in source, module
+    # the argv builders invoke pip as a module of the (private) interpreter
+    provision_source = (_WINDOWS_PKG / "provision.py").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(r'"-m",\s*\n\s*"pip",', provision_source), (
+        "pip argv must be python -m pip (module invocation)"
+    )
+    # the .iss bootstrap runs the private interpreter on provision_windows.py
+    iss = _iss_text()
+    assert r"{app}\python\python.exe" in iss
+    assert "python.exe" in iss  # console interpreter drives the bootstrap
+
+def test_private_python_exe_and_pythonw_required_in_iss_and_smoke() -> None:
+    """python.exe AND pythonw.exe of the private runtime are both hard
+    requirements enforced by the .iss gate and the installer smoke."""
+    iss = _iss_text()
+    assert r"{app}\python\python.exe" in iss
+    assert r"{app}\python\pythonw.exe" in iss
+    smoke = (_WINDOWS_PKG / "installer_smoke.py").read_text(encoding="utf-8")
+    assert "missing_private_python_files" in smoke
+    assert "pythonw.exe" in smoke
+    assert "private standalone runtime incomplete" in smoke
+
+def test_workflow_acquire_standalone_before_compile_and_extract_gate() -> None:
+    """The standalone acquisition (download + SHA-256 + extract) must run
+    BEFORE compile-installer and gate on BOTH staged interpreters."""
+    workflow = (_REPO_ROOT / ".github" / "workflows"
+                / "windows-installer-build.yml").read_text(encoding="utf-8")
+    acquire = workflow.index("- id: acquire-standalone-python")
+    compile_step = workflow.index("- id: compile-installer")
+    silent_install = workflow.index("- id: silent-install")
+    assert acquire < compile_step < silent_install
+    assert "provision-python" in workflow  # reuses the provisioning code
+    assert "PYTHON_DIR=$ZEALFIE_STAGE/python" in workflow
+    assert "/DPythonDir=$PYTHON_DIR" in workflow
+    assert "staged python.exe missing" in workflow
+    assert "staged pythonw.exe missing" in workflow
+
+
+def test_uninstall_witness_requires_private_runtime_removal() -> None:
+    """The CI uninstall witness must FAIL if {app}\\python or {app}\\appenv
+    survive uninstall (they are installer-owned and removed WITH Setup)."""
+    workflow = (_REPO_ROOT / ".github" / "workflows"
+                / "windows-installer-build.yml").read_text(encoding="utf-8")
+    start = workflow.index("- id: uninstall-witness")
+    nxt = workflow.find("\n      - id:", start + 1)
+    step = workflow[start: nxt]
+    assert "private standalone runtime not removed by uninstall" in step
+    assert "application environment not removed by uninstall" in step
+    assert "uninstall witness PASS" in step
+    assert "removed, shortcut removed" in step
+    # the preservation-era assertion is gone
+    assert "unexpectedly removed by uninstall" not in step

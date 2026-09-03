@@ -1,39 +1,43 @@
-"""ZeAlfie Windows installer — non-invasive side-effect witness (ZA-WIN-BOOT-02, closure).
-
+"""ZeAlfie Windows installer — non-invasive side-effect witness
+(ZA-WIN-BOOT-02 closure; ZA-WIN-BOOT-03B no-provider semantics).
 Baseline → post-install → post-uninstall DELTA audit of the machine-scope
-footprint the installer is allowed to touch.  The installer's contract:
+footprint the installer is allowed to touch.  Since ZA-WIN-BOOT-03B the
+substrate is a **python-build-standalone** runtime (plain extracted
+files, no installer), so the installer's contract is:
 
-* FORBIDDEN pollution: user/machine PATH unchanged, no new ``py.exe``
-  launcher, no new/changed ``.py`` file association, no machine-scope
-  Python/ZeAlfie registration.
-* EXPECTED provider state (python.org per-user installer, documented
-  platform-provider limitation): a USER-scoped ``PythonCore\\3.13``
-  registration resolving to ``{app}\\python`` and a user-scoped CPython
-  Apps&Features/Uninstall entry pointing into that private install.
+* FORBIDDEN pollution AND FORBIDDEN provider state: user/machine PATH
+  unchanged; ``py.exe`` unchanged (presence/path AND its ``py -0p``
+  registration list); ``.py`` association unchanged; existing
+  ``PythonCore\\3.13`` (HKCU + HKLM) unchanged; NO NEW and NO CHANGED
+  CPython Apps&Features/Uninstall entry in either hive — the standalone
+  substrate creates NO provider state of its own and must not touch any
+  of the host's (baseline-delta, so a pre-existing host CPython is fine
+  as long as it stays byte-identical).
 * EXPECTED ZeAlfie shell: Start Menu shortcut targeting
   ``{app}\\appenv\\Scripts\\zealfie-gui.exe`` and a per-user ZeAlfie
-  uninstall registration.
-* UNINSTALL: shortcut + installer-owned registration/assets removed; the
-  nested private CPython/provider state intentionally preserved;
-  ``%LOCALAPPDATA%\\zealfie\\runtime`` never touched.
-
-Baseline-delta only: nothing here asserts "Python must not exist" (the
-runner may already have Python) — only that the installer changed nothing
+  uninstall registration (no machine-scope ZeAlfie registration).
+* UNINSTALL: everything installer-owned is removed WITH the installer —
+  shortcut, per-user ZeAlfie registration, assets AND the whole private
+  runtime ``{app}\\python`` + ``{app}\\appenv`` (plain files with no
+  external registration: nothing on the host references them, so nothing
+  is preserved); host Python/launcher/PATH/associations/registry
+  unchanged; ``%LOCALAPPDATA%\\zealfie\\runtime`` never touched.
 outside its documented footprint.
 
 Design rules (mirror the other ``packaging/windows`` modules):
 
 * **pure comparison core** — snapshot capture and delta comparison are
   separate functions with injectable seams (``_registry``,
-  ``_registry_subkeys``, ``_which``, ``_isfile``, ``_exists``, ``_env``,
-  ``_shortcut_target``) so the logic is hermetically unit-testable on
-  Linux without ``winreg``/Windows (``winreg`` is imported lazily inside
+  ``_registry_subkeys``, ``_which``, ``_py_0p``, ``_isfile``, ``_exists``,
+  ``_env``, ``_shortcut_target``) so the logic is hermetically unit-testable
+  on Linux without ``winreg``/Windows (``winreg`` is imported lazily inside
   the real readers only);
 * **stdlib-only**; ``ntpath`` normalisation so Windows path comparisons are
   deterministic on every host;
 * **fail closed** — findings exit non-zero with machine-readable JSON
   evidence plus clear stdout lines.
 """
+
 
 from __future__ import annotations
 
@@ -151,6 +155,26 @@ def _real_which(exe: str) -> str | None:
     return shutil.which(exe)
 
 
+def _real_py_0p(py_exe: str | None) -> list[str] | None:
+    """Return the ``py -0p`` registration lines (or None when py.exe is
+    absent/unusable).  ``py -0p`` lists every registered Python; the
+    standalone substrate must never add a registration, so the list must
+    be byte-identical to the baseline."""
+    if not py_exe or sys.platform != "win32":
+        return None
+    try:
+        proc = subprocess.run(
+            [py_exe, "-0p"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    return lines or None
+
+
 def _real_isfile(path: str) -> bool:
     return os.path.isfile(path)
 
@@ -243,6 +267,7 @@ def capture_snapshot(
     _registry=_real_registry,
     _registry_subkeys=_real_registry_subkeys,
     _which=_real_which,
+    _py_0p=_real_py_0p,
     _isfile=_real_isfile,
     _exists=_real_exists,
     _env=_real_env,
@@ -258,12 +283,14 @@ def capture_snapshot(
     lnk = _start_menu_lnk(_env)
     local = _env("LOCALAPPDATA")
     runtime = os.path.join(local, RUNTIME_REL) if local else None
+    py_launcher_path = _which("py.exe")
 
     return {
         "schema": 1,
         "user_path": _path_list(hkcu_env.get("Path")),
         "machine_path": _path_list(hklm_env.get("Path")),
-        "py_launcher_path": _which("py.exe"),
+        "py_launcher_path": py_launcher_path,
+        "py_0p": _py_0p(py_launcher_path),
         "py_association_progid": py_assoc.get(""),
         "pythoncore_3_13_hkcu_install_path": core_hkcu.get(""),
         "pythoncore_3_13_hklm_install_path": core_hklm.get(""),
@@ -291,87 +318,88 @@ def _cpython_entries(uninstall: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def verify_install_findings(
-    baseline: dict, snapshot: dict, install_root: str
-) -> list[str]:
-    """Findings after install: forbidden pollution + expected state."""
-    findings: list[str] = []
-    private_python = ntpath.join(str(install_root), "python")
-    appenv_gui = ntpath.join(
-        str(install_root), "appenv", "Scripts", "zealfie-gui.exe"
-    )
+def _host_unchanged_findings(baseline: dict, snapshot: dict) -> list[str]:
+    """Host-scope deltas that are FORBIDDEN on both install and uninstall.
 
-    # A. FORBIDDEN pollution (baseline deltas only)
+    The standalone substrate (python-build-standalone, plain files) must
+    leave the host's Python footprint byte-identical: user/machine PATH,
+    ``py.exe`` (presence/path and its ``py -0p`` registration list), the
+    ``.py`` association, existing ``PythonCore\\3.13`` values (HKCU + HKLM)
+    and every CPython Apps&Features/Uninstall entry (HKCU + HKLM).  A
+    pre-existing host CPython is fine — it just must not change.
+    """
+    findings: list[str] = []
     if baseline.get("user_path") != snapshot.get("user_path"):
         findings.append("forbidden: user PATH changed by the installer")
     if baseline.get("machine_path") != snapshot.get("machine_path"):
         findings.append("forbidden: machine PATH changed by the installer")
     base_py = baseline.get("py_launcher_path")
     snap_py = snapshot.get("py_launcher_path")
-    if base_py is None and snap_py is not None:
-        findings.append(
-            "forbidden: new py.exe launcher appeared: " + str(snap_py)
-        )
-    elif base_py is not None and _win_norm(base_py) != _win_norm(snap_py):
+    if _win_norm(base_py) != _win_norm(snap_py):
         findings.append(
             f"forbidden: py.exe launcher changed: {base_py!r} -> {snap_py!r}"
         )
+    if baseline.get("py_0p") != snapshot.get("py_0p"):
+        findings.append(
+            "forbidden: py launcher registration (py -0p) changed by the "
+            "installer"
+        )
     base_assoc = baseline.get("py_association_progid")
     snap_assoc = snapshot.get("py_association_progid")
-    if base_assoc is None and snap_assoc is not None:
-        findings.append(
-            "forbidden: new .py file association appeared: "
-            + repr(snap_assoc)
-        )
-    elif base_assoc is not None and snap_assoc != base_assoc:
+    if base_assoc != snap_assoc:
         findings.append(
             f"forbidden: .py file association changed: {base_assoc!r} -> "
             f"{snap_assoc!r}"
         )
-
-    # B. EXPECTED provider state (user-scoped CPython pointing at {app}\python)
-    core_hkcu = snapshot.get("pythoncore_3_13_hkcu_install_path")
-    if core_hkcu is None:
+    base_core_hkcu = baseline.get("pythoncore_3_13_hkcu_install_path")
+    snap_core_hkcu = snapshot.get("pythoncore_3_13_hkcu_install_path")
+    if base_core_hkcu != snap_core_hkcu:
         findings.append(
-            "expected user-scoped PythonCore 3.13 registration is missing"
-        )
-    elif _win_norm(core_hkcu) != _win_norm(private_python):
-        findings.append(
-            "PythonCore 3.13 InstallPath does not resolve to the private "
-            f"install: {core_hkcu!r} != {private_python!r}"
+            "forbidden: user-scoped PythonCore 3.13 registration changed "
+            f"({base_core_hkcu!r} -> {snap_core_hkcu!r}) — the standalone "
+            "substrate must create NO PythonCore state"
         )
     base_core_hklm = baseline.get("pythoncore_3_13_hklm_install_path")
     snap_core_hklm = snapshot.get("pythoncore_3_13_hklm_install_path")
-    if base_core_hklm is None and snap_core_hklm is not None:
+    if base_core_hklm != snap_core_hklm:
         findings.append(
-            "forbidden: NEW machine-scope PythonCore 3.13 registration: "
-            + repr(snap_core_hklm)
+            "forbidden: machine-scope PythonCore 3.13 registration changed "
+            f"({base_core_hklm!r} -> {snap_core_hklm!r}) — the standalone "
+            "substrate must create NO PythonCore state"
         )
-    # Provider uninstaller registration: a per-user CPython Apps&Features
-    # entry must EXIST in HKCU.  Its Burn/bootstrap uninstall executable
-    # legitimately lives in %LOCALAPPDATA%\Package Cache (NOT under
-    # {app}\python), so only PRESENCE is asserted here; the authoritative
-    # provider->runtime binding is the PythonCore InstallPath check above.
-    hkcu_cpython = _cpython_entries(snapshot.get("uninstall_hkcu", {}))
-    if not hkcu_cpython:
+    base_hkcu_cpython = _cpython_entries(baseline.get("uninstall_hkcu", {}))
+    snap_hkcu_cpython = _cpython_entries(snapshot.get("uninstall_hkcu", {}))
+    if base_hkcu_cpython != snap_hkcu_cpython:
         findings.append(
-            "expected per-user CPython Apps&Features entry is missing"
+            "forbidden: per-user CPython Apps&Features registration changed "
+            "(new, removed or altered entry) — the standalone substrate "
+            "must create NO provider uninstall state"
         )
-    # Machine-scope CPython: baseline delta — any CPython Apps&Features
-    # entry NEWLY appearing in HKLM is forbidden (a per-user install must
-    # never introduce machine-scope registration).
-    hklm_cpython = _cpython_entries(snapshot.get("uninstall_hklm", {}))
     base_hklm_cpython = _cpython_entries(baseline.get("uninstall_hklm", {}))
-    machine_pollution = sorted(
-        set(hklm_cpython) - set(base_hklm_cpython)
-    )
-    if machine_pollution:
+    snap_hklm_cpython = _cpython_entries(snapshot.get("uninstall_hklm", {}))
+    if base_hklm_cpython != snap_hklm_cpython:
         findings.append(
-            "forbidden: NEW machine-scope CPython Apps&Features "
-            "registration: " + ", ".join(machine_pollution)
+            "forbidden: machine-scope CPython Apps&Features registration "
+            "changed (new, removed or altered entry) — the standalone "
+            "substrate must create NO provider uninstall state"
         )
+    return findings
 
-    # C. EXPECTED ZeAlfie shell
+
+def verify_install_findings(
+    baseline: dict, snapshot: dict, install_root: str
+) -> list[str]:
+    """Findings after install: forbidden host/provider deltas + shell state."""
+    findings: list[str] = []
+    private_python = ntpath.join(str(install_root), "python")
+    appenv_gui = ntpath.join(
+        str(install_root), "appenv", "Scripts", "zealfie-gui.exe"
+    )
+
+    # A. Host/provider state must be byte-identical (NO new provider state).
+    findings.extend(_host_unchanged_findings(baseline, snapshot))
+
+    # B. EXPECTED ZeAlfie shell
     if not snapshot.get("start_menu_shortcut_exists"):
         findings.append("expected ZeAlfie Start Menu shortcut is missing")
     elif _win_norm(snapshot.get("start_menu_shortcut_target")) != _win_norm(
@@ -399,16 +427,16 @@ def verify_install_findings(
 def verify_uninstall_findings(
     baseline: dict, snapshot: dict, install_root: str
 ) -> list[str]:
-    """Findings after uninstall: owned state removed, provider state kept.
+    """Findings after uninstall: owned state removed, host state untouched.
 
     Pure: everything observable (shortcut, registrations, asset/private-
-    python existence, runtime state) must already be IN the snapshot dict
-    (the CLI enriches the captured snapshot before comparing).
+    python/appenv existence, runtime state) must already be IN the snapshot
+    dict (the CLI enriches the captured snapshot before comparing).
     """
     findings: list[str] = []
-    private_python_exe = ntpath.join(
-        str(install_root), "python", "python.exe"
-    )
+
+    # A. Host/provider state still byte-identical after uninstall.
+    findings.extend(_host_unchanged_findings(baseline, snapshot))
 
     if snapshot.get("start_menu_shortcut_exists"):
         findings.append(
@@ -428,11 +456,20 @@ def verify_uninstall_findings(
         findings.append(
             "installer-owned asset still present after uninstall"
         )
-    if not snapshot.get("private_python_exists"):
+    # The private standalone runtime is installer-owned plain files with NO
+    # external registration — it is removed WITH the installer.
+    if snapshot.get("private_python_exists"):
         findings.append(
-            f"private CPython unexpectedly removed by the uninstaller "
-            f"(documented platform-provider state {private_python_exe!r} "
-            f"must be preserved)"
+            "private runtime still present after uninstall "
+            f"({ntpath.join(str(install_root), 'python', 'python.exe')!r}) — "
+            "the python-build-standalone substrate is installer-owned and "
+            "must be removed with the installer"
+        )
+    if snapshot.get("appenv_exists"):
+        findings.append(
+            "application environment still present after uninstall "
+            f"({ntpath.join(str(install_root), 'appenv')!r}) — the appenv is "
+            "installer-owned and must be removed with the installer"
         )
     if baseline.get("runtime_exists") != snapshot.get("runtime_exists"):
         findings.append(
@@ -508,6 +545,9 @@ def main(argv: list[str] | None = None) -> int:
     snapshot["owned_assets"] = _real_isfile(owned_ico)
     snapshot["private_python_exists"] = _real_isfile(
         ntpath.join(install_root, "python", "python.exe")
+    )
+    snapshot["appenv_exists"] = _real_isfile(
+        ntpath.join(install_root, "appenv", "Scripts", "python.exe")
     )
 
     if args.command == "verify-install":

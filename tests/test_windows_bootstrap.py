@@ -3,9 +3,11 @@
 Covers, from ``packaging/windows/provision.py`` (the pure provisioning
 module):
 
-* reproducibility-record load/validation (fail closed on bad records);
+* reproducibility-record load/validation (fail closed on bad records,
+  incl. the python-build-standalone filename/URL/tag consistency contract);
 * SHA-256 verification pass/fail (fail closed on mismatch);
-* silent per-user install argv construction;
+* standalone tarball layout helpers (python.exe + pythonw.exe + Lib) and
+  private-runtime presence requirements;
 * appenv / child-venv provenance assertions pass/fail;
 * runner/system preinstalled-Python detection and rejection (path
   provenance only, case-insensitive, ntpath semantics on every host).
@@ -73,14 +75,25 @@ def test_record_loads_and_pins_the_documented_values() -> None:
     assert record.zealfie_version == "0.1.0"
     assert record.zealfie_revision == "a1a777a2df065b86c9f7e5305550ac436f60b42d"
     assert record.cpython_version == "3.13.15"
-    assert record.architecture == "x86_64"
-    assert record.installer_filename == "python-3.13.15-amd64.exe"
+    assert record.substrate == "python-build-standalone"
+    assert record.upstream_repo == "astral-sh/python-build-standalone"
+    assert record.release_tag == "20260901"
+    assert record.target_triple == "x86_64-pc-windows-msvc"
+    assert record.installer_filename == (
+        "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-"
+        "install_only.tar.gz"
+    )
     assert record.installer_url == (
-        "https://www.python.org/ftp/python/3.13.15/"
-        "python-3.13.15-amd64.exe"
+        "https://github.com/astral-sh/python-build-standalone/releases/"
+        "download/20260901/cpython-3.13.15%2B20260901-x86_64-pc-windows-"
+        "msvc-install_only.tar.gz"
+    )
+    assert record.sha256 == (
+        "9bcc038a0bf180612ed56dec93d4977d035e80b8d9320ef51a38c287baf134b7"
     )
     assert len(record.sha256) == 64
     assert record.sha256 == record.sha256.lower()
+    assert record.size == 47042104
     assert record.per_user is True
     assert record.silent is True
 
@@ -93,15 +106,18 @@ revision = "a1a777a2df065b86c9f7e5305550ac436f60b42d"
 
 [cpython]
 version = "3.13.15"
-architecture = "x86_64"
-installer_filename = "python-3.13.15-amd64.exe"
-installer_url = "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe"
-sha256 = "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403"
+substrate = "python-build-standalone"
+upstream_repo = "astral-sh/python-build-standalone"
+release_tag = "20260901"
+target_triple = "x86_64-pc-windows-msvc"
+installer_filename = "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
+installer_url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
+sha256 = "9bcc038a0bf180612ed56dec93d4977d035e80b8d9320ef51a38c287baf134b7"
+size = 47042104
 
 [install]
 per_user = true
 silent = true
-properties = ["InstallAllUsers=0", "PrependPath=0"]
 """
     import tomllib
 
@@ -148,9 +164,71 @@ def test_record_rejects_short_sha256(tmp_path) -> None:
 def test_record_rejects_inconsistent_installer_url(tmp_path) -> None:
     path = _write_record(
         tmp_path,
-        **{"cpython.installer_url": "https://evil.example.com/python-3.13.15-amd64.exe"},
+        **{"cpython.installer_url": "https://evil.example.com/not-the-pinned-archive"},
     )
     with pytest.raises(provision.RecordError, match="inconsistent"):
+        provision.load_record(path)
+
+
+def test_record_rejects_installer_filename_inconsistent_with_fields(tmp_path) -> None:
+    # filename must derive exactly from version + release_tag + target_triple
+    path = _write_record(
+        tmp_path,
+        **{"cpython.installer_filename": "cpython-3.13.15+20260101-x86_64-pc-windows-msvc-install_only.tar.gz"},
+    )
+    with pytest.raises(provision.RecordError, match="installer_filename"):
+        provision.load_record(path)
+
+
+def test_record_rejects_non_pbs_filename_shape(tmp_path) -> None:
+    # a python.org EXE filename must NOT be accepted by the standalone record
+    path = _write_record(
+        tmp_path,
+        **{"cpython.installer_filename": "python-3.13.15-amd64.exe",
+           "cpython.installer_url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe"},
+    )
+    with pytest.raises(provision.RecordError, match="install_only"):
+        provision.load_record(path)
+
+
+def test_record_rejects_unknown_substrate(tmp_path) -> None:
+    path = _write_record(tmp_path, **{"cpython.substrate": "python.org-installer"})
+    with pytest.raises(provision.RecordError, match="substrate"):
+        provision.load_record(path)
+
+
+def test_record_rejects_missing_size(tmp_path) -> None:
+    import json
+    import tomllib
+
+    def _dump(value):
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, str):
+            return json.dumps(value)
+        if isinstance(value, int):
+            return str(value)
+        raise AssertionError(f"unhandled type: {type(value)!r}")
+
+    data = tomllib.loads(
+        _write_record(tmp_path).read_text(encoding="utf-8")
+    )
+    del data["cpython"]["size"]
+    lines = []
+    for section, fields in data.items():
+        lines.append(f"[{section}]")
+        for key, value in fields.items():
+            lines.append(f"{key} = {_dump(value)}")
+        lines.append("")
+    path = tmp_path / "reproducibility.toml"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    with pytest.raises(provision.RecordError, match="size"):
+        provision.load_record(path)
+
+
+def test_record_rejects_bad_release_tag(tmp_path) -> None:
+    path = _write_record(tmp_path, **{"cpython.release_tag": "2026-09-01"})
+    with pytest.raises(provision.RecordError, match="release_tag"):
         provision.load_record(path)
 
 
@@ -160,22 +238,30 @@ def test_record_rejects_non_full_revision(tmp_path) -> None:
         provision.load_record(path)
 
 
-def test_record_rejects_admin_wide_install_properties(tmp_path) -> None:
-    path = _write_record(
-        tmp_path,
-        **{"install.properties": ["InstallAllUsers=1", "PrependPath=0"]},
-    )
-    with pytest.raises(provision.RecordError, match="InstallAllUsers"):
+def test_record_rejects_non_per_user(tmp_path) -> None:
+    # the bootstrap contract is per-user only (no installer properties exist
+    # anymore — the substrate is extracted plain files, so the posture is a
+    # hard boolean on [install] rather than an EXE property list)
+    path = _write_record(tmp_path, **{"install.per_user": False})
+    with pytest.raises(provision.RecordError, match="per-user"):
         provision.load_record(path)
 
 
-def test_record_rejects_prepend_path(tmp_path) -> None:
-    path = _write_record(
-        tmp_path,
-        **{"install.properties": ["InstallAllUsers=0", "PrependPath=1"]},
-    )
-    with pytest.raises(provision.RecordError, match="PrependPath"):
+def test_record_rejects_non_boolean_install_flags(tmp_path) -> None:
+    path = _write_record(tmp_path, **{"install.silent": "yes"})
+    with pytest.raises(provision.RecordError, match="boolean"):
         provision.load_record(path)
+
+
+def test_record_no_exe_property_surface_remains() -> None:
+    # the python.org EXE semantics (properties/switches/architecture) are gone
+    text = _RECORD_FILE.read_text(encoding="utf-8")
+    assert "InstallAllUsers" not in text
+    assert "PrependPath" not in text
+    assert "Include_launcher" not in text
+    assert "properties" not in text
+    assert "switches" not in text
+    assert "architecture =" not in text
 
 
 def test_record_load_fails_closed_on_missing_file(tmp_path) -> None:
@@ -195,52 +281,84 @@ def test_sha256_file_matches_stdlib(tmp_path) -> None:
     assert provision.sha256_file(path) == hashlib.sha256(payload).hexdigest()
 
 
-def test_verify_installer_sha256_passes_on_match(tmp_path) -> None:
-    installer = tmp_path / "python-3.13.15-amd64.exe"
-    installer.write_bytes(b"fake-installer-bytes")
-    expected = hashlib.sha256(b"fake-installer-bytes").hexdigest()
-    assert provision.verify_installer_sha256(installer, expected) == expected
+def test_verify_archive_sha256_passes_on_match(tmp_path) -> None:
+    archive = tmp_path / "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
+    archive.write_bytes(b"fake-archive-bytes")
+    expected = hashlib.sha256(b"fake-archive-bytes").hexdigest()
+    assert provision.verify_archive_sha256(archive, expected) == expected
 
 
-def test_verify_installer_sha256_fails_closed_on_mismatch(tmp_path) -> None:
-    installer = tmp_path / "python-3.13.15-amd64.exe"
-    installer.write_bytes(b"fake-installer-bytes")
+def test_verify_archive_sha256_fails_closed_on_mismatch(tmp_path) -> None:
+    archive = tmp_path / "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
+    archive.write_bytes(b"fake-archive-bytes")
     expected = "e" * 64
     with pytest.raises(provision.HashMismatchError, match="SHA-256 mismatch"):
-        provision.verify_installer_sha256(installer, expected)
+        provision.verify_archive_sha256(archive, expected)
 
 
-def test_verify_installer_sha256_uses_record_when_supplied(tmp_path) -> None:
-    installer = tmp_path / "python-3.13.15-amd64.exe"
-    installer.write_bytes(b"fake-installer-bytes")
+def test_verify_archive_sha256_uses_record_when_supplied(tmp_path) -> None:
+    archive = tmp_path / "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
+    archive.write_bytes(b"fake-archive-bytes")
     record = provision.load_record(_RECORD_FILE)
     with pytest.raises(provision.HashMismatchError):
         # The real pinned digest cannot match this tiny fake file.
-        provision.verify_installer_sha256(installer, record=record)
+        provision.verify_archive_sha256(archive, record=record)
 
 
 # ---------------------------------------------------------------------------
-# Silent per-user install argv
+# Private standalone runtime layout (python.exe + pythonw.exe + Lib)
 # ---------------------------------------------------------------------------
 
 
-def test_install_argv_is_silent_per_user_and_non_invasive() -> None:
-    record = provision.load_record(_RECORD_FILE)
-    argv = provision.build_install_argv(
-        record, target_dir=_PRIVATE_DIR, log_path=r"C:\zealfie-witness\logs\i.log"
+def test_layout_helpers_include_pythonw_and_lib() -> None:
+    def _win(path: Path) -> str:
+        return str(path).replace("/", "\\")
+
+    assert _win(provision.private_python_dir(_WITNESS)) == _PRIVATE_DIR
+    assert _win(provision.private_python_exe(_WITNESS)) == (
+        _PRIVATE_DIR + r"\python.exe"
     )
-    joined = " ".join(argv)
-    assert "/quiet" in argv and "/norestart" in argv
-    assert "InstallAllUsers=0" in argv
-    assert "PrependPath=0" in argv
-    assert "Include_launcher=0" in argv
-    assert "AssociateFiles=0" in argv
-    assert "Shortcuts=0" in argv
-    assert "Include_pip=1" in argv
-    assert "Include_venv=1" in argv
-    assert "InstallAllUsers=1" not in joined
-    assert f"TargetDir={_PRIVATE_DIR}" in argv
-    assert "/log" in argv and argv[-1] == r"C:\zealfie-witness\logs\i.log"
+    assert _win(provision.private_pythonw_exe(_WITNESS)) == (
+        _PRIVATE_DIR + r"\pythonw.exe"
+    )
+    assert _win(provision.private_python_lib(_WITNESS)) == (
+        _PRIVATE_DIR + r"\Lib"
+    )
+
+
+def test_missing_private_python_files_empty_when_complete() -> None:
+    import ntpath
+
+    root = r"C:\Users\u\AppData\Local\Programs\ZeAlfie"
+    existing = {
+        ntpath.normcase(root + r"\python\python.exe"),
+        ntpath.normcase(root + r"\python\pythonw.exe"),
+        ntpath.normcase(root + r"\python\Lib"),
+    }
+    missing = provision.missing_private_python_files(
+        root,
+        _exists=lambda p: ntpath.normcase(str(p)) in existing,
+    )
+    assert missing == []
+
+
+def test_missing_private_python_files_reports_gaps() -> None:
+    root = r"C:\Users\u\AppData\Local\Programs\ZeAlfie"
+    # only python.exe present -> pythonw.exe AND Lib must be reported
+    import ntpath
+
+    existing = {ntpath.normcase(root + r"\python\python.exe")}
+    missing = provision.missing_private_python_files(
+        root,
+        _exists=lambda p: ntpath.normcase(str(p)) in existing,
+    )
+    assert missing == [r"python\pythonw.exe", r"python\Lib"]
+
+    missing_none = provision.missing_private_python_files(
+        root, _exists=lambda p: False
+    )
+    assert missing_none == [r"python\python.exe", r"python\pythonw.exe",
+                            r"python\Lib"]
 
 
 # ---------------------------------------------------------------------------

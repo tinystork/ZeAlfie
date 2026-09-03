@@ -1,9 +1,16 @@
-# Windows private Python substrate — architecture review (ZA-WIN-BOOT-03A)
+# Windows private Python substrate — architecture review (ZA-WIN-BOOT-03A) + implementation record (ZA-WIN-BOOT-03B)
 
-Status: **architecture / investigation / proof plan ONLY.** No substrate
-replacement has been implemented. This document is the recommendation and
-proof plan for human approval before any implementation (the next mission,
-ZA-WIN-BOOT-03B).
+Status: **IMPLEMENTED in ZA-WIN-BOOT-03B** (committed on
+`feature/windows-standalone-bootstrap`).  The python-build-standalone
+substrate below is the SHIPPED pin: `packaging/windows/reproducibility.toml`
+now records it (filename/URL/SHA-256/size), `provision.py`/
+`provision_windows.py` verify + extract it at CI build time, the Inno
+installer embeds the extracted files under `{app}\python`, the side-effect
+witness asserts NO provider state, and uninstall removes the private
+runtime WITH the installer.  Sections 1–15 below are the original
+architecture analysis (kept for context); the migration surface of §12 is
+now implemented.  The proof of the isolation claim is the Windows CI
+witness (clean + hostile) that runs against the shipped installer.
 
 > Replaces the substrate conclusion previously recorded in
 > `packaging/windows/reproducibility.toml` ("official python.org full
@@ -99,8 +106,9 @@ size: 47 042 104 bytes
 sha256: 9bcc038a0bf180612ed56dec93d4977d035e80b8d9320ef51a38c287baf134b7
 ```
 
-(verified live against the `20260901` release on 2026-09-03; the exact tag
-is re-pinned at implementation time.)
+(verified live against the `20260901` release on 2026-09-03; this IS
+the shipped pin — ZA-WIN-BOOT-03B implementation record at the end of
+this document.)
 
 Rationale:
 
@@ -286,7 +294,12 @@ substrate deterministically).
 
 ---
 
-## 12. Exact migration surface (BOOT-03B; NOT implemented here)
+## 12. Exact migration surface (BOOT-03B) — implemented
+
+This section was written as the BOOT-03B plan; ZA-WIN-BOOT-03B has
+since implemented exactly this surface (see the implementation
+record at the end of this document).  The numbered notes below are
+kept as the historical plan.
 
 **Changes expected:**
 
@@ -345,21 +358,24 @@ catalog; managed child-runtime design; Inno toolchain pin.
 
 ## 14. Risks / open questions
 
-- **Exact pin:** confirm the final chosen release tag + asset SHA-256 at
-  implementation time (the `20260901` example above was verified live but
-  the tag must be re-pinned when implementation lands).
-- **pip bundling:** verify the chosen `install_only` tarball bundles `pip`
-  (recent releases do); if not, bootstrap with `get-pip.py` +
-  `--no-index --find-links` from the already-pinned `pip`/`setuptools`/
-  `wheel` wheels (bounded, no PyPI).
-- **`pythonw.exe`:** verify presence in the chosen tarball (expected in the
-  standard Windows build); this is a hard functional requirement for the
-  windowed GUI launcher.
-- **Extraction layout:** confirm the tarball's top-level `python/` mapping
-  to `{app}\python` (adjust the extract step if the layout differs).
+- **Exact pin:** SHIPPED — release tag `20260901` + asset SHA-256 recorded
+  in `packaging/windows/reproducibility.toml` and verified live on Linux
+  (see the implementation record at the end of this document).
+- **pip bundling:** RESOLVED — the chosen `install_only` tarball bundles
+  pip (`Lib/site-packages/pip` AND `ensurepip` with the `pip-26.2.1`
+  wheel); the base runtime uses `python.exe -m pip` and appenv pip is
+  bootstrapped by `venv`. No `get-pip.py` bootstrap needed.
+- **`pythonw.exe`:** RESOLVED — present in the shipped tarball
+  (`python/pythonw.exe` verified on Linux; hard functional requirement for
+  the windowed GUI launcher, enforced by the .iss presence gate + smoke).
+- **Extraction layout:** RESOLVED — the tarball's top-level directory is
+  `python/`, extracted to `{app}\python` (verified on Linux; the extract
+  helper enforces that layout and rejects anything else).
 - **Relocatability proof:** the clean+hostile witnesses must empirically
   confirm `base_prefix == {app}\python` from an arbitrary `{app}` path.
-- **License text bundling:** retain the PSF license notice in the artifact.
+- **License text bundling:** DONE — the PSF license from the verified
+  archive is staged under `packaging/windows/licenses/` and installed to
+  `{app}\assets\licenses` (see the implementation record).
 
 ---
 
@@ -389,8 +405,40 @@ also meeting G5–G7 (full capability) without fragile hacks.
 
 ---
 
-## Human gate
+## Implementation record (ZA-WIN-BOOT-03B — human approval granted)
 
-**STOP here.** The substrate has NOT been replaced; no `.iss`, pin, or
-implementation has been changed. Await explicit human approval of
-`python-build-standalone` before ZA-WIN-BOOT-03B implements it.
+The human approved the python-build-standalone substrate; ZA-WIN-BOOT-03B
+implemented it.  Exact shipped pin (also in
+`packaging/windows/reproducibility.toml`, verified LIVE on a Linux host on
+2026-09-03 from the official GitHub release asset):
+
+```
+cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz
+url: https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-pc-windows-msvc-install_only.tar.gz
+sha256: 9bcc038a0bf180612ed56dec93d4977d035e80b8d9320ef51a38c287baf134b7
+size:   47 042 104 bytes
+```
+
+Payload verification (independent, Linux): the archive contains
+`python/python.exe` AND `python/pythonw.exe` AND `python/Lib/` (full
+stdlib); pip is bundled (`Lib/site-packages/pip` + `ensurepip` with the
+`pip-26.2.1` wheel, so `python.exe -m pip` and `venv` work — no `pip.exe`,
+no PATH discovery); the VC++ runtime is application-local
+(`vcruntime140.dll` + `vcruntime140_1.dll` bundled in `python/`) — NO
+machine/user-wide VC++ Redistributable is required.  The runtime's PSF
+license (`python/LICENSE.txt`) is staged under
+`packaging/windows/licenses/` and installed to `{app}\assets\licenses`.
+
+What changed (summary): `reproducibility.toml` pins the archive;
+`provision.py`/`provision_windows.py` verify SHA-256 + extract with stdlib
+tarfile at CI build time (no installer, no 0/3010 semantics);
+`zealfie.iss` embeds the extracted plain files into `{app}\python` and
+fail-closed requires `python.exe` + `pythonw.exe`; the side-effect witness
+now asserts NO provider state on install and removal of the private
+runtime on uninstall; docs + hermetic tests updated.  The end-user machine
+never needs tar / PowerShell-archive / 7-Zip / Python / network.
+
+Acceptance: the Windows CI witness (installer build → silent install →
+installer smoke → side-effect install audit → uninstall → side-effect
+uninstall audit) plus the hostile same-minor collision witness (§7) are
+the gates that close this milestone.

@@ -1,18 +1,23 @@
 """Pure provisioning logic for the ZeAlfie Windows standalone bootstrap.
 
-ZA-WIN-BOOT-01: establish the Windows proof that ZeAlfie runs as a
-standalone application on a **private, pinned CPython 3.13** runtime with
-NO dependency on the GitHub runner's preinstalled Python once provisioning
-has completed.
+ZA-WIN-BOOT-01 + ZA-WIN-BOOT-03B: establish the Windows proof that ZeAlfie
+runs as a standalone application on a **private, pinned CPython 3.13**
+runtime with NO dependency on the GitHub runner's preinstalled Python once
+provisioning has completed.  Since ZA-WIN-BOOT-03B the substrate is the
+**python-build-standalone** (astral-sh) ``install_only`` tarball — plain
+relocatable CPython files — instead of the python.org executable installer
+(whose Burn MajorUpgrade semantics broke same-minor host isolation).
 
 This module is deliberately:
 
-* **pure** — it performs no I/O beyond reading the reproducibility record
-  (``load_record``); every other function is a pure transformation or
-  assertion with injectable seams;
 * **stdlib-only** — no ZeAlfie import (so it can never be entangled with
-  the shared runtime), no third-party import (``tomllib`` is stdlib on
-  Python 3.11+);
+  the shared runtime), no third-party import (``tomllib``, ``tarfile``,
+  ``urllib.parse`` are stdlib on Python 3.11+);
+* **pure where it matters** — record validation, argv construction and
+  layout/provenance assertions are pure transformations with injectable
+  seams; the only I/O is reading the reproducibility record
+  (``load_record``) and the fail-closed tarball digest + safe extraction
+  (``verify_archive_sha256`` / ``extract_python_tarball``);
 * **hermetically testable on Linux** — Windows path semantics are handled
   with :mod:`ntpath`, which behaves identically on every platform, so the
   Windows witness logic is unit-tested without a real private Python and
@@ -20,7 +25,8 @@ This module is deliberately:
 
 Layout produced (conceptual, under a per-user CI witness root)::
 
-    <root>/python/    private pinned CPython 3.13 (silent per-user install)
+    <root>/python/    private pinned CPython 3.13 (extracted standalone
+                      runtime: python.exe + pythonw.exe + Lib/ + pip)
     <root>/appenv/    dedicated venv containing the installed ZeAlfie
 
 The existing shared runtime (``%LOCALAPPDATA%\\zealfie\\runtime`` with
@@ -38,28 +44,34 @@ import ntpath
 import os
 import re
 import sys
+import tarfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable
+from urllib.parse import quote
 
 __all__ = [
     "WindowsBootstrapError",
     "RecordError",
     "HashMismatchError",
+    "ExtractionError",
     "ProvenanceError",
     "RunnerPythonError",
     "ReproducibilityRecord",
     "default_record_path",
     "load_record",
     "sha256_file",
-    "verify_installer_sha256",
+    "verify_archive_sha256",
     "private_python_dir",
     "private_python_exe",
+    "private_pythonw_exe",
+    "private_python_lib",
+    "missing_private_python_files",
+    "extract_python_tarball",
     "appenv_dir",
     "appenv_python_exe",
     "appenv_scripts_dir",
-    "build_install_argv",
     "venv_create_argv",
     "pip_install_wheel_argv",
     "pip_install_wheel_offline_argv",
@@ -77,7 +89,16 @@ __all__ = [
 ]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_ISO_FILENAME_RE = re.compile(r"^python-\d+\.\d+\.\d+-amd64\.exe$")
+#: python-build-standalone install_only tarball of a single release:
+#: cpython-<version>+<YYYYMMDD>-<triple>-install_only.tar.gz
+_PBS_FILENAME_RE = re.compile(
+    r"^cpython-\d+\.\d+\.\d+\+\d{8}-[a-z0-9_.-]+-install_only\.tar\.gz$"
+)
+_RELEASE_TAG_RE = re.compile(r"^\d{8}$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_SUBSTRATE_NAME = "python-build-standalone"
+#: Canonical top-level directory inside the install_only tarball.
+_TARBALL_TOP_DIR = "python"
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +115,11 @@ class RecordError(WindowsBootstrapError):
 
 
 class HashMismatchError(WindowsBootstrapError):
-    """Downloaded installer SHA-256 does not match the pinned record."""
+    """Downloaded archive SHA-256 does not match the pinned record."""
+
+
+class ExtractionError(WindowsBootstrapError):
+    """The standalone tarball is unsafe or its layout is incomplete."""
 
 
 class ProvenanceError(WindowsBootstrapError):
@@ -112,23 +137,31 @@ class RunnerPythonError(ProvenanceError):
 
 @dataclass(frozen=True, slots=True)
 class ReproducibilityRecord:
-    """Pinned record describing the exact private runtime to provision."""
+    """Pinned record describing the exact private runtime to provision.
+
+    Since ZA-WIN-BOOT-03B the substrate is a python-build-standalone
+    ``install_only`` tarball (plain relocatable CPython files) rather than
+    the python.org executable installer — there is therefore no installer
+    property/switch surface; the archive is verified and extracted.
+    """
 
     zealfie_version: str
     zealfie_revision: str
     cpython_version: str
-    architecture: str
+    substrate: str
+    upstream_repo: str
+    release_tag: str
+    target_triple: str
     installer_filename: str
     installer_url: str
     sha256: str
-    per_user: bool
-    silent: bool
-    properties: tuple[str, ...] = ()
-    switches: tuple[str, ...] = ()
+    size: int
+    per_user: bool = True
+    silent: bool = True
 
     @property
     def python_dir_name(self) -> str:
-        """Directory name of the private CPython install under a witness root."""
+        """Directory name of the private CPython tree under a witness root."""
         return "python"
 
     @property
@@ -148,6 +181,16 @@ def load_record(path: str | os.PathLike[str] | None = None) -> ReproducibilityRe
     Raises :class:`RecordError` when the file is unreadable or any pinned
     field is missing/inconsistent.  Field names follow the TOML sections
     ``[zealfie]``, ``[cpython]``, ``[install]``.
+
+    Fail-closed consistency contract:
+
+    * ``sha256`` is a 64-char lowercase hex digest;
+    * the substrate fields describe a python-build-standalone install_only
+      tarball whose FILENAME derives exactly from ``version`` +
+      ``release_tag`` + ``target_triple`` and whose URL derives exactly
+      from ``upstream_repo`` + ``release_tag`` + the (URL-quoted)
+      filename — any drift fails the record;
+    * ``[install]`` stays per-user/silent (booleans, never strings).
     """
     record_path = Path(path) if path is not None else default_record_path()
     try:
@@ -187,22 +230,66 @@ def load_record(path: str | os.PathLike[str] | None = None) -> ReproducibilityRe
             f"digest: {sha256!r}"
         )
 
+    version = _text(cpython, "version")
+    substrate = _text(cpython, "substrate")
+    if substrate != _SUBSTRATE_NAME:
+        raise RecordError(
+            "reproducibility record substrate must be "
+            f"{_SUBSTRATE_NAME!r}, got {substrate!r}"
+        )
+    repo = _text(cpython, "upstream_repo")
+    if not _REPO_RE.match(repo):
+        raise RecordError(
+            "reproducibility record upstream_repo is not an owner/repo "
+            f"pair: {repo!r}"
+        )
+    release_tag = _text(cpython, "release_tag")
+    if not _RELEASE_TAG_RE.match(release_tag):
+        raise RecordError(
+            "reproducibility record release_tag must be a YYYYMMDD tag, "
+            f"got {release_tag!r}"
+        )
+    target_triple = _text(cpython, "target_triple")
+    if not re.fullmatch(r"[a-z0-9_.-]+", target_triple):
+        raise RecordError(
+            "reproducibility record target_triple has an invalid shape: "
+            f"{target_triple!r}"
+        )
+
     filename = _text(cpython, "installer_filename")
-    if not _ISO_FILENAME_RE.match(filename):
+    if not _PBS_FILENAME_RE.match(filename):
         raise RecordError(
             "reproducibility record installer_filename does not match the "
-            f"official python.org pattern: {filename!r}"
+            "python-build-standalone install_only pattern "
+            f"(cpython-<v>+<YYYYMMDD>-<triple>-install_only.tar.gz): {filename!r}"
+        )
+    expected_filename = (
+        f"cpython-{version}+{release_tag}-{target_triple}-install_only.tar.gz"
+    )
+    if filename != expected_filename:
+        raise RecordError(
+            "reproducibility record installer_filename is inconsistent with "
+            "the pinned version/release_tag/target_triple: expected "
+            f"{expected_filename!r}, got {filename!r}"
         )
 
     url = _text(cpython, "installer_url")
-    version = _text(cpython, "version")
     expected_url = (
-        f"https://www.python.org/ftp/python/{version}/{filename}"
+        f"https://github.com/{repo}/releases/download/"
+        f"{release_tag}/{quote(filename, safe='')}"
     )
     if url != expected_url:
         raise RecordError(
             "reproducibility record installer_url is inconsistent with the "
-            f"pinned version/filename: expected {expected_url!r}, got {url!r}"
+            "pinned repo/tag/filename: expected "
+            f"{expected_url!r}, got {url!r}"
+        )
+
+    size = cpython.get("size")
+    if not isinstance(size, int) or size <= 0:
+        raise RecordError(
+            "reproducibility record cpython.size must be a positive integer, "
+            f"got {size!r}"
         )
 
     revision = _text(zealfie, "revision")
@@ -212,50 +299,37 @@ def load_record(path: str | os.PathLike[str] | None = None) -> ReproducibilityRe
             f"git commit SHA: {revision!r}"
         )
 
-    properties_raw = install.get("properties", [])
-    switches_raw = install.get("switches", [])
-    if not isinstance(properties_raw, list) or not isinstance(switches_raw, list):
-        raise RecordError(
-            "reproducibility record [install] properties/switches must be lists"
-        )
+    def _flag(section: dict, key: str, default: bool) -> bool:
+        value = section.get(key, default)
+        if not isinstance(value, bool):
+            raise RecordError(
+                f"reproducibility record field {key!r} must be a boolean"
+            )
+        return value
 
-    properties = tuple(str(p) for p in properties_raw)
-    switches = tuple(str(s) for s in switches_raw)
-    _validate_install_properties(properties)
+    per_user = _flag(install, "per_user", True)
+    silent = _flag(install, "silent", True)
+    if not per_user:
+        raise RecordError(
+            "reproducibility record requests a non-per-user install; the "
+            "bootstrap is per-user only"
+        )
 
     return ReproducibilityRecord(
         zealfie_version=_text(zealfie, "version"),
         zealfie_revision=revision.lower(),
         cpython_version=version,
-        architecture=_text(cpython, "architecture"),
+        substrate=substrate,
+        upstream_repo=repo,
+        release_tag=release_tag,
+        target_triple=target_triple,
         installer_filename=filename,
         installer_url=url,
         sha256=sha256,
-        per_user=bool(install.get("per_user", True)),
-        silent=bool(install.get("silent", True)),
-        properties=properties,
-        switches=switches,
+        size=size,
+        per_user=per_user,
+        silent=silent,
     )
-
-
-def _validate_install_properties(properties: Sequence[str]) -> None:
-    """Reject a record whose install properties contradict the no-admin,
-    per-user, non-invasive contract (fail closed)."""
-    mapping = {
-        str(p).split("=", 1)[0]: str(p).split("=", 1)[1]
-        for p in properties
-        if "=" in str(p)
-    }
-    if mapping.get("InstallAllUsers") == "1":
-        raise RecordError(
-            "reproducibility record requests InstallAllUsers=1 (admin); the "
-            "bootstrap is per-user only"
-        )
-    if mapping.get("PrependPath") == "1":
-        raise RecordError(
-            "reproducibility record requests PrependPath=1; the private "
-            "python must never be prepended to the machine PATH"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -272,12 +346,12 @@ def sha256_file(path: str | os.PathLike[str], chunk_size: int = 65536) -> str:
     return digest.hexdigest()
 
 
-def verify_installer_sha256(
-    installer_path: str | os.PathLike[str],
+def verify_archive_sha256(
+    archive_path: str | os.PathLike[str],
     expected_sha256: str | None = None,
     record: ReproducibilityRecord | None = None,
 ) -> str:
-    """Verify an installer file against the pinned digest (fail closed).
+    """Verify a downloaded substrate archive against the pinned digest.
 
     Either ``expected_sha256`` or ``record`` must be supplied (record wins
     when both are given).  Returns the computed digest on match and raises
@@ -288,13 +362,13 @@ def verify_installer_sha256(
         expected_sha256 = record.sha256
     if not expected_sha256 or not _SHA256_RE.match(expected_sha256):
         raise RecordError(
-            "verify_installer_sha256 requires a 64-char lowercase hex "
+            "verify_archive_sha256 requires a 64-char lowercase hex "
             f"expected digest, got {expected_sha256!r}"
         )
-    actual = sha256_file(installer_path)
+    actual = sha256_file(archive_path)
     if actual != expected_sha256:
         raise HashMismatchError(
-            f"installer SHA-256 mismatch: expected {expected_sha256}, "
+            f"archive SHA-256 mismatch: expected {expected_sha256}, "
             f"computed {actual}"
         )
     return actual
@@ -325,13 +399,51 @@ def _nt_normalise(path: str | os.PathLike[str]) -> str:
 
 
 def private_python_dir(witness_root: str | os.PathLike[str]) -> Path:
-    """``<witness-root>/python`` — the private CPython install directory."""
+    """``<witness-root>/python`` — the extracted private CPython tree."""
     return Path(witness_root) / "python"
 
 
 def private_python_exe(witness_root: str | os.PathLike[str]) -> Path:
-    """``<witness-root>/python/python.exe`` — expected Windows interpreter."""
+    """``<witness-root>/python/python.exe`` — expected console interpreter."""
     return private_python_dir(witness_root) / "python.exe"
+
+
+def private_pythonw_exe(witness_root: str | os.PathLike[str]) -> Path:
+    """``<witness-root>/python/pythonw.exe`` — expected windowed interpreter
+    (hard functional requirement of the windowed GUI launcher)."""
+    return private_python_dir(witness_root) / "pythonw.exe"
+
+
+def private_python_lib(witness_root: str | os.PathLike[str]) -> Path:
+    """``<witness-root>/python/Lib`` — the extracted stdlib directory."""
+    return private_python_dir(witness_root) / "Lib"
+
+
+#: Files/dirs that define a COMPLETE private standalone python tree: both
+#: interpreters (console + windowed) and the stdlib ``Lib`` directory.
+_PRIVATE_PYTHON_PARTS: tuple[str, ...] = ("python.exe", "pythonw.exe", "Lib")
+
+
+def missing_private_python_files(
+    witness_root: str | os.PathLike[str],
+    *,
+    _exists: Callable[[Path], bool] | None = None,
+) -> list[str]:
+    """Return the private-runtime parts that are MISSING under
+    ``<root>\\python`` (``python.exe``, ``pythonw.exe``, ``Lib``).
+
+    An empty list means the extracted standalone runtime is complete.
+    ``_exists`` is an injectable seam for hermetic tests; by default the
+    real filesystem is consulted.
+    """
+    private_dir = private_python_dir(witness_root)
+    missing: list[str] = []
+    for name in _PRIVATE_PYTHON_PARTS:
+        path = private_dir / name
+        exists = _exists(path) if _exists is not None else path.exists()
+        if not exists:
+            missing.append(ntpath.join("python", name))
+    return missing
 
 
 def appenv_dir(witness_root: str | os.PathLike[str]) -> Path:
@@ -354,27 +466,99 @@ def appenv_python_exe(witness_root: str | os.PathLike[str]) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def build_install_argv(
-    record: ReproducibilityRecord,
-    target_dir: str | os.PathLike[str],
-    log_path: str | os.PathLike[str] | None = None,
-) -> list[str]:
-    """Build the python.org installer argv for a silent per-user install.
+# ---------------------------------------------------------------------------
+# Standalone tarball extraction (stdlib tarfile, fail closed)
+# ---------------------------------------------------------------------------
 
-    Result has the installer switches first (``/quiet /norestart``), then
-    the pinned properties with ``TargetDir`` injected, then an optional
-    ``/log`` switch.  ``/quiet`` and ``/norestart`` are idempotent, so the
-    builder is safe to reuse on any record.
+
+def _is_safe_tarball_member(name: str) -> bool:
+    """True when *name* is a safe member inside the archive's ``python/``
+    top-level directory.
+
+    Fail-closed rules: the member must be the top directory ``python`` or
+    live strictly under it; absolute paths, Windows-style separators and
+    any ``..`` component are rejected (defence in depth — the payload is
+    SHA-256-pinned, but extraction must never escape the destination).
     """
-    argv = list(record.switches) if record.switches else ["/quiet", "/norestart"]
-    if record.silent and "/quiet" not in argv:
-        argv.insert(0, "/quiet")
-    for prop in record.properties:
-        argv.append(prop)
-    argv.append(f"TargetDir={Path(target_dir)}")
-    if log_path is not None:
-        argv.extend(["/log", str(Path(log_path))])
-    return argv
+    norm = name.replace("\\", "/")
+    parts = norm.split("/")
+    if not parts or parts[0] != _TARBALL_TOP_DIR:
+        return False
+    return all(part not in ("", ".", "..") for part in parts[1:])
+
+
+def _filtered_tar_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """Return the safe ``python/`` members of *tar* (fail closed)."""
+    members: list[tarfile.TarInfo] = []
+    for member in tar.getmembers():
+        if member.name != _TARBALL_TOP_DIR and not member.name.startswith(
+            _TARBALL_TOP_DIR + "/"
+        ):
+            raise ExtractionError(
+                "standalone tarball has an unexpected top-level member: "
+                f"{member.name!r} (expected only {_TARBALL_TOP_DIR}/)"
+            )
+        if not _is_safe_tarball_member(member.name):
+            raise ExtractionError(
+                f"standalone tarball member is unsafe: {member.name!r}"
+            )
+        members.append(member)
+    return members
+
+
+def extract_python_tarball(
+    archive_path: str | os.PathLike[str],
+    dest_root: str | os.PathLike[str],
+) -> Path:
+    """Extract the pinned install_only tarball under *dest_root*.
+
+    Produces ``<dest_root>/python/`` containing at least ``python.exe``,
+    ``pythonw.exe`` and ``Lib/`` (the full standalone runtime).  Fail
+    closed:
+
+    * only members inside the archive's top-level ``python/`` directory are
+      extracted (no absolute path / ``..`` escape);
+    * after extraction the COMPLETE private layout must exist — both
+      interpreters and the stdlib — otherwise :class:`ExtractionError`.
+
+    Returns the extracted ``python/`` directory.  Extraction happens at CI
+    BUILD time on the driver python; the end-user Setup never extracts
+    anything (Inno embeds these already-extracted files).
+    """
+    archive_path = Path(archive_path)
+    dest_root = Path(dest_root)
+    if not archive_path.is_file():
+        raise ExtractionError(f"standalone archive missing: {archive_path}")
+    dest_root.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(archive_path, "r:gz") as tar:
+            members = _filtered_tar_members(tar)
+            if not members:
+                raise ExtractionError(
+                    f"standalone archive {archive_path.name} is empty"
+                )
+            # Belt-and-braces on top of the explicit member whitelist: the
+            # data filter (3.12+) also strips modes/ownership that could be
+            # hostile on unpack; on 3.11 the whitelist alone protects us.
+            if sys.version_info >= (3, 12):
+                tar.extractall(path=dest_root, members=members,
+                               filter="data")
+            else:
+                tar.extractall(path=dest_root, members=members)
+    except tarfile.TarError as exc:
+        raise ExtractionError(
+            f"standalone archive extraction failed: {exc}"
+        ) from exc
+
+    private_dir = dest_root / _TARBALL_TOP_DIR
+    missing = missing_private_python_files(dest_root)
+    if missing:
+        raise ExtractionError(
+            "standalone tarball does not contain the complete private "
+            "runtime (python.exe + pythonw.exe + Lib) after extraction — "
+            "missing: " + ", ".join(missing)
+        )
+    return private_dir
 
 
 def venv_create_argv(
@@ -578,8 +762,9 @@ class _ForbiddenRule:
 #: Canonical forbidden rules for the GitHub-hosted Windows runner's
 #: preinstalled Pythons (ZA-WIN-BOOT-01): the runner tool cache, the
 #: machine-wide ``C:\\Program Files\\Python*`` family, and the default
-#: per-user install location.  The private bootstrap install NEVER lives
-#: under any of these (its TargetDir is the witness root), so rejecting
+#: per-user install location.  The private bootstrap runtime NEVER lives
+#: under any of these (its extraction target is the witness root), so
+#: rejecting
 #: them can never reject the private python.
 _CANONICAL_FORBIDDEN_RULES: tuple[_ForbiddenRule, ...] = (
     _ForbiddenRule(r"C:\hostedtoolcache\windows\Python"),

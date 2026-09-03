@@ -10,10 +10,11 @@
 #
 #   checkout
 #     -> build the zealfie wheel (driver python — build concern only)
-#     -> download the pinned CPython installer
+#     -> download the pinned python-build-standalone archive
 #     -> verify its SHA-256 against packaging/windows/reproducibility.toml
-#        (fail closed — never install an unverified payload)
-#     -> silent per-user install into <witness-root>\python
+#        (fail closed — never extract an unverified payload)
+#     -> extract it into <witness-root>\python (stdlib tarfile, plain
+#        files — no installer, no Burn/MSI, no provider state)
 #     -> create <witness-root>\appenv from THAT private python
 #     -> install the built wheel into appenv
 #     -> isolation assertions (sys.executable/prefix/base_prefix provenance;
@@ -88,7 +89,7 @@ jobs:
           ls -la "$RUNNER_TEMP/zealfie-dist"
 
       - id: provision-python
-        name: Download pinned CPython -> verify SHA-256 -> silent per-user install
+        name: Download pinned standalone python -> verify SHA-256 -> extract
         shell: bash
         run: |
           python packaging/windows/provision_windows.py provision-python

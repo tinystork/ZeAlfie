@@ -1,4 +1,4 @@
-"""ZeAlfie Windows installer — installed-layout install/provenance smoke (ZA-WIN-BOOT-02).
+"""ZeAlfie Windows installer — installed-layout install/provenance smoke (ZA-WIN-BOOT-02; substrate ZA-WIN-BOOT-03B).
 
 Runs INSIDE the INSTALLED appenv interpreter
 (``{app}\\appenv\\Scripts\\python.exe``) against the INSTALLED layout
@@ -7,8 +7,10 @@ reading of the user installation — never of the checkout and never of the
 driving (runner/system) python.  Assertions (fail closed, exit code 0 only
 when every one passes):
 
-1. ``{app}\\python\\python.exe`` exists and reports the PINNED CPython
-   version from the reproducibility record;
+1. the private standalone runtime ``{app}\\python`` is complete — BOTH
+   ``python.exe`` AND ``pythonw.exe`` exist (pythonw.exe is a hard
+   functional requirement of the windowed GUI launcher) and ``python.exe``
+   reports the PINNED CPython version from the reproducibility record;
 2. the appenv is COMPLETE: ``{app}\\appenv\\Scripts\\{python.exe,
    pythonw.exe, zealfie.exe, zealfie-gui.exe}`` all exist;
 3. the running interpreter's provenance is exactly the installer layout:
@@ -130,11 +132,17 @@ def _log(msg: str) -> None:
 
 
 def _smoke_private_python(install_root: Path, record) -> None:
+    """The private standalone runtime must be COMPLETE at the expected
+    installer path: BOTH python.exe AND pythonw.exe exist (pythonw.exe is a
+    hard functional requirement of the windowed GUI launcher) and
+    python.exe reports the pinned CPython version."""
     private_exe = provision.private_python_exe(install_root)
-    if not private_exe.is_file():
+    private_w = provision.private_pythonw_exe(install_root)
+    missing = provision.missing_private_python_files(install_root)
+    if missing:
         raise SmokeError(
-            f"private CPython missing at the expected installer path: "
-            f"{private_exe}"
+            "private standalone runtime incomplete at the expected installer "
+            "path — missing: " + ", ".join(missing)
         )
     report = _probe(private_exe)
     observed = report["version"]
@@ -143,7 +151,8 @@ def _smoke_private_python(install_root: Path, record) -> None:
             f"private CPython version mismatch: expected "
             f"{record.cpython_version}, got {observed} at {private_exe}"
         )
-    _log(f"[smoke] private CPython OK: {private_exe} (Python {observed})")
+    _log(f"[smoke] private standalone runtime OK: {private_exe} + "
+         f"{private_w.name} (Python {observed})")
 
 
 def _smoke_appenv_complete(install_root: Path) -> None:
