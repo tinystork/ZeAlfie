@@ -488,11 +488,12 @@ def test_iss_offline_contract_and_gates_present() -> None:
 def test_innosetup_pin_matches_docs_and_is_6x() -> None:
     inno = tomllib.loads(_INNO_FILE.read_text(encoding="utf-8"))["innosetup"]
     assert inno["version"].startswith("6."), "must stay on the pinned 6.x line"
-    assert inno["version_probe"] == inno["version"]
     assert re.fullmatch(r"[0-9a-f]{64}", inno["sha256"])
     assert inno["size"] > 0
     assert inno["installer_filename"] == f"innosetup-{inno['version']}.exe"
     assert inno["version"] in inno["installer_url"]
+    # no dead version-string oracle keys remain in the record
+    assert "version_probe" not in _INNO_FILE.read_text(encoding="utf-8")
     # the CI workflow and the docs reference the same pinned version
     workflow = (_REPO_ROOT / ".github" / "workflows"
                 / "windows-installer-build.yml").read_text(encoding="utf-8")
@@ -502,75 +503,24 @@ def test_innosetup_pin_matches_docs_and_is_6x() -> None:
     assert inno["sha256"][:8] in doc
 
 
-# ---------------------------------------------------------------------------
-# Inno Setup compiler version pin (innosetup_version.py, ZA-WIN-BOOT-02 r1)
-# ---------------------------------------------------------------------------
-
-
-_IV = _load_module(
-    _WINDOWS_PKG / "innosetup_version.py", "zealfie_innosetup_version"
-)
-
-
-def test_normalize_innosetup_version_variants() -> None:
-    assert _IV.normalize_innosetup_version("6.7.3") == "6.7.3"
-    assert _IV.normalize_innosetup_version("6.7.3.0") == "6.7.3"
-    assert _IV.normalize_innosetup_version(" 6.7.3 \r\n") == "6.7.3"
-    assert _IV.normalize_innosetup_version("6.7.3 (whatever)") == "6.7.3"
-    assert _IV.normalize_innosetup_version("") == ""
-    assert _IV.normalize_innosetup_version(None) == ""
-    assert _IV.normalize_innosetup_version("garbage") == ""
-    assert _IV.normalize_innosetup_version("7.1.0") == "7.1.0"
-
-
-def test_pinned_innosetup_version_reads_real_record() -> None:
-    assert _IV.pinned_innosetup_version() == "6.7.3"
-    record = tomllib.loads(_INNO_FILE.read_text(encoding="utf-8"))
-    assert _IV.pinned_innosetup_version(_INNO_FILE) == record["innosetup"]["version"]
-
-
-def test_verify_innosetup_version_fileversion_match() -> None:
-    norm, evidence = _IV.verify_innosetup_version("6.7.3", "6.7.3", "6.7.3")
-    assert norm == "6.7.3"
-    assert evidence == "FileVersion='6.7.3'"
-
-
-def test_verify_innosetup_version_productversion_fallback() -> None:
-    # FileVersion empty/absent -> ProductVersion is used
-    norm, evidence = _IV.verify_innosetup_version("", "6.7.3.0", "6.7.3")
-    assert norm == "6.7.3"
-    assert evidence == "ProductVersion='6.7.3'"
-
-
-def test_verify_innosetup_version_fileversion_mismatch_raises() -> None:
-    with pytest.raises(_IV.InnoVersionError) as exc:
-        _IV.verify_innosetup_version("6.7.2", "6.7.3", "6.7.3")
-    assert "does not match the pinned version" in str(exc.value)
-
-
-def test_verify_innosetup_version_both_absent_raises() -> None:
-    with pytest.raises(_IV.InnoVersionError):
-        _IV.verify_innosetup_version("", None, "6.7.3")
-    with pytest.raises(_IV.InnoVersionError):
-        _IV.verify_innosetup_version(None, "garbage", "6.7.3")
-
-
-def test_verify_innosetup_version_pinned_garbage_raises() -> None:
-    with pytest.raises(_IV.InnoVersionError):
-        _IV.verify_innosetup_version("6.7.3", "6.7.3", "not-a-version")
-
-
-def test_workflow_uses_pe_version_probe_not_iscc_banner() -> None:
-    """The CI must pin the compiler via PE FileVersion/ProductVersion, never
-    via the `ISCC /?` banner (which omits the patch level)."""
+def test_workflow_uses_cryptographic_toolchain_provenance() -> None:
+    """The CI proves the exact Inno toolchain from the pinned installer
+    payload (SHA-256, verified before execution), NOT from any compiler
+    version-string oracle (ISCC /? has no patch level; the PE version
+    resource reports 0.0.0.0 upstream)."""
     workflow = (_REPO_ROOT / ".github" / "workflows"
                 / "windows-installer-build.yml").read_text(encoding="utf-8")
-    # the broken banner grep is gone ...
+    # provenance markers present
+    assert "toolchain-provenance=verified-from-pinned-installer" in workflow
+    assert "inno-compiler-pinned-version" in workflow
+    assert "inno-compiler-installer-sha256" in workflow
+    assert "inno-compiler-isc-path" in workflow
+    # fail-closed gates still present: SHA-256 verify + ISCC existence
+    assert 'digest != record["sha256"]' in workflow
+    assert '[ -f "$ISCC" ]' in workflow
+    # no version-string oracle anywhere
+    assert "VersionInfo.FileVersion" not in workflow
+    assert "VersionInfo.ProductVersion" not in workflow
+    assert "import innosetup_version" not in workflow
     assert 'grep -o "6\\.7\\.3"' not in workflow
     assert '"$ISCC" /?' not in workflow
-    # ... and the PE-resource read + Python pin verification is present
-    assert "VersionInfo.FileVersion" in workflow
-    assert "VersionInfo.ProductVersion" in workflow
-    assert "inno-compiler-version-normalized" in workflow
-    assert "import innosetup_version as iv" in workflow
-    assert "iv.verify_innosetup_version" in workflow

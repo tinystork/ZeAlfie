@@ -108,28 +108,23 @@ jobs:
           ISCC="$ZEALFIE_STAGE/innosetup/is/ISCC.exe"
           [ -f "$ISCC" ] || { echo "FATAL: ISCC.exe not found after install: $ISCC"; exit 1; }
           echo "ISCC=$ISCC" >> "$GITHUB_ENV"
-          # Fail closed: read the compiler's exact version from the PE version
-          # resource (FileVersion/ProductVersion). `ISCC /?` only prints
-          # "Inno Setup 6 Command-Line Compiler" (no patch level), so it must
-          # NOT be used to pin the version.
-          FILE_VERSION="$(powershell.exe -NoProfile -Command "(Get-Item -LiteralPath '$ISCC').VersionInfo.FileVersion" 2>/dev/null | tr -d '\r' | xargs)"
-          PRODUCT_VERSION="$(powershell.exe -NoProfile -Command "(Get-Item -LiteralPath '$ISCC').VersionInfo.ProductVersion" 2>/dev/null | tr -d '\r' | xargs)"
-          echo "inno-compiler-file-version=$FILE_VERSION"
-          echo "inno-compiler-product-version=$PRODUCT_VERSION"
-          python - "$FILE_VERSION" "$PRODUCT_VERSION" <<'PY'
-          import sys
-          sys.path.insert(0, "packaging/windows")
-          import innosetup_version as iv
-          pinned = iv.pinned_innosetup_version()
-          try:
-              norm, evidence = iv.verify_innosetup_version(sys.argv[1], sys.argv[2], pinned)
-          except iv.InnoVersionError as exc:
-              print(f"FATAL: {exc}", file=sys.stderr)
-              sys.exit(1)
-          print(f"inno-compiler-version-normalized={norm}")
-          print(f"inno-compiler-version-evidence={evidence}")
+          # Exact toolchain provenance = the immutable pinned installer
+          # payload (declared version + installer filename + pinned SHA-256
+          # verified above) + a clean dedicated staging install + the
+          # required ISCC.exe.  The compiler's own PE version resource
+          # reports 0.0.0.0 upstream, so it is NOT a version oracle; the
+          # pinned payload SHA-256 IS the exact-toolchain proof.
+          python - "$ISCC" <<'PY'
+          import sys, tomllib
+          record = tomllib.load(open("packaging/windows/installer/innosetup.toml", "rb"))["innosetup"]
+          iscc = sys.argv[1]
+          print(f"inno-compiler-pinned-version={record['version']}")
+          print(f"inno-compiler-installer={record['installer_filename']}")
+          print(f"inno-compiler-installer-sha256={record['sha256']}")
+          print(f"inno-compiler-isc-path={iscc}")
+          print("toolchain-provenance=verified-from-pinned-installer")
           PY
-          echo "inno-compiler=Inno Setup Compiler (pinned version verified via PE FileVersion/ProductVersion)" >> "$GITHUB_ENV"
+          echo "toolchain-provenance=verified-from-pinned-installer" >> "$GITHUB_ENV"
 
       - id: build-wheel
         name: Build the zealfie wheel

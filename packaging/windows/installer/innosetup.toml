@@ -8,9 +8,12 @@
 # fabricated and never guessed.
 #
 # CI provisioning downloads this exact installer, verifies the digest
-# (fail closed on mismatch), silently installs it to a per-user tool
-# directory, then asserts the compiler banner contains [innosetup].version
-# BEFORE compiling the .iss — a different/absent compiler fails the job.
+# (fail closed on mismatch), silently installs it to a clean per-user tool
+# directory, and gates on the presence of the expected ISCC.exe.  The
+# pinned payload (declared version + installer filename + SHA-256) IS the
+# exact-toolchain provenance: the compiler's own PE/banner version strings
+# are not a version oracle (ISCC /? prints no patch level; the PE version
+# resource reports 0.0.0.0 upstream), so no version-string parsing is used.
 
 [innosetup]
 # Exact pinned Inno Setup version (6.x line — do NOT jump to 7.x).
@@ -24,6 +27,3 @@ size = 10592232
 # Compiler executable produced by the silent install (relative to the
 # chosen /DIR= tool root).
 compiler_exe = "ISCC.exe"
-# Version token asserted in the ISCC banner/help output before compiling
-# (fail closed on absent/different compiler).
-version_probe = "6.7.3"
