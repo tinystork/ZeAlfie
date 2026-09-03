@@ -64,7 +64,7 @@ __all__ = [
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 #: Canonical zealfie wheel filename for a pinned version
-#: (``zealfie-0.1.0-py3-none-any.whl``).
+#: (``zealfie-0.1.1-py3-none-any.whl``).
 _ZEALFIE_WHEEL_RE = re.compile(r"^zealfie-\d+\.\d+\.\d+-py3-none-any\.whl$")
 
 

@@ -43,7 +43,7 @@
 
 [metadata]
 # ZeAlfie version whose wheel this lock bootstraps.
-zealfie_version = "0.1.0"
+zealfie_version = "0.1.1"
 # Source commit of the zealfie wheel payload (ZeAlfie src tree; HEAD of
 # feature/windows-standalone-bootstrap at lock generation; identical src
 # payload to the ZA-WIN-BOOT-01 record revision a1a777a2df0).
@@ -72,8 +72,8 @@ pip_command = "pip download --dest <dir> --only-binary=:all: --platform win_amd6
 # acquisition step (it can never be downloaded), so it deliberately has no
 # sha256 here — only filename/version/source metadata.
 name = "zealfie"
-version = "0.1.0"
-wheel_filename = "zealfie-0.1.0-py3-none-any.whl"
+version = "0.1.1"
+wheel_filename = "zealfie-0.1.1-py3-none-any.whl"
 source_commit = "94f0b5164deb4b9e2ad1bd34dc910e89066b734b"
 source = "local-build"
 

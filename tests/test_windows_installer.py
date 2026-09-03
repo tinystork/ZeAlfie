@@ -180,12 +180,12 @@ def test_lock_file_exists_next_to_module() -> None:
 
 def test_real_lock_loads_and_metadata_is_consistent() -> None:
     lock = wheelhouse.load_lock(_LOCK_FILE)
-    assert lock.zealfie_version == "0.1.0"
+    assert lock.zealfie_version == "0.1.1"
     assert lock.platform_tag == "win_amd64"
     assert lock.python_tag == "cp313"
     assert lock.cpython_version == "3.13.15"
     assert len(lock.cpython_installer_sha256) == 64
-    assert lock.zealfie_wheel.filename == "zealfie-0.1.0-py3-none-any.whl"
+    assert lock.zealfie_wheel.filename == "zealfie-0.1.1-py3-none-any.whl"
     assert lock.zealfie_wheel.sha256 is None  # local-build, never pinned
     assert len(lock.wheels) >= 8
     names = {e.name for e in lock.wheels}
