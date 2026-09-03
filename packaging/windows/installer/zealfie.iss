@@ -171,7 +171,7 @@ Source: "{#IconFile}"; DestDir: "{app}\assets"; DestName: "zealfie.ico"; Flags: 
 [Icons]
 ; Normal launch = the installed windowed launcher; no terminal, no system
 ; Python/PATH/CWD/source-tree dependency.
-Name: "{autoprograms}\ZeAlfie"; Filename: "{app}\appenv\Scripts\zealfie-gui.exe"; IconFilename: "{app}\assets\zealfie.ico"; WorkingDir: "{app}"; Comment: "Launch ZeAlfie"
+Name: "{autoprograms}\ZeAlfie"; Filename: "{app}\appenv\Scripts\zealfie-gui.exe"; IconFilename: "{app}\assets\zealfie.ico"; WorkingDir: "{app}"; Comment: "Launch ZeAlfie"; AppUserModelID: "ZeSoftware.ZeAlfie"
 
 [UninstallDelete]
 ; The appenv and the bootstrap logs are created at ssPostInstall by the

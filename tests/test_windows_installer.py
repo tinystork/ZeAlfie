@@ -39,6 +39,8 @@ from pathlib import Path
 
 import pytest
 
+from zealfie.gui.windows_identity import APP_USER_MODEL_ID
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WINDOWS_PKG = _REPO_ROOT / "packaging" / "windows"
 
@@ -1654,3 +1656,79 @@ def test_workflow_acquire_step_orders_global_witness_root_first() -> None:
     )
     # the reversed (broken) call shape must NOT be present
     assert "provision-python \\\n            --witness-root" not in step
+
+
+# ---------------------------------------------------------------------------
+# ZA-ICON-03B — Start Menu shortcut AppUserModelID binding (hermetic)
+# ---------------------------------------------------------------------------
+
+
+def _zealfie_shortcut_line() -> str:
+    """The single [Icons] entry: the ZeAlfie Start Menu shortcut line."""
+    iss = _iss_text()
+    icons_sec = iss.split("\n[Icons]\n", 1)[1].split("\n[UninstallDelete]\n", 1)[0]
+    entries = [ln.strip() for ln in icons_sec.splitlines()
+               if ln.strip().startswith("Name:")]
+    assert len(entries) == 1, (
+        f"exactly one [Icons] entry required, found {len(entries)}"
+    )
+    return entries[0]
+
+
+def test_iss_zealfie_shortcut_exact_canonical_line_with_aumid() -> None:
+    """(ZA-ICON-03B) The ZeAlfie Start Menu shortcut is the approved exact
+    line: Filename / IconFilename / WorkingDir / Comment unchanged, with
+    AppUserModelID: "ZeSoftware.ZeAlfie" appended (Inno 6.1+ parameter) so
+    the shell maps the running process (ZA-ICON-02 runtime AUMID) back to
+    the canonical zealfie.ico taskbar button."""
+    assert _zealfie_shortcut_line() == (
+        'Name: "{autoprograms}\\ZeAlfie"; '
+        'Filename: "{app}\\appenv\\Scripts\\zealfie-gui.exe"; '
+        'IconFilename: "{app}\\assets\\zealfie.ico"; '
+        'WorkingDir: "{app}"; Comment: "Launch ZeAlfie"; '
+        'AppUserModelID: "ZeSoftware.ZeAlfie"'
+    )
+
+
+def test_iss_shortcut_still_launches_zealfie_gui_with_canonical_icon() -> None:
+    """(ZA-ICON-03B) The shortcut still launches the installed windowed
+    launcher ({app}\\appenv\\Scripts\\zealfie-gui.exe) and still carries the
+    canonical icon asset ({app}\\assets\\zealfie.ico)."""
+    line = _zealfie_shortcut_line()
+    assert 'Filename: "{app}\\appenv\\Scripts\\zealfie-gui.exe"' in line
+    assert 'IconFilename: "{app}\\assets\\zealfie.ico"' in line
+    assert "zealfie-gui.exe" in line  # normal launch = windowed launcher
+
+
+def test_iss_aumid_binding_touches_only_the_single_shortcut() -> None:
+    """(ZA-ICON-03B) No unrelated shortcut/installer-identity change: the
+    [Icons] section declares exactly ONE entry (the ZeAlfie Start Menu
+    shortcut), AppUserModelID appears exactly once in the whole .iss, and
+    the stable installer-identity surface (single fixed AppId, AppName,
+    per-user posture) is untouched."""
+    iss = _iss_text()
+    icons_sec = iss.split("\n[Icons]\n", 1)[1].split("\n[UninstallDelete]\n", 1)[0]
+    entries = [ln.strip() for ln in icons_sec.splitlines()
+               if ln.strip().startswith("Name:")]
+    assert len(entries) == 1
+    assert entries[0].startswith('Name: "{autoprograms}\\ZeAlfie"')
+    assert iss.count('AppUserModelID: "ZeSoftware.ZeAlfie"') == 1
+    # no second shortcut/identity entry was invented (desktop, pin, group,
+    # uninstall display name, ...): the parameter lives only on the Start
+    # Menu entry, and the stable identity fields are still single + exact
+    assert len(re.findall(r"AppId=\{\{([0-9A-Fa-f-]{36})\}", iss)) == 1
+    assert "AppName=ZeAlfie" in iss
+    assert "PrivilegesRequired=lowest" in iss
+
+
+def test_iss_aumid_exactly_matches_application_constant() -> None:
+    """(ZA-ICON-03B) The .iss AppUserModelID value EXACTLY equals the
+    application-side single source of truth
+    zealfie.gui.windows_identity.APP_USER_MODEL_ID (the same AUMID the
+    running process registers at startup via ZA-ICON-02) — the shortcut
+    and the runtime identity can never drift apart."""
+    # sanity: mirrors tests/test_gui_windows_identity.py APP_ID
+    assert APP_USER_MODEL_ID == "ZeSoftware.ZeAlfie"
+    line = _zealfie_shortcut_line()
+    assert f'AppUserModelID: "{APP_USER_MODEL_ID}"' in line
+    assert f'AppUserModelID: "{APP_USER_MODEL_ID}"' in _iss_text()
