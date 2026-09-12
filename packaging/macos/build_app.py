@@ -124,7 +124,10 @@ def normalise_and_audit(app: Path) -> dict:
     """
     resources = macpack.bundle_resources_dir(app)
     thinning = macho.thin_tree_to_arm64(resources)
-    _log(f"[build] Mach-O files thinned: {len(thinning['files_thinned'])}")
+    _log(
+        f"[build] binaries thinned: {len(thinning['files_thinned'])} "
+        f"(static archives: {len(thinning['archives_thinned'])})"
+    )
 
     audits: dict[str, dict] = {}
     for label, subtree in (
@@ -134,28 +137,44 @@ def normalise_and_audit(app: Path) -> dict:
         audits[label] = macho.audit_tree(subtree)
         _log(f"[build] audit[{label}]:\n" + macho.format_audit(audits[label]))
 
+    def _union(key: str) -> list[str]:
+        return sorted({item for a in audits.values() for item in a.get(key, [])})
+
     files_checked = sum(a["files_checked"] for a in audits.values())
     residues = sum(a["X86_64_RESIDUES"] for a in audits.values())
     arm64_only = "PASS" if all(a["ARM64_ONLY"] == "PASS" for a in audits.values()) else "FAIL"
     summary = {
         "files_thinned": len(thinning["files_thinned"]),
         "files_unchanged": len(thinning["files_unchanged"]),
+        "archives_thinned": len(thinning["archives_thinned"]),
         "thinned_files": thinning["files_thinned"],
+        "thinned_archives": thinning["archives_thinned"],
         "files_checked": files_checked,
         "macho_files": sum(len(a["macho_files"]) for a in audits.values()),
         "fat_files_remaining": sum(len(a["fat_files"]) for a in audits.values()),
+        "archive_files": sum(len(a["archive_files"]) for a in audits.values()),
+        "fat_archive_files_remaining": sum(
+            len(a["fat_archive_files"]) for a in audits.values()
+        ),
         "arch_histogram": {
             arch: sum(a["arch_histogram"].get(arch, 0) for a in audits.values())
             for arch in sorted(
                 {k for a in audits.values() for k in a["arch_histogram"]}
             )
         },
-        "x86_64_files": sorted(
-            {f for a in audits.values() for f in a["x86_64_files"]}
-        ),
-        "non_arm64_macho_files": sorted(
-            {f for a in audits.values() for f in a["non_arm64_macho_files"]}
-        ),
+        "archive_arch_histogram": {
+            arch: sum(
+                a["archive_arch_histogram"].get(arch, 0) for a in audits.values()
+            )
+            for arch in sorted(
+                {k for a in audits.values() for k in a["archive_arch_histogram"]}
+            )
+        },
+        "x86_64_files": _union("x86_64_files"),
+        "x86_64_archive_files": _union("x86_64_archive_files"),
+        "non_arm64_macho_files": _union("non_arm64_macho_files"),
+        "non_arm64_archive_files": _union("non_arm64_archive_files"),
+        "invalid_archive_files": _union("invalid_archive_files"),
         "ARM64_ONLY": arm64_only,
         "X86_64_RESIDUES": residues,
     }
@@ -163,8 +182,11 @@ def normalise_and_audit(app: Path) -> dict:
         raise BuildError(
             "ARM64-only normalisation failed: "
             f"ARM64_ONLY={arm64_only} X86_64_RESIDUES={residues} "
-            f"residues={summary['x86_64_files']} "
-            f"non_arm64={summary['non_arm64_macho_files']}"
+            f"macho_residues={summary['x86_64_files']} "
+            f"archive_residues={summary['x86_64_archive_files']} "
+            f"non_arm64_macho={summary['non_arm64_macho_files']} "
+            f"non_arm64_archive={summary['non_arm64_archive_files']} "
+            f"invalid_archives={summary['invalid_archive_files']}"
         )
     return summary
 

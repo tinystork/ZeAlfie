@@ -133,30 +133,46 @@ jobs:
           import macho
 
           app = Path(os.environ["WORK"]) / "build" / "ZeAlfie.app"
-          totals = {"files_checked": 0, "macho_files": 0,
-                    "x86_64_files": [], "non_arm64_macho_files": []}
+          totals = {"files_checked": 0, "macho_files": 0, "archive_files": 0,
+                    "x86_64_files": [], "x86_64_archive_files": [],
+                    "non_arm64_macho_files": [], "non_arm64_archive_files": [],
+                    "invalid_archive_files": []}
           for subtree in ("Contents/Resources/python", "Contents/Resources/app"):
               audit = macho.audit_tree(app / subtree)
               print(f"[audit] {subtree}: {macho.format_audit(audit)}")
               totals["files_checked"] += audit["files_checked"]
               totals["macho_files"] += len(audit["macho_files"])
+              totals["archive_files"] += len(audit["archive_files"])
               totals["x86_64_files"] += audit["x86_64_files"]
+              totals["x86_64_archive_files"] += audit["x86_64_archive_files"]
               totals["non_arm64_macho_files"] += audit["non_arm64_macho_files"]
+              totals["non_arm64_archive_files"] += audit["non_arm64_archive_files"]
+              totals["invalid_archive_files"] += audit["invalid_archive_files"]
           print(f"files_checked={totals['files_checked']} "
-                f"macho_files={totals['macho_files']}")
-          if totals["x86_64_files"] or totals["non_arm64_macho_files"]:
+                f"macho_files={totals['macho_files']} "
+                f"archive_files={totals['archive_files']}")
+          macho_ok = not (totals["x86_64_files"] or totals["non_arm64_macho_files"])
+          archive_ok = not (
+              totals["x86_64_archive_files"]
+              or totals["non_arm64_archive_files"]
+              or totals["invalid_archive_files"]
+          )
+          if not (macho_ok and archive_ok):
               print("FAIL: arm64-only audit", totals, file=sys.stderr)
               raise SystemExit(1)
+          print("MACHO_ARM64_ONLY=PASS")
+          print("ARCHIVE_ARM64_ONLY=PASS")
           print("ARM64_ONLY=PASS")
           print("X86_64_RESIDUES=0")
           out = Path(os.environ["WORK"]) / "macho.audit.json"
           out.write_text(json.dumps(totals, indent=2), encoding="utf-8")
           PYEOF
           {
-            echo "### Mach-O audit"
+            echo "### Mach-O + static-archive audit"
             echo ""
             echo "- files_checked: documented in macho.audit.json"
-            echo "- ARM64_ONLY: PASS"
+            echo "- Mach-O ARM64_ONLY: PASS"
+            echo "- static-archive ARM64_ONLY: PASS"
             echo "- X86_64_RESIDUES: 0"
           } >> "$GITHUB_STEP_SUMMARY"
 

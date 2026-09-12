@@ -93,11 +93,27 @@ shiboken6, plus `packaging`, `build`, `pyproject-hooks`, `setuptools`,
 `wheel`), each with a SHA-256 and size computed from a real download.
 `PySide6` alone is **not** the binary closure.
 
-After installation, every Mach-O file under `Resources/python` and
-`Resources/app` is inspected **by content** and any universal2 file is
-thinned to arm64 with `lipo` (atomic replace, mode preserved). The build
-then audits both trees and fails closed unless `ARM64_ONLY=PASS` and
-`X86_64_RESIDUES=0`. The final bundle contains **no x86_64 Mach-O slice**.
+After installation, every Mach-O file **and every static archive** under
+`Resources/python` and `Resources/app` is inspected **by content** (never by
+suffix). Universal2 Mach-O images, and universal (`lipo`-created) static
+archives whose members are Mach-O objects, are thinned to arm64:
+
+* a Mach-O result must be thin arm64;
+* a static-archive result (`!<arch>\n`) must be a structurally valid `ar`
+  container whose object members are exactly arm64 and for which `ar -t`
+  succeeds.
+
+The build then audits both trees — with separate evidence for the Mach-O and
+static-archive categories — and fails closed unless `ARM64_ONLY=PASS` and
+`X86_64_RESIDUES=0`. The final bundle contains **no x86_64 slice** in either
+category.
+
+The real Qt wheels use BSD long names (`#1/<len>`) inside their archives and
+contain such objects as
+`PySide6/Qt/qml/Qt/labs/assetdownloader/libqmlassetdownloaderprivateplugin.a`
+(the archive that exposed the missing archive support in the first native
+run); the parser resolves BSD and GNU long names and skips Darwin
+`__.SYMDEF*` symbol tables.
 
 ## Building
 

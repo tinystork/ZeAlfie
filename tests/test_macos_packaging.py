@@ -89,6 +89,37 @@ def _arm64_thin_bytes() -> bytes:
     return _thin_macho(_ARM64)
 
 
+def _ar_member(name: str, payload: bytes) -> bytes:
+    """One BSD/GNU ``ar`` member: 60-byte ASCII header + padded data."""
+    header = (
+        f"{name:<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(payload):<10}"
+    ).encode("ascii") + b"`\n"
+    assert len(header) == 60
+    data = payload + (b"\n" if len(payload) % 2 else b"")
+    return header + data
+
+
+def _archive(members: list[bytes]) -> bytes:
+    return b"!<arch>\n" + b"".join(members)
+
+
+def _thin_archive_bytes(*cputypes: int) -> bytes:
+    return _archive(
+        [
+            _ar_member(f"obj{index}.o", _thin_macho(cputype))
+            for index, cputype in enumerate(cputypes)
+        ]
+    )
+
+
+def _fat_archive_bytes() -> bytes:
+    """A universal static archive: a FAT container of per-arch archives."""
+    return _fat_macho(
+        [(_ARM64, 0), (_X86_64, 3)],
+        [_thin_archive_bytes(_ARM64), _thin_archive_bytes(_X86_64)],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reproducibility record
 # ---------------------------------------------------------------------------
@@ -393,6 +424,214 @@ def test_thin_tree_to_arm64(tmp_path: Path) -> None:
     assert len(summary["files_thinned"]) == 1
     assert len(summary["files_unchanged"]) == 1
     assert macho.audit_tree(root)["ARM64_ONLY"] == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# REWORK-2: static archive (``!<arch>``) handling
+# ---------------------------------------------------------------------------
+
+
+def test_archive_recognition_is_by_content_not_suffix(tmp_path: Path) -> None:
+    archive = tmp_path / "libthing.so"  # deliberately not a .a name
+    archive.write_bytes(_thin_archive_bytes(_ARM64))
+    info = macho.read_archive_info(archive)
+    assert info.is_archive and info.valid and info.archs == ("arm64",)
+    assert macho.detect_kind(archive) == macho.KIND_ARCHIVE
+
+    # A .a-suffixed file that is NOT an archive is never treated as one.
+    fake = tmp_path / "fake.a"
+    fake.write_bytes(_arm64_thin_bytes())
+    assert not macho.read_archive_info(fake).is_archive
+    assert macho.detect_kind(fake) == macho.KIND_MACHO
+
+
+def test_detect_kind_distinguishes_fat_macho_and_fat_archive(tmp_path: Path) -> None:
+    image = tmp_path / "universal.dylib"
+    image.write_bytes(_fat_macho([(_ARM64, 0), (_X86_64, 3)]))
+    assert macho.detect_kind(image) == macho.KIND_FAT_MACHO
+
+    archive = tmp_path / "universal.a"
+    archive.write_bytes(_fat_archive_bytes())
+    assert macho.detect_kind(archive) == macho.KIND_FAT_ARCHIVE
+    assert macho.read_macho_info(archive).archs == ("arm64", "x86_64")
+
+
+# (1) FAT Mach-O accepted; existing Mach-O gates unchanged.
+def test_fat_macho_thinned_to_thin_arm64_accepted(tmp_path: Path) -> None:
+    target = tmp_path / "lib.dylib"
+    target.write_bytes(_fat_macho([(_ARM64, 0), (_X86_64, 3)]))
+
+    def fake_lipo(source: Path, destination: Path, arch: str) -> None:
+        destination.write_bytes(_arm64_thin_bytes())
+
+    assert macho.thin_to_arm64(target, _run_lipo=fake_lipo) == "thinned"
+    info = macho.read_macho_info(target)
+    assert info.is_macho and not info.is_fat and info.archs == ("arm64",)
+
+
+# (2) FAT archive -> valid ar + exactly arm64 accepted.
+def test_fat_archive_thinned_to_valid_arm64_archive(tmp_path: Path) -> None:
+    source = tmp_path / "libqmlassetdownloaderprivateplugin.a"
+    source.write_bytes(_fat_archive_bytes())
+    assert macho.detect_kind(source) == macho.KIND_FAT_ARCHIVE
+
+    ar_calls: list[Path] = []
+
+    def fake_lipo(source_path: Path, destination: Path, arch: str) -> None:
+        destination.write_bytes(_thin_archive_bytes(_ARM64))
+
+    def fake_ar(path: Path) -> None:
+        ar_calls.append(path)
+
+    assert (
+        macho.thin_to_arm64(source, _run_lipo=fake_lipo, _run_ar=fake_ar)
+        == "thinned"
+    )
+    info = macho.read_archive_info(source)
+    assert info.is_archive and info.valid
+    assert info.archs == ("arm64",)
+    # ``ar -t`` validates the staged temp file BEFORE the atomic replace.
+    assert len(ar_calls) == 1
+    assert ar_calls[0].parent == source.parent
+    assert ar_calls[0].name.startswith(source.name + ".")
+    assert not ar_calls[0].exists()  # temp cleaned up after replace
+
+    # Audit evidence: archive category passes and contributes 0 residues.
+    audit = macho.audit_tree(tmp_path)
+    assert audit["archive_files"] == ["libqmlassetdownloaderprivateplugin.a"]
+    assert audit["archive_arch_histogram"] == {"arm64": 1}
+    assert audit["x86_64_archive_files"] == []
+    assert audit["ARM64_ONLY"] == "PASS"
+    assert audit["X86_64_RESIDUES"] == 0
+
+
+# (2b) A universal archive result that is NOT exactly arm64 is rejected.
+def test_fat_archive_thinned_result_both_archs_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "both.a"
+    source.write_bytes(_fat_archive_bytes())
+
+    def fake_lipo(source_path: Path, destination: Path, arch: str) -> None:
+        destination.write_bytes(_thin_archive_bytes(_ARM64, _X86_64))
+
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(source, _run_lipo=fake_lipo, _run_ar=lambda _p: None)
+
+
+# (3) x86-only archive rejected.
+def test_thin_archive_x86_only_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "intel.a"
+    source.write_bytes(_thin_archive_bytes(_X86_64))
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(source)
+    audit = macho.audit_tree(tmp_path)
+    assert audit["x86_64_archive_files"] == ["intel.a"]
+    assert audit["ARM64_ONLY"] == "FAIL"
+    assert audit["X86_64_RESIDUES"] == 1
+
+
+# (4) arm64 + x86_64 archive rejected.
+def test_thin_archive_both_archs_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "mixed.a"
+    source.write_bytes(_thin_archive_bytes(_ARM64, _X86_64))
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(source)
+    with pytest.raises(macho.ThinningError):
+        macho.validate_thin_arm64_archive(source, _run_ar=lambda _p: None)
+
+
+# (5) Malformed archive rejected.
+def test_malformed_archive_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "broken.a"
+    # Valid magic, then a member header with a corrupt FMAG.
+    source.write_bytes(b"!<arch>\n" + b"x" * 60 + b"payload")
+    info = macho.read_archive_info(source)
+    assert info.is_archive and not info.valid
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(source)
+    with pytest.raises(macho.ThinningError):
+        macho.validate_thin_arm64_archive(source, _run_ar=lambda _p: None)
+
+    # A member header claiming more data than present is malformed too.
+    truncated = tmp_path / "trunc.a"
+    bad = bytearray(_ar_member("o.o", b"\x00" * 4))
+    bad[48:58] = f"{9999:<10}".encode("ascii")
+    truncated.write_bytes(b"!<arch>\n" + bytes(bad))
+    assert not macho.read_archive_info(truncated).valid
+
+
+# (6) Architecture inspection failure rejected.
+def test_archive_arch_inspection_failure_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "lib.a"
+    source.write_bytes(_fat_archive_bytes())
+
+    def fake_lipo(source_path: Path, destination: Path, arch: str) -> None:
+        destination.write_bytes(_thin_archive_bytes(_ARM64))
+
+    def failing_ar(path: Path) -> None:
+        raise macho.ThinningError(f"ar -t failed for {path}")
+
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(source, _run_lipo=fake_lipo, _run_ar=failing_ar)
+    # The source file is untouched when the gate fails closed.
+    assert macho.detect_kind(source) == macho.KIND_FAT_ARCHIVE
+
+
+# (6b) A cross-kind lipo result (archive result for an image source) is
+# rejected: the Mach-O gate is unchanged.
+def test_image_source_rejects_archive_result(tmp_path: Path) -> None:
+    source = tmp_path / "lib.dylib"
+    source.write_bytes(_fat_macho([(_ARM64, 0), (_X86_64, 3)]))
+
+    def fake_lipo(source_path: Path, destination: Path, arch: str) -> None:
+        destination.write_bytes(_thin_archive_bytes(_ARM64))
+
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(source, _run_lipo=fake_lipo, _run_ar=lambda _p: None)
+
+
+# (7) Ordinary data skipped.
+def test_ordinary_data_skipped(tmp_path: Path) -> None:
+    for name, payload in (
+        ("readme.txt", b"just text"),
+        ("data.json", b'{"a": 1}'),
+        ("empty", b""),
+    ):
+        path = tmp_path / name
+        path.write_bytes(payload)
+        assert macho.detect_kind(path) == macho.KIND_DATA
+        assert macho.thin_to_arm64(path) == "skipped"
+    audit = macho.audit_tree(tmp_path)
+    assert audit["macho_files"] == [] and audit["archive_files"] == []
+    assert audit["ARM64_ONLY"] == "PASS"
+
+
+# (8) Existing Mach-O gates unchanged.
+def test_existing_macho_gates_unchanged(tmp_path: Path) -> None:
+    thin_arm = tmp_path / "thin-arm"
+    thin_arm.write_bytes(_arm64_thin_bytes())
+    assert macho.thin_to_arm64(thin_arm) == "unchanged"
+
+    thin_intel = tmp_path / "thin-intel"
+    thin_intel.write_bytes(_thin_macho(_X86_64))
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(thin_intel)
+
+    fat_no_arm = tmp_path / "fat-no-arm"
+    fat_no_arm.write_bytes(_fat_macho([(_X86_64, 3), (_X86_64, 3)]))
+    with pytest.raises(macho.ThinningError):
+        macho.thin_to_arm64(fat_no_arm)
+
+    universal = tmp_path / "universal"
+    universal.write_bytes(_fat_macho([(_ARM64, 0), (_X86_64, 3)]))
+    universal.chmod(0o755)
+
+    def fake_lipo(source: Path, destination: Path, arch: str) -> None:
+        destination.write_bytes(_arm64_thin_bytes())
+
+    assert macho.thin_to_arm64(universal, _run_lipo=fake_lipo) == "thinned"
+    assert universal.stat().st_mode & 0o777 == 0o755
+    info = macho.read_macho_info(universal)
+    assert info.is_macho and not info.is_fat and info.archs == ("arm64",)
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +1100,8 @@ def test_workflow_static_contract() -> None:
     assert "build_app.py" in text
     assert "witnesses.py all" in text
     assert "actions/upload-artifact@" in text
+    assert "MACHO_ARM64_ONLY=PASS" in text
+    assert "ARCHIVE_ARM64_ONLY=PASS" in text
     assert "ARM64_ONLY=PASS" in text
     assert "X86_64_RESIDUES=0" in text
     # No release/publish surface.
