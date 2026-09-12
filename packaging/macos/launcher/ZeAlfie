@@ -70,4 +70,22 @@ export PYTHONPATH
 # The GUI entry point is ``zealfie.gui:main`` (the ``zealfie-gui`` console
 # script).  ``zealfie.gui`` is a package without a ``__main__``, so invoke
 # the callable directly instead of relying on ``-m``.
-exec "$PYTHON" -s -c 'import sys; from zealfie.gui import main; sys.exit(main())' "$@"
+#
+# Import-path hardening: ``python -c`` prepends the current working
+# directory ("" / ".") to sys.path, AHEAD of PYTHONPATH.  An unrelated CWD
+# containing a ``zealfie`` package would therefore shadow the bundled
+# application, and the bundle must never depend on (or trust) its CWD.
+# The bootstrap rebuilds sys.path with the explicit Resources/app path
+# authoritative and drops every relative (CWD-tainted) entry.  No host path
+# is ever added, and any inherited PYTHONPATH was already removed above.
+exec "$PYTHON" -s -c '
+import os, sys
+app = sys.argv[1]
+del sys.argv[1]
+sys.path[:] = [app] + [
+    p for p in sys.path
+    if p not in ("", ".") and os.path.isabs(p) and p != app
+]
+from zealfie.gui import main
+sys.exit(main())
+' "$APP_DIR" "$@"

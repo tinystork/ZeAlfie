@@ -586,6 +586,12 @@ def test_launcher_is_posix_script_with_bundled_python() -> None:
     for forbidden in ("command -v python", "/usr/bin/env python", "python3 -m pip"):
         assert forbidden not in text
     assert "zealfie.gui" in text
+    # CWD-hardening (rework-1): the bootstrap must pass the explicit app
+    # directory and rebuild sys.path so the empty CWD entry cannot win.
+    assert '"$APP_DIR" "$@"' in text
+    assert "sys.path[:] = [app] +" in text
+    assert 'p not in ("", ".")' in text
+    assert "os.path.isabs(p)" in text
 
 
 def test_launcher_avoids_external_path_helpers() -> None:
@@ -703,6 +709,82 @@ def test_launcher_fails_closed_without_interpreter(tmp_path: Path) -> None:
     assert proc.returncode != 0
     assert "bundled interpreter missing" in (proc.stderr + proc.stdout)
     assert not marker.exists()
+
+
+def _real_python_stub_app(root: Path) -> Path:
+    """Stub bundle whose `python3.13` forwards to a REAL python interpreter.
+
+    This lets the launcher's sys.path bootstrap actually execute on Linux so
+    the CWD-shadowing behaviour can be tested end to end (no PySide6 needed:
+    the fake app package is self-contained).
+    """
+    app = root / "ZeAlfie.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "Resources" / "python" / "bin").mkdir(parents=True)
+    (app / "Contents" / "Resources" / "app").mkdir(parents=True)
+    launcher = app / "Contents" / "MacOS" / "ZeAlfie"
+    launcher.write_bytes(_LAUNCHER.read_bytes())
+    launcher.chmod(0o755)
+    stub = app / "Contents" / "Resources" / "python" / "bin" / "python3.13"
+    real = sys.executable or "/usr/bin/python3"
+    stub.write_text(f'#!/bin/sh\nexec "{real}" "$@"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    return app
+
+
+def _write_fake_zealfie_gui(package_root: Path, marker: str) -> None:
+    (package_root / "zealfie" / "gui").mkdir(parents=True, exist_ok=True)
+    (package_root / "zealfie" / "__init__.py").write_text(
+        f"MARKER = {marker!r}\n", encoding="utf-8"
+    )
+    (package_root / "zealfie" / "gui" / "__init__.py").write_text(
+        "def main():\n"
+        f"    print({marker!r})\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+
+
+def test_launcher_defeats_adversarial_cwd_shadow(tmp_path: Path) -> None:
+    """A `zealfie` package in the CWD must never shadow the bundled app."""
+    app = _real_python_stub_app(tmp_path / "build")
+    _write_fake_zealfie_gui(
+        app / "Contents" / "Resources" / "app", "BUNDLED_APP"
+    )
+
+    hostile_cwd = tmp_path / "hostile-cwd"
+    _write_fake_zealfie_gui(hostile_cwd, "CWD_PACKAGE")
+
+    # Threat is real: a bare interpreter run from that CWD imports the CWD
+    # package (this is exactly what `python -c` would have done).
+    threat = subprocess.run(
+        [sys.executable, "-c", "import zealfie; print(zealfie.MARKER)"],
+        cwd=str(hostile_cwd), capture_output=True, text=True, timeout=60,
+    )
+    assert threat.returncode == 0, threat.stderr
+    assert "CWD_PACKAGE" in threat.stdout
+
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}
+    proc = subprocess.run(
+        [str(app / "Contents" / "MacOS" / "ZeAlfie")],
+        cwd=str(hostile_cwd), env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "BUNDLED_APP" in proc.stdout
+    assert "CWD_PACKAGE" not in proc.stdout
+
+    # ...and still after physical relocation, from the same hostile CWD.
+    relocated_parent = tmp_path / "relocated"
+    relocated_parent.mkdir()
+    relocated = relocated_parent / "ZeAlfie.app"
+    shutil.copytree(app, relocated, symlinks=True)
+    relocated_proc = subprocess.run(
+        [str(relocated / "Contents" / "MacOS" / "ZeAlfie")],
+        cwd=str(hostile_cwd), env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert relocated_proc.returncode == 0, relocated_proc.stderr
+    assert "BUNDLED_APP" in relocated_proc.stdout
+    assert "CWD_PACKAGE" not in relocated_proc.stdout
 
 
 def test_launcher_follows_symlinked_launcher(tmp_path: Path) -> None:
