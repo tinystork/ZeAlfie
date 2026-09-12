@@ -39,10 +39,18 @@ jobs:
     runs-on: "macos-15"
     timeout-minutes: 120
     env:
-      WORK: ${{ runner.temp }}/zealfie-macos
       ARTIFACT_NAME: "ZeAlfie-macOS-arm64-unsigned.zip"
 
     steps:
+      - id: init-work
+        name: Initialize isolated work directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/zealfie-macos"
+          mkdir -p "$WORK"
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+
       - id: arch-check
         name: Verify ARM64 host (fail closed)
         shell: bash
