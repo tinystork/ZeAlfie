@@ -1,0 +1,49 @@
+# ZeAlfie macOS ARM64 unsigned application bundle — reproducibility record
+# (ZA-MAC-BOOT-01: first native arm64 .app bundle).
+#
+# Substrate: python-build-standalone (astral-sh) "install_only" tarball —
+# a plain, relocatable CPython directory tree (bin/python3.13 + full
+# stdlib + bundled pip) with NO installer, NO framework install, NO
+# /usr/local or Homebrew coupling.  It is the ONLY Python the bundle may
+# contain: no system Python, no runner Python, no checkout venv.
+#
+# Pinned at implementation time (2026-09-12).  The SHA-256 below is REAL:
+# it was computed from the official GitHub release asset
+# (https://github.com/astral-sh/python-build-standalone/releases/tag/20260901),
+# asset `cpython-3.13.15+20260901-aarch64-apple-darwin-install_only.tar.gz`,
+# 25 293 188 bytes.  It is never fabricated and never guessed, and the
+# build FAILS CLOSED on any mismatch BEFORE extraction — no substitution of
+# Python version, release tag or target triple is ever accepted.
+#
+# The archive's top-level `python/` directory becomes
+# `ZeAlfie.app/Contents/Resources/python`.
+
+[zealfie]
+# ZeAlfie version/revision whose wheel this record bootstraps.
+# Version is the product version — never bumped by packaging.
+version = "0.1.1"
+# Baseline commit this packaging work was branched from (origin/main).
+revision = "fec7015596a3a92ebbb2bdccdfd397297af65981"
+
+[cpython]
+# Exact pinned private runtime interpreter: python-build-standalone
+# (astral-sh) aarch64-apple-darwin install_only tarball of CPython 3.13.15
+# built from the 20260901 release (full normal CPython: bin/python3.13,
+# stdlib, bundled pip — `python3.13 -m pip` / `venv` work out of the box).
+version = "3.13.15"
+substrate = "python-build-standalone"
+upstream_repo = "astral-sh/python-build-standalone"
+release_tag = "20260901"
+target_triple = "aarch64-apple-darwin"
+archive_filename = "cpython-3.13.15+20260901-aarch64-apple-darwin-install_only.tar.gz"
+archive_url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-apple-darwin-install_only.tar.gz"
+# sha256 of the tarball above (25 293 188 bytes), computed from the official
+# GitHub release asset; verified by acquisition and by the build BEFORE
+# extraction (fail closed).
+sha256 = "b9054a9d3d54f4cb5573d44907fddb29874b08909bde73f29f2868cf872223ee"
+size = 25293188
+
+[install]
+# The bundle is a plain, per-user, unsigned .app directory tree.  There is
+# no installer, no admin requirement, no system-wide state.
+per_user = true

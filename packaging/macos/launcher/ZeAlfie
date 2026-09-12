@@ -1,0 +1,73 @@
+#!/bin/sh
+# ZeAlfie — macOS application launcher (ZA-MAC-BOOT-01).
+#
+# Minimal POSIX shell launcher.  It is deliberately a SCRIPT (never a
+# Mach-O binary) and it NEVER resolves python / python3 / pip / brew
+# through PATH: the only interpreter it can ever start is the private one
+# bundled at Contents/Resources/python/bin/python3.13.
+#
+# Guarantees:
+#   * resolves its own physical bundle from "$0" (following symlinks), so it
+#     works after the .app is physically relocated and from any CWD;
+#   * derives Contents/Resources from that physical location;
+#   * strips inherited PYTHONHOME / PYTHONPATH / VIRTUAL_ENV and disables the
+#     user site directory, then exposes Contents/Resources/app explicitly;
+#   * quotes every path (a bundle path may contain spaces).
+#
+# There are no BSD-vs-GNU assumptions and no calls to dirname/basename: only
+# POSIX shell builtins plus `readlink` for the (rare) symlinked-launcher case.
+
+set -eu
+
+# --- resolve the physical path of this script -----------------------------
+SOURCE="$0"
+case "$SOURCE" in
+  /*) ;;                                   # already absolute
+  *) SOURCE="${PWD%/}/$SOURCE" ;;          # PWD is a shell builtin
+esac
+
+# Follow symlinks without relying on `readlink -f` (not portable to all
+# supported macOS versions).  A bounded loop keeps this robust.
+_LINKS=0
+while [ -h "$SOURCE" ]; do
+  _DIR="${SOURCE%/*}"
+  [ -n "$_DIR" ] || _DIR="/"
+  _TARGET=$(readlink "$SOURCE")
+  case "$_TARGET" in
+    /*) SOURCE="$_TARGET" ;;
+    *) SOURCE="$_DIR/$_TARGET" ;;
+  esac
+  _LINKS=$((_LINKS + 1))
+  if [ "$_LINKS" -gt 40 ]; then
+    echo "ZeAlfie: too many levels of symbolic links resolving $0" >&2
+    exit 1
+  fi
+done
+
+MACOS_DIR="${SOURCE%/*}"
+CONTENTS_DIR="${MACOS_DIR%/*}"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+PYTHON="$RESOURCES_DIR/python/bin/python3.13"
+APP_DIR="$RESOURCES_DIR/app"
+
+if [ ! -x "$PYTHON" ]; then
+  echo "ZeAlfie: bundled interpreter missing or not executable: $PYTHON" >&2
+  exit 1
+fi
+
+# --- hermetic environment -------------------------------------------------
+# Never inherit an outer Python environment: the bundle is self-contained.
+unset PYTHONHOME
+unset PYTHONPATH
+unset PYTHONSTARTUP
+unset VIRTUAL_ENV
+unset PYTHONEXECUTABLE
+PYTHONNOUSERSITE=1
+export PYTHONNOUSERSITE
+PYTHONPATH="$APP_DIR"
+export PYTHONPATH
+
+# The GUI entry point is ``zealfie.gui:main`` (the ``zealfie-gui`` console
+# script).  ``zealfie.gui`` is a package without a ``__main__``, so invoke
+# the callable directly instead of relying on ``-m``.
+exec "$PYTHON" -s -c 'import sys; from zealfie.gui import main; sys.exit(main())' "$@"

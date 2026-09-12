@@ -1,0 +1,256 @@
+# macOS ARM64 packaging — manual, bounded, evidence-producing build of the
+# first unsigned ZeAlfie.app bundle (ZA-MAC-BOOT-01).
+#
+# Trigger: workflow_dispatch ONLY (no push/PR/schedule — this job is a
+# human-invoked engineering RC build, not part of regular CI and NOT a
+# release).
+#
+# What it proves, end to end, on a real GitHub-hosted Apple-silicon runner:
+#   * the pinned python-build-standalone arm64 archive is acquired and
+#     SHA-256-verified (fail closed) before extraction;
+#   * the app tree is installed OFFLINE from a locked macOS wheelhouse with
+#     the PRIVATE bundled Python (no application venv, no PyPI);
+#   * every universal2 Mach-O file is thinned to arm64 and the final
+#     Resources/python + Resources/app trees contain NO x86_64 slice;
+#   * the mandatory runtime witnesses (private python, imports/CLI,
+#     HostTarget, Qt offscreen, relocation, no-host-python, child venv,
+#     runtime root) all pass;
+#   * the engineering RC artifact is exactly
+#     ZeAlfie-macOS-arm64-unsigned.zip with a top-level ZeAlfie.app.
+#
+# Action majors pinned at implementation time (matching the existing
+# macOS readiness workflow):
+#   actions/checkout        -> v7.0.1
+#   actions/setup-python    -> v7.0.0
+#   actions/upload-artifact -> v7.0.1
+#
+# No caching, no continue-on-error anywhere: every step must succeed on its
+# own for the job to pass.  No release, tag, or version bump.
+name: "macOS ARM64 packaging (unsigned)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-packaging-arm64:
+    runs-on: "macos-15"
+    timeout-minutes: 120
+    env:
+      WORK: ${{ runner.temp }}/zealfie-macos
+      ARTIFACT_NAME: "ZeAlfie-macOS-arm64-unsigned.zip"
+
+    steps:
+      - id: arch-check
+        name: Verify ARM64 host (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "uname -m = $(uname -m)"
+          sw_vers
+          test "$(uname -m)" = "arm64" || {
+            echo "FAIL: this workflow requires a native arm64 runner"; exit 1; }
+          python3 --version || true
+
+      - id: checkout
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: setup-python
+        name: Setup driver Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - id: host-identity
+        name: Host identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python --version
+          python -c "import platform; print(platform.platform()); print(platform.machine()); print(platform.python_version())"
+          test "$(python -c 'import platform;print(platform.machine())')" = "arm64" \
+            || { echo "FAIL: driver python is not arm64"; exit 1; }
+          echo "HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - id: build-wheel
+        name: Build the zealfie wheel (driver python)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install "build>=1.2" "setuptools>=77" "wheel>=0.45"
+          mkdir -p "$WORK/zealfie-wheel"
+          python -m build --wheel --outdir "$WORK/zealfie-wheel"
+          ls -l "$WORK/zealfie-wheel"
+          test -f "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl" \
+            || { echo "FAIL: unexpected zealfie wheel filename"; ls "$WORK/zealfie-wheel"; exit 1; }
+
+      - id: acquire-wheelhouse
+        name: Acquire the locked macOS wheelhouse (exact pins + SHA-256)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python packaging/macos/acquire_wheelhouse.py \
+            --dest "$WORK/wheelhouse" \
+            --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl" \
+            --provenance-out "$WORK/wheelhouse.provenance.json"
+          ls -l "$WORK/wheelhouse"
+
+      - id: build-app
+        name: Build the unsigned .app bundle (PBS verify + offline install)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python packaging/macos/build_app.py \
+            --work "$WORK/build" \
+            --wheelhouse "$WORK/wheelhouse" \
+            --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl" \
+            --out-zip "$WORK/$ARTIFACT_NAME" \
+            --provenance-out "$WORK/build.provenance.json"
+          test -d "$WORK/build/ZeAlfie.app" || { echo "FAIL: no bundle"; exit 1; }
+
+      - id: macho-audit
+        name: Audit Mach-O (ARM64_ONLY / X86_64_RESIDUES)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYEOF'
+          import json, os, sys
+          from pathlib import Path
+
+          sys.path.insert(0, "packaging/macos")
+          import macho
+
+          app = Path(os.environ["WORK"]) / "build" / "ZeAlfie.app"
+          totals = {"files_checked": 0, "macho_files": 0,
+                    "x86_64_files": [], "non_arm64_macho_files": []}
+          for subtree in ("Contents/Resources/python", "Contents/Resources/app"):
+              audit = macho.audit_tree(app / subtree)
+              print(f"[audit] {subtree}: {macho.format_audit(audit)}")
+              totals["files_checked"] += audit["files_checked"]
+              totals["macho_files"] += len(audit["macho_files"])
+              totals["x86_64_files"] += audit["x86_64_files"]
+              totals["non_arm64_macho_files"] += audit["non_arm64_macho_files"]
+          print(f"files_checked={totals['files_checked']} "
+                f"macho_files={totals['macho_files']}")
+          if totals["x86_64_files"] or totals["non_arm64_macho_files"]:
+              print("FAIL: arm64-only audit", totals, file=sys.stderr)
+              raise SystemExit(1)
+          print("ARM64_ONLY=PASS")
+          print("X86_64_RESIDUES=0")
+          out = Path(os.environ["WORK"]) / "macho.audit.json"
+          out.write_text(json.dumps(totals, indent=2), encoding="utf-8")
+          PYEOF
+          {
+            echo "### Mach-O audit"
+            echo ""
+            echo "- files_checked: documented in macho.audit.json"
+            echo "- ARM64_ONLY: PASS"
+            echo "- X86_64_RESIDUES: 0"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: witnesses
+        name: Run mandatory runtime witnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          python packaging/macos/witnesses.py all \
+            --app "$WORK/build/ZeAlfie.app" \
+            --work "$WORK/witness" \
+            --wheelhouse "$WORK/wheelhouse" \
+            --forbid-path "$GITHUB_WORKSPACE" \
+            --forbid-path "$WORK/build" \
+            --json-out "$WORK/witnesses.json"
+
+      - id: artifact
+        name: Package the RC artifact and checksum it
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$WORK/$ARTIFACT_NAME"
+          test -f "$ZIP" || { echo "FAIL: artifact missing: $ZIP"; exit 1; }
+          unzip -l "$ZIP" | head -n 5
+          unzip -l "$ZIP" | grep -q "ZeAlfie.app/Contents/Info.plist" \
+            || { echo "FAIL: artifact has no top-level ZeAlfie.app"; exit 1; }
+          SIZE=$(stat -f%z "$ZIP")
+          SHA=$(shasum -a 256 "$ZIP" | awk '{print $1}')
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
+          echo "ARTIFACT_SIZE=$SIZE" >> "$GITHUB_ENV"
+          echo "ARTIFACT_SHA256=$SHA" >> "$GITHUB_ENV"
+          {
+            echo "artifact=$ARTIFACT_NAME"
+            echo "size=$SIZE"
+            echo "sha256=$SHA"
+          } > "$WORK/artifact.provenance.txt"
+          cat "$WORK/artifact.provenance.txt"
+
+      - id: upload
+        name: Upload the unsigned RC artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zealfie-macos-arm64-unsigned
+          path: |
+            ${{ runner.temp }}/zealfie-macos/ZeAlfie-macOS-arm64-unsigned.zip
+            ${{ runner.temp }}/zealfie-macos/artifact.provenance.txt
+            ${{ runner.temp }}/zealfie-macos/build.provenance.json
+            ${{ runner.temp }}/zealfie-macos/wheelhouse.provenance.json
+            ${{ runner.temp }}/zealfie-macos/macho.audit.json
+            ${{ runner.temp }}/zealfie-macos/witnesses.json
+          if-no-files-found: error
+
+      - id: failure-diagnostics
+        name: Failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          echo "### macOS ARM64 packaging failed" >> "$GITHUB_STEP_SUMMARY"
+          find "$WORK" -maxdepth 3 -type d 2>/dev/null | head -40 || true
+
+      - id: step-summary
+        name: Step summary
+        if: always()
+        shell: bash
+        env:
+          OUT_ARCH: "${{ steps.arch-check.outcome }}"
+          OUT_CHECKOUT: "${{ steps.checkout.outcome }}"
+          OUT_SETUP: "${{ steps.setup-python.outcome }}"
+          OUT_HOST: "${{ steps.host-identity.outcome }}"
+          OUT_WHEEL: "${{ steps.build-wheel.outcome }}"
+          OUT_WH: "${{ steps.acquire-wheelhouse.outcome }}"
+          OUT_APP: "${{ steps.build-app.outcome }}"
+          OUT_MACHO: "${{ steps.macho-audit.outcome }}"
+          OUT_WITNESS: "${{ steps.witnesses.outcome }}"
+          OUT_ARTIFACT: "${{ steps.artifact.outcome }}"
+          OUT_UPLOAD: "${{ steps.upload.outcome }}"
+        run: |
+          {
+            echo "## ZeAlfie macOS ARM64 unsigned RC"
+            echo ""
+            echo "**Engineering RC only — UNSIGNED, NOT NOTARISED, NOT A RELEASE.**"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Runner | macos-15 ($(uname -m)) |"
+            echo "| ZeAlfie HEAD | ${HEAD:-unknown} |"
+            echo "| PBS | cpython-3.13.15+20260901-aarch64-apple-darwin-install_only.tar.gz |"
+            echo "| Artifact | ${ARTIFACT_NAME:-NOT REACHED} |"
+            echo "| Size (bytes) | ${ARTIFACT_SIZE:-NOT REACHED} |"
+            echo "| SHA-256 | ${ARTIFACT_SHA256:-NOT REACHED} |"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| ARM64 host check | ${OUT_ARCH:-NOT REACHED} |"
+            echo "| Checkout | ${OUT_CHECKOUT:-NOT REACHED} |"
+            echo "| Setup driver Python | ${OUT_SETUP:-NOT REACHED} |"
+            echo "| Host identity | ${OUT_HOST:-NOT REACHED} |"
+            echo "| Build zealfie wheel | ${OUT_WHEEL:-NOT REACHED} |"
+            echo "| Acquire wheelhouse | ${OUT_WH:-NOT REACHED} |"
+            echo "| Build .app bundle | ${OUT_APP:-NOT REACHED} |"
+            echo "| Mach-O audit | ${OUT_MACHO:-NOT REACHED} |"
+            echo "| Runtime witnesses | ${OUT_WITNESS:-NOT REACHED} |"
+            echo "| Artifact checksum | ${OUT_ARTIFACT:-NOT REACHED} |"
+            echo "| Upload artifact | ${OUT_UPLOAD:-NOT REACHED} |"
+          } >> "$GITHUB_STEP_SUMMARY"
