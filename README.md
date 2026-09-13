@@ -37,11 +37,51 @@ real Windows witnesses.  ZeAlfie is still under active development.
 
 ## Installation
 
+### Python requirement for pip/source installations
+
+ZeAlfie's Python package requires **Python 3.11 or newer**.
+
+This requirement matters whenever ZeAlfie is installed or run through Python,
+including:
+
+- installation from a wheel with `pip`;
+- installation from a Git/source checkout;
+- editable development installations;
+- running the CLI through `python -m zealfie`.
+
+A future standalone installer or application bundle may provide or manage its
+own Python runtime. In that case, users do not need to select a Python
+interpreter manually. This is different from a wheel or source installation,
+where the Python interpreter used to create the environment must already meet
+ZeAlfie's requirement.
+
+> **Important:** a virtual environment does not upgrade Python.
+>
+> The `.venv` uses the interpreter that created it. Upgrading `pip`,
+> `setuptools`, or `wheel` inside the environment does **not** change its Python
+> version. If the system default points to an older Python, create the virtual
+> environment explicitly with a supported interpreter.
+
+Python 3.12 is used in some examples below because it is a convenient current
+choice, but it is **not** a special ZeAlfie requirement. Any supported Python
+version satisfying **Python >= 3.11** may be used.
+
 ### User installation (packaged)
 
-The user-facing installation path is a **packaged (non-editable) install** of a
-built wheel.  Packaged installations support ZeAlfie's transactional
-self-update flow from the GUI or the CLI.
+The user-facing Python installation path is a **packaged (non-editable)
+install** of a built wheel. Packaged wheel installations support ZeAlfie's
+transactional self-update flow from the GUI or the CLI.
+
+Before installing a wheel, verify that the active Python interpreter is
+supported:
+
+```bash
+python --version
+```
+
+It must report Python 3.11 or newer.
+
+Then install the wheel:
 
 ```bash
 python -m pip install zealfie-0.1.0-py3-none-any.whl
@@ -55,39 +95,134 @@ zealfie-gui
 
 Packaged installations can update themselves through the GUI self-update flow
 (check → consent → restart) or through the CLI commands documented under
-[Updating ZeAlfie](#updating-zealfie).  Standalone Windows/Linux installers are
-planned to expose the same flow without requiring Python or pip.
+[Updating ZeAlfie](#updating-zealfie). Standalone Windows/Linux installers are
+planned to expose the same flow without requiring users to manage Python or pip
+themselves.
 
 ### Source installation (developers and testers)
 
-Source-based installations are **development/test installations only**.  They
+Source-based installations are **development/test installations only**. They
 are not the user-facing path and are never updated by ZeAlfie's self-update
 mechanism.
 
-Clone the repository, enter its root directory — the directory containing
-`pyproject.toml` — then create and activate a Python virtual environment.
+Clone the repository and enter its root directory — the directory containing
+`pyproject.toml` — before creating the virtual environment.
+
+The key point is to select the Python interpreter **before** creating `.venv`.
 
 #### Linux
 
+First check the available interpreter:
+
+```bash
+python3 --version
+```
+
+If it already reports Python 3.11 or newer, it can be used directly:
+
 ```bash
 cd ZeAlfie
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -U pip
+
+python --version
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 ```
+
+If the system default is older than Python 3.11, install an additional
+supported Python interpreter and create the environment explicitly with it.
+For example, with Python 3.12:
+
+```bash
+cd ZeAlfie
+rm -rf .venv
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+python --version
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e .
+```
+
+The `python --version` command after activation should still report the
+supported interpreter used to create the environment.
+
+> **Do not replace the operating system's Python just for ZeAlfie.**
+>
+> On Linux, the system Python may be used by the distribution itself. If it is
+> too old for ZeAlfie, install a newer interpreter alongside it and use that
+> interpreter only to create the ZeAlfie virtual environment.
+>
+> Package names and installation methods vary by distribution. On Ubuntu, for
+> example, `python3.12` and `python3.12-venv` may be installed when they are
+> available for the release in use. Older Ubuntu releases may require an
+> additional trusted Python package source. That is an operating-system setup
+> choice, not a ZeAlfie runtime requirement.
 
 #### Windows PowerShell
 
+On Windows, the Python Launcher is the clearest way to see which Python
+versions are installed:
+
+```powershell
+py -0p
+```
+
+If Python 3.11 or newer is available, create the environment explicitly with
+that interpreter. For example, with Python 3.12:
+
 ```powershell
 cd ZeAlfie
-python -m venv .venv
+Remove-Item -Recurse -Force .venv -ErrorAction SilentlyContinue
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
+
+python --version
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 ```
 
-The installation command is meant to be used exactly as written:
+Python 3.12 is only an example. If Python 3.11 is the supported interpreter
+installed on the machine, this is equally valid:
+
+```powershell
+py -3.11 -m venv .venv
+```
+
+After activation, `python --version` should report Python 3.11 or newer.
+
+If the `py` launcher is not available, a specific supported `python.exe` may be
+used directly to create the environment instead.
+
+### Why the interpreter choice matters
+
+The following sequence is **not sufficient** if `python` itself is too old:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+`pip` may become newer, but the virtual environment still contains the same
+Python version that created it.
+
+The safe sequence is therefore:
+
+1. identify or install a supported Python interpreter;
+2. create `.venv` with that exact interpreter;
+3. activate `.venv`;
+4. verify `python --version`;
+5. upgrade packaging tools;
+6. install ZeAlfie.
+
+This keeps ZeAlfie isolated without modifying the operating system's Python
+installation.
+
+### Editable installation
+
+The source installation command is meant to be used exactly as written:
 
 ```bash
 python -m pip install -e .
@@ -106,7 +241,7 @@ After installation, start the graphical interface with:
 zealfie-gui
 ```
 
-Editable/source installations are development or test installations.  ZeAlfie's
+Editable/source installations are development or test installations. ZeAlfie's
 self-update mechanism does not replace or update a Git source checkout.
 
 ### Development dependencies
@@ -401,11 +536,27 @@ Important design principles include:
 
 ## Development
 
-Activate the repository environment:
+The development environment must also use Python 3.11 or newer.
+
+Activate the repository environment on Linux/macOS:
 
 ```bash
 source .venv/bin/activate
+python --version
 ```
+
+Or on Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python --version
+```
+
+If the reported Python version is too old, deactivate/remove the environment
+and recreate it with a supported interpreter as described under
+[Source installation](#source-installation-developers-and-testers). Installing
+newer packages into an old virtual environment does not upgrade its Python
+interpreter.
 
 Run the focused test suites appropriate to the change being made. For example:
 
