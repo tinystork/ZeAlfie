@@ -88,6 +88,10 @@ tmp_path_retention_policy = failed
 - Seuls les artefacts du **dernier run échoué** sont conservés (pour diagnostic).
 - Un full run réussi ne laisse donc plus ~3,9 Go de basetemp derrière lui.
 
+L'ownership du scratch de test/witness (ce qui est possédé, nettoyé, ou
+conservé volontairement, et la distinction scratch vs build outputs) est
+décrit dans [`docs/tmpfs-cleanup-gate.md`](tmpfs-cleanup-gate.md).
+
 ## FULL runs : scratch disque obligatoire
 
 `/tmp` est une tmpfs de **3,8 Go** : un full run avec basetemp par défaut y fait

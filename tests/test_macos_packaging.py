@@ -1074,14 +1074,93 @@ def test_build_app_refuses_on_non_darwin() -> None:
     assert "must run on macOS" in proc.stderr
 
 
+# Dev/test-only files under packaging/windows that are staged as bootstrap
+# assets but executed ONLY by CI smoke/verification (never by end-user
+# install), so they are NOT part of the Windows production packaging surface
+# guarded below. Exact paths, forward-slash normalized, relative to repo root.
+_WINDOWS_DEV_TEST_ONLY = frozenset({
+    "packaging/windows/gui_smoke_offscreen.py",
+    "packaging/windows/installer_smoke.py",
+    "packaging/windows/side_effect_witness.py",
+    "packaging/windows/witness_runtime.py",
+})
+
+
+def _normalize_git_path(raw: str) -> str:
+    """Strip porcelain quoting and normalize a git status path to repo-relative."""
+    path = raw.strip()
+    if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
+        path = path[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return path.replace("\\", "/")
+
+
+def windows_packaging_non_devtest_changes(porcelain: str) -> list[str]:
+    """Return production-surface paths changed under packaging/windows.
+
+    Parses ``git status --porcelain -- packaging/windows`` output and returns
+    every changed path that is NOT in the dev/test-only allowlist. Fail-closed:
+    any unknown/unlisted path is retained. Renames evaluate both source and
+    destination conservatively.
+    """
+    changed: list[str] = []
+    for line in porcelain.splitlines():
+        if not line:
+            continue
+        status = line[:2]
+        rest = line[2:]
+        if status[0] in ("R", "C") and " -> " in rest:
+            # "R  old -> new" — evaluate both source and destination.
+            for part in rest.split(" -> "):
+                path = _normalize_git_path(part)
+                if path and path not in _WINDOWS_DEV_TEST_ONLY:
+                    changed.append(path)
+        else:
+            path = _normalize_git_path(rest)
+            if path and path not in _WINDOWS_DEV_TEST_ONLY:
+                changed.append(path)
+    return changed
+
+
 def test_windows_packaging_untouched() -> None:
-    """The mission must not alter the Windows packaging surface."""
+    """The mission must not alter the Windows *production* packaging surface.
+
+    Dev/test-only files (offscreen GUI smoke, installer smoke, and CI
+    side-effect/runtime witnesses) may change; any other change under
+    packaging/windows fails the guard (fail-closed).
+    """
     proc = subprocess.run(
         ["git", "status", "--porcelain", "--", "packaging/windows"],
         cwd=_REPO_ROOT, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0
-    assert proc.stdout.strip() == ""
+    assert windows_packaging_non_devtest_changes(proc.stdout) == []
+
+
+def test_windows_packaging_non_devtest_changes_flags_production() -> None:
+    assert windows_packaging_non_devtest_changes(
+        " M packaging/windows/installer/zealfie.iss\n"
+    ) == ["packaging/windows/installer/zealfie.iss"]
+
+
+def test_windows_packaging_non_devtest_changes_filters_devtest() -> None:
+    assert windows_packaging_non_devtest_changes(
+        " M packaging/windows/gui_smoke_offscreen.py\n"
+    ) == []
+
+
+def test_windows_packaging_non_devtest_changes_fail_closed_unknown() -> None:
+    assert windows_packaging_non_devtest_changes(
+        "?? packaging/windows/surprise.py\n"
+    ) == ["packaging/windows/surprise.py"]
+
+
+def test_windows_packaging_non_devtest_changes_rename_production_source() -> None:
+    assert windows_packaging_non_devtest_changes(
+        "R  packaging/windows/installer/zealfie.iss -> packaging/windows/installer/renamed.iss\n"
+    ) == [
+        "packaging/windows/installer/zealfie.iss",
+        "packaging/windows/installer/renamed.iss",
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -411,8 +411,9 @@ def _drive() -> int:
     results: list[tuple[str, bool, str]] = []
     try:
         root1 = Path(tempfile.mkdtemp(prefix="zealfie-posix-witness-")) / "runtime"
+        tmp_roots.append(str(root1.parent))
         root2 = Path(tempfile.mkdtemp(prefix="zealfie-posix-witness-")) / "runtime"
-        tmp_roots.extend([str(root1.parent), str(root2.parent)])
+        tmp_roots.append(str(root2.parent))
 
         for label, runner, args in (
             ("E2_SAME_ROOT_EXCLUSION", _scenario_e2_same_root, (root1,)),

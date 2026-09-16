@@ -29,6 +29,7 @@ Only macOS can run these witnesses; the script refuses to run elsewhere.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -242,29 +243,34 @@ def witness_host_target(app: Path) -> dict:
 
 def witness_qt_smoke(app: Path, work: Path) -> dict:
     interpreter = _bundled_python(app)
-    smoke_root = Path(tempfile.mkdtemp(prefix="zealfie-macos-qt-", dir=str(work)))
     if not _GUI_SMOKE.is_file():
         raise WitnessError(f"GUI smoke script missing: {_GUI_SMOKE}")
-    env = _sanitized_env(
-        {
-            "PYTHONPATH": str(macpack.bundle_app_dir(app)),
-            "QT_QPA_PLATFORM": "offscreen",
-            "ZEALFIE_RUNTIME_ROOT": str(smoke_root / "runtime"),
-        }
-    )
-    proc = _run(
-        [str(interpreter), str(_GUI_SMOKE), "--work-root", str(smoke_root)],
-        env=env,
-        cwd="/tmp",
-        timeout=300,
-    )
-    if proc.returncode != 0:
-        raise WitnessError(
-            f"QT_SMOKE FAILED rc={proc.returncode}\n"
-            f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+    # Disposable scratch under the caller-owned work directory; removed on
+    # success (and on failure) so the witness leaves no owned scratch.
+    with tempfile.TemporaryDirectory(
+        prefix="zealfie-macos-qt-", dir=str(work)
+    ) as allocated:
+        smoke_root = Path(allocated)
+        env = _sanitized_env(
+            {
+                "PYTHONPATH": str(macpack.bundle_app_dir(app)),
+                "QT_QPA_PLATFORM": "offscreen",
+                "ZEALFIE_RUNTIME_ROOT": str(smoke_root / "runtime"),
+            }
         )
-    if "QT_SMOKE=PASS" not in proc.stdout:
-        raise WitnessError(f"QT_SMOKE FAILED: marker missing\n{proc.stdout}")
+        proc = _run(
+            [str(interpreter), str(_GUI_SMOKE), "--work-root", str(smoke_root)],
+            env=env,
+            cwd="/tmp",
+            timeout=300,
+        )
+        if proc.returncode != 0:
+            raise WitnessError(
+                f"QT_SMOKE FAILED rc={proc.returncode}\n"
+                f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+            )
+        if "QT_SMOKE=PASS" not in proc.stdout:
+            raise WitnessError(f"QT_SMOKE FAILED: marker missing\n{proc.stdout}")
     _log(proc.stdout.strip())
     return {"stdout": proc.stdout.strip()}
 
@@ -356,35 +362,43 @@ print(json.dumps(report))
 
 def witness_child_venv(app: Path, work: Path, wheelhouse_dir: Path) -> dict:
     interpreter = _bundled_python(app)
-    candidate = Path(tempfile.mkdtemp(prefix="zealfie-macos-childvenv-", dir=str(work))) / "child"
-    driver = work / "child_venv_driver.py"
-    driver.write_text(_CHILD_VENV_DRIVER, encoding="utf-8")
-    env = _sanitized_env()
-    payload = _run_json(
-        "CHILD_VENV",
-        [str(interpreter), str(driver), str(candidate), str(wheelhouse_dir)],
-        env=env,
-        timeout=900,
-    )
-    bundle_prefix = str(macpack.bundle_python_dir(app))
-    child = payload["child"]
-    if Path(child["base_prefix"]) != Path(bundle_prefix):
-        raise WitnessError(
-            f"CHILD_VENV FAILED: child base_prefix={child['base_prefix']!r} "
-            f"is not the bundled private prefix {bundle_prefix!r}"
+    # The child venv and its driver script are disposable scratch owned by
+    # this witness; the whole allocation is scoped under the caller-owned
+    # work directory and removed on success (and on failure).  The returned
+    # evidence records their temporary paths deliberately.
+    with tempfile.TemporaryDirectory(
+        prefix="zealfie-macos-childvenv-", dir=str(work)
+    ) as allocated:
+        scratch_root = Path(allocated)
+        candidate = scratch_root / "child"
+        driver = scratch_root / "child_venv_driver.py"
+        driver.write_text(_CHILD_VENV_DRIVER, encoding="utf-8")
+        env = _sanitized_env()
+        payload = _run_json(
+            "CHILD_VENV",
+            [str(interpreter), str(driver), str(candidate), str(wheelhouse_dir)],
+            env=env,
+            timeout=900,
         )
-    if child["executable"] != str(candidate / "bin" / "python3.13"):
-        raise WitnessError(
-            f"CHILD_VENV FAILED: child executable={child['executable']!r}"
-        )
-    if "CHILD_IMPORT=26.3" not in payload["import"]:
-        raise WitnessError(
-            f"CHILD_VENV FAILED: offline import did not succeed: {payload['import']!r}"
-        )
-    _log("CHILD_VENV=PASS " + json.dumps(
-        {"executable": child["executable"], "base_prefix": child["base_prefix"],
-         "pip": payload["pip_version"].split()[1] if " " in payload["pip_version"] else payload["pip_version"]}
-    ))
+        bundle_prefix = str(macpack.bundle_python_dir(app))
+        child = payload["child"]
+        if Path(child["base_prefix"]) != Path(bundle_prefix):
+            raise WitnessError(
+                f"CHILD_VENV FAILED: child base_prefix={child['base_prefix']!r} "
+                f"is not the bundled private prefix {bundle_prefix!r}"
+            )
+        if child["executable"] != str(candidate / "bin" / "python3.13"):
+            raise WitnessError(
+                f"CHILD_VENV FAILED: child executable={child['executable']!r}"
+            )
+        if "CHILD_IMPORT=26.3" not in payload["import"]:
+            raise WitnessError(
+                f"CHILD_VENV FAILED: offline import did not succeed: {payload['import']!r}"
+            )
+        _log("CHILD_VENV=PASS " + json.dumps(
+            {"executable": child["executable"], "base_prefix": child["base_prefix"],
+             "pip": payload["pip_version"].split()[1] if " " in payload["pip_version"] else payload["pip_version"]}
+        ))
     return payload
 
 
@@ -394,62 +408,82 @@ def witness_child_venv(app: Path, work: Path, wheelhouse_dir: Path) -> dict:
 
 
 def witness_relocation(app: Path, work: Path, forbidden_paths: list[str]) -> dict:
-    dest_parent = Path(tempfile.mkdtemp(prefix="zealfie-macos-relocation-", dir=str(work)))
-    relocated = dest_parent / macpack.APP_NAME
-    shutil.copytree(app, relocated, symlinks=True)
-    relocated_interpreter = macpack.bundled_interpreter(relocated)
-    if not relocated_interpreter.is_file():
-        raise WitnessError(f"relocated interpreter missing: {relocated_interpreter}")
-
-    env = _sanitized_env(
-        {"PYTHONPATH": str(macpack.bundle_app_dir(relocated))}
-    )
-    evidence = []
-    for label, argv in (
-        ("private-python", [str(relocated_interpreter), "-c", _PROBE]),
-        ("import-smoke", [str(relocated_interpreter), "-c", _IMPORT_SMOKE]),
-        ("cli-smoke", [str(relocated_interpreter), "-m", "zealfie", "--help"]),
-        ("host-target", [str(relocated_interpreter), "-c", _HOST_TARGET]),
-    ):
-        proc = _run_or_fail(f"RELOCATION[{label}]", argv, env=env, cwd="/tmp")
-        evidence.append(proc.stdout)
-
-    smoke_root = Path(tempfile.mkdtemp(prefix="zealfie-macos-reloc-qt-", dir=str(work)))
-    qt_env = _sanitized_env(
-        {
-            "PYTHONPATH": str(macpack.bundle_app_dir(relocated)),
-            "QT_QPA_PLATFORM": "offscreen",
-            "ZEALFIE_RUNTIME_ROOT": str(smoke_root / "runtime"),
-        }
-    )
-    qt = _run(
-        [str(relocated_interpreter), str(_GUI_SMOKE), "--work-root", str(smoke_root)],
-        env=qt_env,
-        cwd="/tmp",
-        timeout=300,
-    )
-    if qt.returncode != 0 or "QT_SMOKE=PASS" not in qt.stdout:
-        raise WitnessError(
-            f"RELOCATION[qt-smoke] FAILED rc={qt.returncode}\n"
-            f"stdout: {qt.stdout}\nstderr: {qt.stderr}"
+    # The relocation copy and the relocated Qt-smoke root are disposable
+    # scratch owned by this witness.  Each allocation is registered with the
+    # ExitStack immediately after creation, so an earlier allocation is still
+    # cleaned up if a later one fails; all scratch is removed on success (and
+    # on failure).  The caller-owned work directory and the input app are
+    # preserved.  The returned ``relocated`` path is recorded evidence of the
+    # throwaway copy location (the copy itself is cleaned).
+    with contextlib.ExitStack() as scratch:
+        dest_parent = Path(
+            scratch.enter_context(
+                tempfile.TemporaryDirectory(
+                    prefix="zealfie-macos-relocation-", dir=str(work)
+                )
+            )
         )
-    evidence.append(qt.stdout)
+        relocated = dest_parent / macpack.APP_NAME
+        shutil.copytree(app, relocated, symlinks=True)
+        relocated_interpreter = macpack.bundled_interpreter(relocated)
+        if not relocated_interpreter.is_file():
+            raise WitnessError(f"relocated interpreter missing: {relocated_interpreter}")
 
-    combined = "\n".join(evidence)
-    if str(relocated) not in combined:
-        raise WitnessError(
-            "RELOCATION FAILED: evidence does not reference the relocated "
-            "bundle path"
+        env = _sanitized_env(
+            {"PYTHONPATH": str(macpack.bundle_app_dir(relocated))}
         )
-    _assert_absent(combined, forbidden_paths, "RELOCATION")
-    original_app = str(app)
-    if original_app in combined:
-        raise WitnessError(
-            f"RELOCATION FAILED: evidence still references the original "
-            f"bundle {original_app!r}"
+        evidence = []
+        for label, argv in (
+            ("private-python", [str(relocated_interpreter), "-c", _PROBE]),
+            ("import-smoke", [str(relocated_interpreter), "-c", _IMPORT_SMOKE]),
+            ("cli-smoke", [str(relocated_interpreter), "-m", "zealfie", "--help"]),
+            ("host-target", [str(relocated_interpreter), "-c", _HOST_TARGET]),
+        ):
+            proc = _run_or_fail(f"RELOCATION[{label}]", argv, env=env, cwd="/tmp")
+            evidence.append(proc.stdout)
+
+        smoke_root = Path(
+            scratch.enter_context(
+                tempfile.TemporaryDirectory(
+                    prefix="zealfie-macos-reloc-qt-", dir=str(work)
+                )
+            )
         )
-    _log(f"RELOCATION=PASS cwd=/tmp relocated={relocated}")
-    return {"relocated": str(relocated), "forbidden_paths": forbidden_paths}
+        qt_env = _sanitized_env(
+            {
+                "PYTHONPATH": str(macpack.bundle_app_dir(relocated)),
+                "QT_QPA_PLATFORM": "offscreen",
+                "ZEALFIE_RUNTIME_ROOT": str(smoke_root / "runtime"),
+            }
+        )
+        qt = _run(
+            [str(relocated_interpreter), str(_GUI_SMOKE), "--work-root", str(smoke_root)],
+            env=qt_env,
+            cwd="/tmp",
+            timeout=300,
+        )
+        if qt.returncode != 0 or "QT_SMOKE=PASS" not in qt.stdout:
+            raise WitnessError(
+                f"RELOCATION[qt-smoke] FAILED rc={qt.returncode}\n"
+                f"stdout: {qt.stdout}\nstderr: {qt.stderr}"
+            )
+        evidence.append(qt.stdout)
+
+        combined = "\n".join(evidence)
+        if str(relocated) not in combined:
+            raise WitnessError(
+                "RELOCATION FAILED: evidence does not reference the relocated "
+                "bundle path"
+            )
+        _assert_absent(combined, forbidden_paths, "RELOCATION")
+        original_app = str(app)
+        if original_app in combined:
+            raise WitnessError(
+                f"RELOCATION FAILED: evidence still references the original "
+                f"bundle {original_app!r}"
+            )
+        _log(f"RELOCATION=PASS cwd=/tmp relocated={relocated}")
+        return {"relocated": str(relocated), "forbidden_paths": forbidden_paths}
 
 
 # ---------------------------------------------------------------------------
@@ -471,88 +505,106 @@ def witness_no_host_python(app: Path, work: Path) -> dict:
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         raise WitnessError(f"launcher missing or not executable: {launcher}")
 
-    # A shim `python3.13`/`python3`/`python`/`pip` on PATH that records any
-    # accidental PATH resolution.
-    shim_dir = Path(tempfile.mkdtemp(prefix="zealfie-macos-shim-", dir=str(work)))
-    marker = shim_dir / "SHIM_EXECUTED"
-    for name in ("python", "python3", "python3.13", "pip", "brew"):
-        shim = shim_dir / name
-        shim.write_text(f"#!/bin/sh\ntouch {marker}\nexit 97\n", encoding="utf-8")
-        shim.chmod(0o755)
-
-    hostile = {
-        "PATH": f"{shim_dir}:/usr/bin:/bin",
-        "PYTHONHOME": "/nonexistent/python-home",
-        "PYTHONPATH": "/nonexistent/pythonpath",
-        "VIRTUAL_ENV": "/nonexistent/venv",
-        "QT_QPA_PLATFORM": "offscreen",
-        "ZEALFIE_RUNTIME_ROOT": str(work / "nohost-runtime"),
-    }
-    env = _sanitized_env(hostile)
-
-    proc = subprocess.Popen(
-        [str(launcher)], env=env, cwd="/tmp",
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    started_args = ""
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            out, err = proc.communicate()
-            raise WitnessError(
-                f"NO_HOST_PYTHON FAILED: launcher exited rc={proc.returncode}\n"
-                f"stdout: {out}\nstderr: {err}"
+    # The hostile PATH shim directory and the deliberately broken negative-
+    # control app copy are disposable scratch owned by this witness.  Each is
+    # registered with the ExitStack as soon as it is created, so the shim
+    # directory is still cleaned if the negative-control copy fails to build;
+    # all scratch is removed on success (and on failure).
+    with contextlib.ExitStack() as scratch:
+        # A shim `python3.13`/`python3`/`python`/`pip` on PATH that records any
+        # accidental PATH resolution.
+        shim_dir = Path(
+            scratch.enter_context(
+                tempfile.TemporaryDirectory(
+                    prefix="zealfie-macos-shim-", dir=str(work)
+                )
             )
-        started_args = _ps_args(proc.pid)
-        if str(interpreter) in started_args:
-            break
-        time.sleep(0.5)
-    else:
-        proc.terminate()
-        raise WitnessError(
-            "NO_HOST_PYTHON FAILED: launcher never started the bundled "
-            f"interpreter (last args={started_args!r})"
         )
-    if str(interpreter) not in started_args:
-        proc.terminate()
-        raise WitnessError(
-            f"NO_HOST_PYTHON FAILED: started process is not the bundled "
-            f"interpreter: {started_args!r}"
-        )
-    proc.terminate()
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=30)
-    if marker.exists():
-        raise WitnessError(
-            "NO_HOST_PYTHON FAILED: a PATH shim was executed — the launcher "
-            "resolved an interpreter through PATH"
-        )
+        marker = shim_dir / "SHIM_EXECUTED"
+        for name in ("python", "python3", "python3.13", "pip", "brew"):
+            shim = shim_dir / name
+            shim.write_text(f"#!/bin/sh\ntouch {marker}\nexit 97\n", encoding="utf-8")
+            shim.chmod(0o755)
 
-    # Negative control: without the bundled interpreter the launcher must
-    # fail (never fall back to a PATH/host Python).
-    broken = Path(tempfile.mkdtemp(prefix="zealfie-macos-nohost-", dir=str(work))) / macpack.APP_NAME
-    shutil.copytree(app, broken, symlinks=True)
-    broken_python = macpack.bundled_interpreter(broken)
-    os.rename(broken_python, broken_python.with_name(broken_python.name + ".disabled"))
-    negative = _run([str(macpack.bundle_launcher(broken))], env=env, cwd="/tmp", timeout=60)
-    if negative.returncode == 0:
-        raise WitnessError(
-            "NO_HOST_PYTHON FAILED: launcher exited 0 with no bundled interpreter"
+        hostile = {
+            "PATH": f"{shim_dir}:/usr/bin:/bin",
+            "PYTHONHOME": "/nonexistent/python-home",
+            "PYTHONPATH": "/nonexistent/pythonpath",
+            "VIRTUAL_ENV": "/nonexistent/venv",
+            "QT_QPA_PLATFORM": "offscreen",
+            "ZEALFIE_RUNTIME_ROOT": str(work / "nohost-runtime"),
+        }
+        env = _sanitized_env(hostile)
+
+        proc = subprocess.Popen(
+            [str(launcher)], env=env, cwd="/tmp",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-    if "bundled interpreter missing" not in (negative.stderr + negative.stdout):
-        raise WitnessError(
-            "NO_HOST_PYTHON FAILED: negative control produced an unexpected "
-            f"error:\nstdout: {negative.stdout}\nstderr: {negative.stderr}"
-        )
-    if marker.exists():
-        raise WitnessError(
-            "NO_HOST_PYTHON FAILED: negative control executed a PATH shim"
-        )
-    _log("NO_HOST_PYTHON=PASS " + started_args)
-    return {"started_args": started_args, "negative_rc": negative.returncode}
+        started_args = ""
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                out, err = proc.communicate()
+                raise WitnessError(
+                    f"NO_HOST_PYTHON FAILED: launcher exited rc={proc.returncode}\n"
+                    f"stdout: {out}\nstderr: {err}"
+                )
+            started_args = _ps_args(proc.pid)
+            if str(interpreter) in started_args:
+                break
+            time.sleep(0.5)
+        else:
+            proc.terminate()
+            raise WitnessError(
+                "NO_HOST_PYTHON FAILED: launcher never started the bundled "
+                f"interpreter (last args={started_args!r})"
+            )
+        if str(interpreter) not in started_args:
+            proc.terminate()
+            raise WitnessError(
+                f"NO_HOST_PYTHON FAILED: started process is not the bundled "
+                f"interpreter: {started_args!r}"
+            )
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
+        if marker.exists():
+            raise WitnessError(
+                "NO_HOST_PYTHON FAILED: a PATH shim was executed — the launcher "
+                "resolved an interpreter through PATH"
+            )
+
+        # Negative control: without the bundled interpreter the launcher must
+        # fail (never fall back to a PATH/host Python).
+        broken = Path(
+            scratch.enter_context(
+                tempfile.TemporaryDirectory(
+                    prefix="zealfie-macos-nohost-", dir=str(work)
+                )
+            )
+        ) / macpack.APP_NAME
+        shutil.copytree(app, broken, symlinks=True)
+        broken_python = macpack.bundled_interpreter(broken)
+        os.rename(broken_python, broken_python.with_name(broken_python.name + ".disabled"))
+        negative = _run([str(macpack.bundle_launcher(broken))], env=env, cwd="/tmp", timeout=60)
+        if negative.returncode == 0:
+            raise WitnessError(
+                "NO_HOST_PYTHON FAILED: launcher exited 0 with no bundled interpreter"
+            )
+        if "bundled interpreter missing" not in (negative.stderr + negative.stdout):
+            raise WitnessError(
+                "NO_HOST_PYTHON FAILED: negative control produced an unexpected "
+                f"error:\nstdout: {negative.stdout}\nstderr: {negative.stderr}"
+            )
+        if marker.exists():
+            raise WitnessError(
+                "NO_HOST_PYTHON FAILED: negative control executed a PATH shim"
+            )
+        _log("NO_HOST_PYTHON=PASS " + started_args)
+        return {"started_args": started_args, "negative_rc": negative.returncode}
 
 
 # ---------------------------------------------------------------------------
