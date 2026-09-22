@@ -205,3 +205,23 @@ beta = "beta"
 [[products.launch.entry_points]]
 group = "gui_scripts"
 name = "zeanalyser"
+
+[[products]]
+id = "zecalibrator"
+display_name = "ZeCalibrator"
+distribution_name = "ZeCalibrator"
+description = "Batch calibration of raw astronomical frames"
+required_extras = ["gui"]
+
+[products.remote_source]
+owner = "tinystork"
+repo = "ZeCalibrator"
+ref = "main"
+
+[products.channels]
+stable = "main"
+beta = "beta"
+
+[[products.launch.entry_points]]
+group = "gui_scripts"
+name = "zecalibrator-gui"

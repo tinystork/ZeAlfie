@@ -33,8 +33,9 @@ from zealfie.app import (
     ZeAlfieService,
 )
 from zealfie.components.model import EntryPointContract
+from zealfie.products.catalog import default_catalog
 from zealfie.runtime.layout import RuntimeLayout
-from zealfie.runtime.model import DeploymentResult, RuntimeState, RuntimeStatus
+from zealfie.runtime.model import DeploymentResult, RuntimeReasonCode, RuntimeState, RuntimeStatus
 from zealfie.runtime.state import save_active_state
 from zealfie.sources import RemoteSource, ResolvedSource
 from zealfie.releases.model import VerifiedArtifact
@@ -412,3 +413,203 @@ def test_check_update_pin_never_resolves(tmp_path: Path) -> None:
     # No provenance → PROVENANCE_UNKNOWN (never resolves), resolver untouched.
     assert result.status is UpdateStatus.PROVENANCE_UNKNOWN
     assert resolver.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 4. ZeCalibrator — wired into the REAL generic channel/policy pipeline
+#    (ZA-ZC-ADMISSION; catalogue descriptor only, no product-specific path)
+# ---------------------------------------------------------------------------
+
+
+def test_zecalibrator_channels_stable_and_beta(tmp_path: Path) -> None:
+    """ZeCalibrator exposes stable→main and beta→beta via the generic
+    per-product channel authority (same shape as zeanalyser/zeseestarstacker)."""
+    service = _service(tmp_path, default_catalog())
+    assert service.available_product_channels("zecalibrator") == (
+        ("stable", "main"),
+        ("beta", "beta"),
+    )
+
+
+def test_zecalibrator_default_policy_stable_follow(tmp_path: Path) -> None:
+    """Factory default policy for ZeCalibrator is stable/follow."""
+    service = _service(tmp_path, default_catalog())
+    policy = service.product_policy("zecalibrator")
+    assert policy.channel == "stable"
+    assert policy.policy == "follow"
+
+
+def test_zecalibrator_set_channel_beta_persists(tmp_path: Path) -> None:
+    """set_product_channel('zecalibrator', 'beta') persists through the
+    generic policy store."""
+    service = _service(tmp_path, default_catalog())
+    policy = service.set_product_channel("zecalibrator", "beta")
+    assert policy.channel == "beta"
+    assert policy.policy == "follow"
+    assert service.product_policy("zecalibrator") == policy
+
+
+def test_zecalibrator_undeclared_channel_raises(tmp_path: Path) -> None:
+    """An undeclared channel (development) is rejected fail-closed."""
+    service = _service(tmp_path, default_catalog())
+    with pytest.raises(ProductChannelUnavailableError):
+        service.set_product_channel("zecalibrator", "development")
+
+
+def test_zecalibrator_install_resolves_declared_source(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Install preparation resolves ZeCalibrator's declared remote source
+    (tinystork/ZeCalibrator/main) through the generic follow/stable path."""
+    import zealfie.app.service as svc_mod
+
+    service = _service(tmp_path, default_catalog())
+    resolve_calls: list[tuple[str, str, str]] = []
+
+    def _fake_prepare_from_resolved(desc, resolved, *, fetcher, work_root,
+                                    progress_callback=None):
+        return _fake_ppa(desc.product_id)
+
+    monkeypatch.setattr(
+        service, "_prepare_product_artifact_from_resolved",
+        _fake_prepare_from_resolved,
+    )
+
+    def _recording_resolver(owner, repo, ref):
+        resolve_calls.append((owner, repo, ref))
+        return OTHER_SHA
+
+    # The default policy (stable/follow) drives the generic path; the real
+    # prepare_product_artifact resolves the descriptor's remote source ref.
+    service._prepare_target_product_artifact(
+        "zecalibrator",
+        service.product_policy("zecalibrator"),
+        resolver=_recording_resolver,
+        fetcher=lambda o, r, sha: b"",
+        work_root=tmp_path / "work",
+    )
+    assert resolve_calls == [("tinystork", "ZeCalibrator", "main")]
+
+
+def test_zecalibrator_install_resolves_beta_after_channel_switch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """After selecting beta, install preparation resolves the beta ref."""
+    import zealfie.app.service as svc_mod
+
+    service = _service(tmp_path, default_catalog())
+    service.set_product_channel("zecalibrator", "beta")
+    resolve_calls: list[tuple[str, str, str]] = []
+
+    def _fake_prepare_from_resolved(desc, resolved, *, fetcher, work_root,
+                                    progress_callback=None):
+        return _fake_ppa(desc.product_id)
+
+    monkeypatch.setattr(
+        service, "_prepare_product_artifact_from_resolved",
+        _fake_prepare_from_resolved,
+    )
+
+    def _recording_resolver(owner, repo, ref):
+        resolve_calls.append((owner, repo, ref))
+        return OTHER_SHA
+
+    service._prepare_target_product_artifact(
+        "zecalibrator",
+        service.product_policy("zecalibrator"),
+        resolver=_recording_resolver,
+        fetcher=lambda o, r, sha: b"",
+        work_root=tmp_path / "work",
+    )
+    assert resolve_calls == [("tinystork", "ZeCalibrator", "beta")]
+
+
+def test_zecalibrator_required_extras_participate_in_acquisition(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The catalog's required_extras==('gui',) reach the generic dependency
+    acquisition request — no product-specific path."""
+    import zealfie.app.service as svc_mod
+
+    service = ZeAlfieService(
+        catalog=default_catalog(),
+        runtime=_FakeAbsentRt(),
+        selection_store=SelectionStore(path=tmp_path / "sel.toml"),
+        policy_store=ProductPolicyStore(path=tmp_path / "policy.toml"),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_build_request(wheel_path, active_extras=None):
+        captured["active_extras"] = active_extras
+        return object()
+
+    monkeypatch.setattr(svc_mod, "build_acquisition_request", _fake_build_request)
+
+    class _FakeAcquirer:
+        def acquire(self, req, staging_dir, cache=None, proven_requirements=None):
+            return None
+
+    service._acquirer = _FakeAcquirer()
+
+    service._acquire_product_dependencies(
+        _fake_ppa("zecalibrator"), tmp_path / "staging", proven=(),
+    )
+    assert captured["active_extras"] == frozenset({"gui"})
+
+
+def test_zecalibrator_launch_prep_resolves_gui_script(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Launch preparation for 'zecalibrator' resolves the declared
+    gui_scripts:zecalibrator-gui contract to the runtime scripts dir
+    (fake runtime/probe, no subprocess)."""
+    import zealfie.app.service as svc_mod
+
+    active = tmp_path / "rt" / "slots" / "rt-test"
+    python = active / "bin" / "python"
+    scripts = active / "bin"
+    scripts.mkdir(parents=True)
+    script = scripts / "zecalibrator-gui"
+    script.write_text("#!/bin/sh\necho ok")
+    script.chmod(0o755)
+
+    def fake_probe(runtime_python, dist_name):
+        return {
+            "installed": True,
+            "version": "0.1.0",
+            "entry_points": [
+                {"group": "gui_scripts", "name": "zecalibrator-gui"},
+            ],
+        }
+
+    monkeypatch.setattr(svc_mod, "probe_runtime_distribution", fake_probe)
+
+    catalog = default_catalog()
+    selection = SelectionStore(path=tmp_path / "sel.toml")
+    selection.select("zecalibrator", catalog=catalog)
+
+    status = RuntimeStatus(
+        state=RuntimeState.READY,
+        runtime_root=tmp_path / "rt",
+        active_slot_id="rt-test",
+        active_path=active,
+        python_executable=python,
+        python_version="3.13.5",
+        reason_code=RuntimeReasonCode.RUNTIME_READY,
+    )
+
+    class _FakeRt:
+        def status(self):
+            return status
+
+    service = ZeAlfieService(
+        catalog=catalog,
+        runtime=_FakeRt(),
+        selection_store=selection,
+        policy_store=ProductPolicyStore(path=tmp_path / "policy.toml"),
+    )
+
+    plan = service.prepare_launch_plan("zecalibrator")
+    assert plan.component_id == "zecalibrator"
+    assert plan.executable == script.resolve()

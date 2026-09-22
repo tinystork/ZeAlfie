@@ -2,8 +2,8 @@
 
 Tests cover:
 
-- Catalog content (exactly 4 products, stable order)
-- Product state with ABSENT runtime (4 known, 0 installed)
+- Catalog content (exactly 5 products, stable order)
+- Product state with ABSENT runtime (5 known, 0 installed)
 - Product state with READY runtime + fake probe (only ZeSolver installed/launchable)
 - Selection independence (catalog ≠ deployment contract)
 - Unknown product → UnknownProductError
@@ -112,25 +112,27 @@ def _recording_probe():
 
 
 # ===========================================================================
-# 1) Catalog has exactly 4 products in stable order
+# 1) Catalog has exactly 5 products in stable order
 # ===========================================================================
 
 
-EXPECTED_PRODUCT_IDS = ("zesolver", "zemosaic", "zeseestarstacker", "zeanalyser")
+EXPECTED_PRODUCT_IDS = (
+    "zesolver", "zemosaic", "zeseestarstacker", "zeanalyser", "zecalibrator"
+)
 
 
-def test_catalog_has_exactly_4_products():
-    """The default product catalog contains exactly 4 known products."""
+def test_catalog_has_exactly_5_products():
+    """The default product catalog contains exactly 5 known products."""
     catalog = default_catalog()
-    assert len(catalog) == 4
+    assert len(catalog) == 5
     assert catalog.available_ids() == EXPECTED_PRODUCT_IDS
 
 
-def test_catalog_list_returns_4_descriptors():
-    """catalog.list() returns 4 ProductDescriptor in definition order."""
+def test_catalog_list_returns_5_descriptors():
+    """catalog.list() returns 5 ProductDescriptor in definition order."""
     catalog = default_catalog()
     descriptors = catalog.list()
-    assert len(descriptors) == 4
+    assert len(descriptors) == 5
     assert tuple(d.product_id for d in descriptors) == EXPECTED_PRODUCT_IDS
 
 
@@ -147,7 +149,7 @@ def test_catalog_get_returns_correct_descriptor():
 
 
 def test_catalog_contains_all_expected_ids():
-    """All 4 expected ids are in the catalog."""
+    """All 5 expected ids are in the catalog."""
     catalog = default_catalog()
     for pid in EXPECTED_PRODUCT_IDS:
         assert pid in catalog
@@ -162,12 +164,12 @@ def test_catalog_available_ids_is_stable_tuple():
 
 
 # ===========================================================================
-# 2) 4 known + 0 installed with ABSENT runtime
+# 2) 5 known + 0 installed with ABSENT runtime
 # ===========================================================================
 
 
-def test_absent_runtime_4_known_0_installed():
-    """With ABSENT runtime, all 4 products are known, none installed."""
+def test_absent_runtime_5_known_0_installed():
+    """With ABSENT runtime, all 5 products are known, none installed."""
     catalog = default_catalog()
     shell = collect_product_state(
         catalog,
@@ -175,7 +177,7 @@ def test_absent_runtime_4_known_0_installed():
     )
     assert isinstance(shell, ProductShellState)
     assert shell.runtime_state == RuntimeState.ABSENT
-    assert len(shell.products) == 4
+    assert len(shell.products) == 5
     assert shell.installed_count == 0
     assert shell.managed_count == 0  # default: managed_component_ids is empty
 
@@ -204,7 +206,7 @@ def test_absent_runtime_managed_set_reflected():
 
 
 # ===========================================================================
-# 3) 4 known + only ZeSolver installed/launchable with READY runtime
+# 3) 5 known + only ZeSolver installed/launchable with READY runtime
 # ===========================================================================
 
 
@@ -218,7 +220,7 @@ def test_ready_runtime_only_zesolver_installed():
         probe_fn=_fake_probe_zesolver_only,
     )
     assert shell.runtime_state == RuntimeState.READY
-    assert len(shell.products) == 4
+    assert len(shell.products) == 5
     assert shell.managed_count == 1
 
     installed_ids = {p.product_id for p in shell.products if p.installed}
@@ -250,10 +252,12 @@ def test_ready_runtime_unmanaged_products_are_probed():
         managed_component_ids=frozenset({"zesolver"}),
         probe_fn=probe,
     )
-    # All 4 products should have been probed.
-    assert len(calls) == 4, f"Expected 4 probe calls, got {len(calls)}"
+    # All 5 products should have been probed.
+    assert len(calls) == 5, f"Expected 5 probe calls, got {len(calls)}"
     probed_dists = {dist for _, dist in calls}
-    assert probed_dists == {"ZeSolver", "ZeMosaic", "ZeSeestarStacker", "ZeAnalyser"}
+    assert probed_dists == {
+        "ZeSolver", "ZeMosaic", "ZeSeestarStacker", "ZeAnalyser", "ZeCalibrator"
+    }
 
     # Even unmanaged products are probed and report NOT_INSTALLED.
     for p in shell.products:
@@ -314,13 +318,13 @@ def test_ready_without_python_executable():
 # ===========================================================================
 
 
-def test_catalog_has_4_but_registry_can_have_1():
-    """Product catalog has 4 products; ComponentRegistry can have 1.
+def test_catalog_has_5_but_registry_can_have_1():
+    """Product catalog has 5 products; ComponentRegistry can have 1.
 
     Adding products to the catalog must not force them into the registry.
     """
     catalog = default_catalog()
-    assert len(catalog) == 4
+    assert len(catalog) == 5
 
     # Create a registry with only ZeSolver (matching current reality).
     registry = ComponentRegistry([
@@ -354,8 +358,8 @@ def test_service_managed_product_ids_independent_from_catalog(tmp_path):
     store.select("zesolver", catalog=default_catalog())
     service = ZeAlfieService(registry=registry, selection_store=store)
     assert service.managed_product_ids == frozenset({"zesolver"})
-    # The catalog still has 4 products regardless.
-    assert len(service.catalog) == 4
+    # The catalog still has 5 products regardless.
+    assert len(service.catalog) == 5
 
 
 # ===========================================================================
@@ -428,8 +432,8 @@ def test_product_state_uses_runtime_python_not_importlib():
         probe_fn=recording_probe,
     )
 
-    # 4 calls, one per product
-    assert len(probe_calls) == 4
+    # 5 calls, one per product
+    assert len(probe_calls) == 5
 
     # Every call uses the runtime_python path, never the dev Python
     for runtime_python, dist_name in probe_calls:
@@ -480,7 +484,7 @@ def test_product_state_never_uses_import_or_importlib():
     )
     assert probe_called
     # All products report as installed (fake probe says everything is installed)
-    assert shell.installed_count == 4
+    assert shell.installed_count == 5
 
 
 # ===========================================================================
@@ -741,7 +745,10 @@ def _make_fake_shell(installed_count=0, managed_count=0, runtime_state=RuntimeSt
             reason="shared runtime is absent",
             managed=ManagedStatus.UNMANAGED,
         )
-        for pid in ("zesolver", "zemosaic", "zeseestarstacker", "zeanalyser")
+        for pid in (
+            "zesolver", "zemosaic", "zeseestarstacker", "zeanalyser",
+            "zecalibrator",
+        )
     )
     return ProductShellState(
         runtime_state=runtime_state,
@@ -761,11 +768,12 @@ def test_cli_products_command_shows_all_products(monkeypatch):
     assert code == 0
     output = stdout.getvalue()
     assert "Product shell state:" in output
-    assert "Known products: 4" in output
+    assert "Known products: 5" in output
     assert "zesolver" in output
     assert "zemosaic" in output
     assert "zeseestarstacker" in output
     assert "zeanalyser" in output
+    assert "zecalibrator" in output
     assert "Runtime state: ABSENT" in output
     assert service.collect_called == 1
 
@@ -804,7 +812,7 @@ def test_cli_products_unknown_product_clean_error(monkeypatch):
     """CLI `zealfie products unknown` → clean error, code 2, no traceback."""
     import sys
 
-    service = _FakeProductService(catalog_ids=("zesolver", "zemosaic", "zeseestarstacker", "zeanalyser"))
+    service = _FakeProductService(catalog_ids=("zesolver", "zemosaic", "zeseestarstacker", "zeanalyser", "zecalibrator"))
     monkeypatch.setattr(cli, "_make_service", lambda: service)
 
     backup = sys.stderr
@@ -1066,7 +1074,7 @@ def test_service_collect_product_state_with_absent_runtime(tmp_path):
     shell = service.collect_product_state()
     assert isinstance(shell, ProductShellState)
     assert shell.runtime_state == RuntimeState.ABSENT
-    assert len(shell.products) == 4
+    assert len(shell.products) == 5
     assert shell.managed_count == 1  # zesolver is managed
     assert shell.installed_count == 0
 
@@ -1075,7 +1083,7 @@ def test_service_list_products():
     """ZeAlfieService.list_products() returns catalog descriptors."""
     service = ZeAlfieService()
     descriptors = service.list_products()
-    assert len(descriptors) == 4
+    assert len(descriptors) == 5
     assert tuple(d.product_id for d in descriptors) == EXPECTED_PRODUCT_IDS
 
 
@@ -1083,7 +1091,7 @@ def test_service_catalog_property():
     """ZeAlfieService.catalog property returns the catalog."""
     service = ZeAlfieService()
     assert isinstance(service.catalog, ProductCatalog)
-    assert len(service.catalog) == 4
+    assert len(service.catalog) == 5
 
 # ===========================================================================
 # M1-2D.1 — Remote Product Source

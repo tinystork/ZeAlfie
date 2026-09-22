@@ -262,3 +262,32 @@ def test_catalog_descriptions_have_distinct_fr_translations():
         assert fr_value != descriptor.description, (
             f"FR description for {key!r} equals the English catalog default"
         )
+
+
+def test_zecalibrator_description_exact_wording():
+    """ZeCalibrator's EN catalogue string and FR translation are exact.
+
+    The EN description lives only in ``manifests/products.toml`` (canonical
+    catalog data); the FR translation lives only in the FR catalogue under
+    ``product.description.zecalibrator``.  Both wordings are pinned so a
+    catalog/i18n drift that changes the user-visible string is caught.
+    """
+    from zealfie.products.catalog import default_catalog
+
+    descriptor = default_catalog().get("zecalibrator")
+    assert descriptor.description == "Batch calibration of raw astronomical frames"
+    assert (
+        FR["product.description.zecalibrator"]
+        == "Calibration par lot de brutes astronomiques"
+    )
+
+    set_language(Language.FR)
+    assert (
+        translate_product_description("zecalibrator", descriptor.description)
+        == "Calibration par lot de brutes astronomiques"
+    )
+    set_language(Language.EN)
+    assert (
+        translate_product_description("zecalibrator", descriptor.description)
+        == "Batch calibration of raw astronomical frames"
+    )

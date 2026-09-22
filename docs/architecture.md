@@ -13,7 +13,8 @@ The initial ecosystem includes:
 * ZeAnalyser;
 * ZeSolver;
 * ZeMosaic;
-* ZeSeestarStacker.
+* ZeSeestarStacker;
+* ZeCalibrator.
 
 Its expected responsibilities include:
 
@@ -849,10 +850,10 @@ The product catalog is an immutable registry of **known** ZeSoftware products.
 It answers "what products does ZeAlfie know about?".
 
 The catalog is loaded from the packaged resource
-``zealfie/manifests/products.toml`` and contains exactly four products:
+``zealfie/manifests/products.toml`` and contains exactly five products:
 
 ```text
-zesolver, zemosaic, zeseestarstacker, zeanalyser
+zesolver, zemosaic, zeseestarstacker, zeanalyser, zecalibrator
 ```
 
 Each product descriptor records:

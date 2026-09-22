@@ -156,7 +156,7 @@ def _create_standard_fake_service(
     *,
     runtime_state: RuntimeState = RuntimeState.ABSENT,
 ) -> FakeService:
-    """Create a FakeService with all 4 standard products."""
+    """Create a FakeService with all 5 standard products."""
     descriptors = (
         _make_descriptor(
             "zesolver", "ZeSolver",
@@ -173,6 +173,10 @@ def _create_standard_fake_service(
         _make_descriptor(
             "zeanalyser", "ZeAnalyser",
             description="Deep image analysis toolkit.",
+        ),
+        _make_descriptor(
+            "zecalibrator", "ZeCalibrator",
+            description="Batch calibration of raw astronomical frames.",
         ),
     )
 
@@ -192,6 +196,7 @@ def _create_standard_fake_service(
             ("zemosaic", descriptors[1]),
             ("zeseestarstacker", descriptors[2]),
             ("zeanalyser", descriptors[3]),
+            ("zecalibrator", descriptors[4]),
         ]
     )
 
@@ -387,15 +392,16 @@ class TestGuiSmoke:
         assert panel._fetcher is fetcher
         assert panel._work_root == work_root
 
-    def test_four_products_visible(self):
-        """All 4 catalog products visible in the window."""
+    def test_five_products_visible(self):
+        """All 5 catalog products visible in the window."""
         from zealfie.gui.main_window import ZeAlfieMainWindow
 
         service = _create_standard_fake_service()
         window = ZeAlfieMainWindow(service=service)  # type: ignore[arg-type]
-        assert len(window._cards) == 4
+        assert len(window._cards) == 5
         assert set(window._cards.keys()) == {
-            "zesolver", "zemosaic", "zeseestarstacker", "zeanalyser"
+            "zesolver", "zemosaic", "zeseestarstacker", "zeanalyser",
+            "zecalibrator",
         }
 
     def test_header_shows_zealfie_and_tagline(self):
@@ -408,8 +414,8 @@ class TestGuiSmoke:
         assert "ZeAlfie" in title
         assert "Astronomy Launcher" in title
 
-    def test_products_visible_4_known_0_installed(self):
-        """Empty managed runtime: 4 known / 0 installed shown as non-installed."""
+    def test_products_visible_5_known_0_installed(self):
+        """Empty managed runtime: 5 known / 0 installed shown as non-installed."""
         from zealfie.gui.main_window import ZeAlfieMainWindow
 
         service = _create_standard_fake_service()
@@ -615,7 +621,7 @@ class TestGuiSmoke:
 
         service = _create_standard_fake_service()
         window = ZeAlfieMainWindow(service=service)  # type: ignore[arg-type]
-        assert len(window._cards) == 4
+        assert len(window._cards) == 5
         # Cards populated from service, no real Popen/filesystem calls
         assert service.collect_calls >= 1  # refresh was called
 

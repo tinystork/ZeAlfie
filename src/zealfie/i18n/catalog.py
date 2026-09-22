@@ -437,4 +437,7 @@ FR: dict[str, str] = {
         "Mesurez ce qu’il y a vraiment dans vos images — FWHM, excentricité, "
         "SNR et statistiques de session."
     ),
+    "product.description.zecalibrator": (
+        "Calibration par lot de brutes astronomiques"
+    ),
 }
