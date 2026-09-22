@@ -93,7 +93,7 @@ jobs:
           mkdir -p "$WORK/zealfie-wheel"
           python -m build --wheel --outdir "$WORK/zealfie-wheel"
           ls -l "$WORK/zealfie-wheel"
-          test -f "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl" \
+          test -f "$WORK/zealfie-wheel/zealfie-0.1.2-py3-none-any.whl" \
             || { echo "FAIL: unexpected zealfie wheel filename"; ls "$WORK/zealfie-wheel"; exit 1; }
 
       - id: acquire-wheelhouse
@@ -103,7 +103,7 @@ jobs:
           set -euo pipefail
           python packaging/macos/acquire_wheelhouse.py \
             --dest "$WORK/wheelhouse" \
-            --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl" \
+            --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.2-py3-none-any.whl" \
             --provenance-out "$WORK/wheelhouse.provenance.json"
           ls -l "$WORK/wheelhouse"
 
@@ -115,7 +115,7 @@ jobs:
           python packaging/macos/build_app.py \
             --work "$WORK/build" \
             --wheelhouse "$WORK/wheelhouse" \
-            --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl" \
+            --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.2-py3-none-any.whl" \
             --out-zip "$WORK/$ARTIFACT_NAME" \
             --provenance-out "$WORK/build.provenance.json"
           test -d "$WORK/build/ZeAlfie.app" || { echo "FAIL: no bundle"; exit 1; }

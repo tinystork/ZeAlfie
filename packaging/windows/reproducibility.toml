@@ -23,7 +23,7 @@
 
 [zealfie]
 # ZeAlfie version/revision whose wheel this record bootstraps.
-version = "0.1.1"
+version = "0.1.2"
 revision = "a1a777a2df065b86c9f7e5305550ac436f60b42d"
 
 [cpython]

@@ -114,7 +114,7 @@ RESOURCES_PYTHON = "Contents/Resources/python"
 RESOURCES_APP = "Contents/Resources/app"
 
 #: Product version pinned into the plist (never bumped by packaging).
-BUNDLE_VERSION = "0.1.1"
+BUNDLE_VERSION = "0.1.2"
 
 
 # ---------------------------------------------------------------------------

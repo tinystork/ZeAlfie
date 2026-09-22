@@ -21,7 +21,7 @@
 [zealfie]
 # ZeAlfie version/revision whose wheel this record bootstraps.
 # Version is the product version — never bumped by packaging.
-version = "0.1.1"
+version = "0.1.2"
 # Baseline commit this packaging work was branched from (origin/main).
 revision = "fec7015596a3a92ebbb2bdccdfd397297af65981"
 

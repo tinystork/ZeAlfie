@@ -5,7 +5,7 @@
 # into `ZeAlfie.app/Contents/Resources/app` with the PRIVATE bundled Python:
 #
 #   <bundle python> -m pip install --no-index --find-links <wheelhouse> \
-#       --target Contents/Resources/app zealfie-0.1.1-py3-none-any.whl
+#       --target Contents/Resources/app zealfie-0.1.2-py3-none-any.whl
 #
 # PyPI is NEVER contacted at build/install time once the wheelhouse is
 # staged, so this lock (plus the SHA-256 verification in
@@ -35,7 +35,7 @@
 # provenance instead.
 
 [metadata]
-zealfie_version = "0.1.1"
+zealfie_version = "0.1.2"
 # Source commit of the zealfie wheel payload (ZeAlfie src tree) — the
 # origin/main baseline this packaging work was branched from.
 source_commit = "fec7015596a3a92ebbb2bdccdfd397297af65981"
@@ -58,8 +58,8 @@ pip_command = "pip download --dest <dir> --only-binary=:all: --platform macosx_1
 # acquisition step (it can never be downloaded), so it deliberately has no
 # sha256 here — only filename/version/source metadata.
 name = "zealfie"
-version = "0.1.1"
-wheel_filename = "zealfie-0.1.1-py3-none-any.whl"
+version = "0.1.2"
+wheel_filename = "zealfie-0.1.2-py3-none-any.whl"
 source_commit = "fec7015596a3a92ebbb2bdccdfd397297af65981"
 source = "local-build"
 

@@ -83,7 +83,7 @@
 ; ============================================================================
 
 #ifndef ZeAlfieVersion
-  #define ZeAlfieVersion "0.1.1"
+  #define ZeAlfieVersion "0.1.2"
 #endif
 
 ; ---- Build inputs (absolute paths supplied by the CI workflow via /D=) ----

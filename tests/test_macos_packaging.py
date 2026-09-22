@@ -145,7 +145,7 @@ def test_record_pins_real_pbs_asset() -> None:
     record = macpack.load_record()
     for field, expected in _EXPECTED_RECORD.items():
         assert getattr(record, field) == expected, field
-    assert record.zealfie_version == "0.1.1"
+    assert record.zealfie_version == "0.1.2"
     assert record.python_dir_name == "python"
 
 
@@ -290,7 +290,7 @@ def test_render_plist_exact_contract() -> None:
         else:
             assert f"<string>{value}</string>" in text
     assert "<key>CFBundleIdentifier</key>\n  <string>com.zesoftware.zealfie</string>" in text
-    assert "<key>CFBundleVersion</key>\n  <string>0.1.1</string>" in text
+    assert "<key>CFBundleVersion</key>\n  <string>0.1.2</string>" in text
     assert "<key>LSMinimumSystemVersion</key>\n  <string>13.0</string>" in text
     assert "<key>NSHighResolutionCapable</key>\n  <true/>" in text
     assert "CFBundleIconFile" in text and "<string>zealfie.icns</string>" in text
@@ -760,10 +760,10 @@ def test_macos_wheelhouse_lock_real_closure() -> None:
     } <= names
     for required in ("PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"):
         assert required in names
-    assert lock.zealfie_wheel.filename == "zealfie-0.1.1-py3-none-any.whl"
+    assert lock.zealfie_wheel.filename == "zealfie-0.1.2-py3-none-any.whl"
     assert lock.zealfie_wheel.sha256 is None
     assert wheelhouse.expected_filenames(lock) == (
-        wheelhouse.pinned_filenames(lock) | {"zealfie-0.1.1-py3-none-any.whl"}
+        wheelhouse.pinned_filenames(lock) | {"zealfie-0.1.2-py3-none-any.whl"}
     )
     assert "PySide6==6.11.2" in wheelhouse.pinned_download_specs(lock)
 

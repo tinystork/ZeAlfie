@@ -62,8 +62,8 @@ ZeAlfie.app/
 | `CFBundleIdentifier` | `com.zesoftware.zealfie` |
 | `CFBundleExecutable` | `ZeAlfie` |
 | `CFBundleDisplayName` | `ZeAlfie` |
-| `CFBundleShortVersionString` | `0.1.1` |
-| `CFBundleVersion` | `0.1.1` |
+| `CFBundleShortVersionString` | `0.1.2` |
+| `CFBundleVersion` | `0.1.2` |
 | `CFBundleIconFile` | `zealfie.icns` |
 | `CFBundlePackageType` | `APPL` |
 | `LSMinimumSystemVersion` | `13.0` |
@@ -123,11 +123,11 @@ On an Apple-silicon Mac with a driver Python 3.13:
 python -m build --wheel --outdir "$WORK/zealfie-wheel"
 python packaging/macos/acquire_wheelhouse.py \
     --dest "$WORK/wheelhouse" \
-    --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl"
+    --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.2-py3-none-any.whl"
 python packaging/macos/build_app.py \
     --work "$WORK/build" \
     --wheelhouse "$WORK/wheelhouse" \
-    --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.1-py3-none-any.whl" \
+    --zealfie-wheel "$WORK/zealfie-wheel/zealfie-0.1.2-py3-none-any.whl" \
     --out-zip "$WORK/ZeAlfie-macOS-arm64-unsigned.zip"
 python packaging/macos/witnesses.py all \
     --app "$WORK/build/ZeAlfie.app" --work "$WORK/witness" \
