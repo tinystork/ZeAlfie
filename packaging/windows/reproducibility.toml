@@ -23,7 +23,7 @@
 
 [zealfie]
 # ZeAlfie version/revision whose wheel this record bootstraps.
-version = "0.1.3b1"
+version = "0.1.3"
 # Immutable ZeAlfie beta payload commit (the version/packaging bump commit
 # 9117d08 immediately preceding this provenance-only closure commit).  The
 # final CI artifact provenance is the workflow's actual GITHUB_SHA at build

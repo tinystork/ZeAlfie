@@ -381,7 +381,7 @@ jobs:
               cpy = tomllib.load(fh)["cpython"]
           prov = {
               "artifact": "ZeAlfie-Setup-0.1.3-dev.exe",
-              "zealfie_version": "0.1.3b1",
+              "zealfie_version": "0.1.3",
               "source_commit": os.environ.get("GITHUB_SHA", ""),
               "inno_setup": "6.7.3 (pinned, packaging/windows/installer/innosetup.toml)",
               "python_substrate": {

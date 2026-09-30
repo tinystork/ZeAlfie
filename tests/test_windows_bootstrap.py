@@ -72,7 +72,7 @@ def test_record_file_exists_and_default_path_points_to_it() -> None:
 
 def test_record_loads_and_pins_the_documented_values() -> None:
     record = provision.load_record(_RECORD_FILE)
-    assert record.zealfie_version == "0.1.3b1"
+    assert record.zealfie_version == "0.1.3"
     assert record.zealfie_revision == "9117d08093ff852a4ead31f0607c9c87e9f5650d"
     assert record.cpython_version == "3.13.15"
     assert record.substrate == "python-build-standalone"

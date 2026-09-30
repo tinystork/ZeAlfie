@@ -224,18 +224,23 @@ pip install zealfie   # editable install
 
 ---
 
-### 10.1 Beta promotion note (0.1.3b1 — 2026-09-30)
+### 10.1 Stable release note (0.1.3 — 2026-09-30)
 
-The beta wheel is versioned `0.1.3b1` (PEP 440 prerelease), the normalized
-form of the beta tag `v0.1.3-beta.1` that the beta channel discovers.  Platform
-bundle/file versions that require a numeric `X.Y.Z` (the macOS
+The stable wheel is versioned `0.1.3` (PEP 440).  Platform bundle/file
+versions that require a numeric `X.Y.Z` (the macOS
 `CFBundleShortVersionString`/`CFBundleVersion` and the Windows installer
-version) carry the marketing version `0.1.3` instead — the wheel metadata stays
-`0.1.3b1`, matching the normalized tag version.
+version) carry the matching marketing version `0.1.3` — for the stable
+release the wheel metadata and the platform bundle versions coincide.
 
-This beta coordinates with ZeSeestarStacker 8.6.1 and ZeCalibrator 0.1.1, both
-discoverable through their existing beta channels; the product catalog already
-maps `beta = "beta"` for those products, so no catalog semantic change is
+This stable release is the promotion of the fully-tested `0.1.3b1` beta
+(the normalized form of the beta tag `v0.1.3-beta.1` that the beta channel
+discovers); the beta payload is unchanged and only the PEP 440 version moves
+from the prerelease `0.1.3b1` to the final `0.1.3`.  Beta-channel discovery
+(`v0.1.3-beta.1` → `0.1.3b1`) remains supported for updater compatibility.
+
+This release coordinates with ZeSeestarStacker 8.6.1 and ZeCalibrator 0.1.1,
+both discoverable through their existing channels; the product catalog
+already maps those products' channels, so no catalog semantic change is
 required.
 
 ---
