@@ -44,11 +44,11 @@
 [metadata]
 # ZeAlfie version whose wheel this lock bootstraps.
 zealfie_version = "0.1.3"
-# Source commit of the zealfie wheel payload: the immutable beta payload
-# commit 9117d08 (version/packaging bump) immediately preceding this
+# Source commit of the zealfie wheel payload: the immutable stable payload
+# commit 19e7684 (version/packaging bump) immediately preceding this
 # provenance-only closure commit.  Final CI artifact provenance is the
 # workflow's actual GITHUB_SHA at build time, not this value.
-source_commit = "9117d08093ff852a4ead31f0607c9c87e9f5650d"
+source_commit = "19e7684f3867e184680700e23a584abe3d52d3c2"
 # pip download target tags (resolution flags; the PySide6 family ships
 # cp310-abi3 wheels which satisfy the cp313 request via the stable ABI).
 platform_tag = "win_amd64"
@@ -75,7 +75,7 @@ pip_command = "pip download --dest <dir> --only-binary=:all: --platform win_amd6
 name = "zealfie"
 version = "0.1.3"
 wheel_filename = "zealfie-0.1.3-py3-none-any.whl"
-source_commit = "9117d08093ff852a4ead31f0607c9c87e9f5650d"
+source_commit = "19e7684f3867e184680700e23a584abe3d52d3c2"
 source = "local-build"
 
 # One table per pinned downloadable wheel, keyed by exact filename.
