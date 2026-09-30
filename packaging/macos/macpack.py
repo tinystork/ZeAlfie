@@ -114,7 +114,11 @@ RESOURCES_PYTHON = "Contents/Resources/python"
 RESOURCES_APP = "Contents/Resources/app"
 
 #: Product version pinned into the plist (never bumped by packaging).
-BUNDLE_VERSION = "0.1.2"
+#: This is the numeric marketing/bundle version; it is deliberately distinct
+#: from the wheel's PEP 440 prerelease version (pyproject.toml ``0.1.3b1``),
+#: which CFBundleShortVersionString/CFBundleVersion cannot carry (they require
+#: a numeric X.Y.Z triple).
+BUNDLE_VERSION = "0.1.3"
 
 
 # ---------------------------------------------------------------------------

@@ -83,7 +83,10 @@
 ; ============================================================================
 
 #ifndef ZeAlfieVersion
-  #define ZeAlfieVersion "0.1.2"
+  ; Numeric marketing/bundle version.  Windows VersionInfoVersion/AppVersion
+  ; require a numeric X.Y.Z (see VersionInfoVersion={#ZeAlfieVersion}.0 below);
+  ; the wheel the installer embeds is the PEP 440 prerelease ``0.1.3b1``.
+  #define ZeAlfieVersion "0.1.3"
 #endif
 
 ; ---- Build inputs (absolute paths supplied by the CI workflow via /D=) ----

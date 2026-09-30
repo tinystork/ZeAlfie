@@ -46,7 +46,7 @@ __all__ = [
 ]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_ZEALFIE_WHEEL_RE = re.compile(r"^zealfie-\d+\.\d+\.\d+-py3-none-any\.whl$")
+_ZEALFIE_WHEEL_RE = re.compile(r"^zealfie-\d+\.\d+\.\d+(?:b\d+)?-py3-none-any\.whl$")
 
 #: The wheel tags the macOS closure MUST be resolved for.  Universal2 is the
 #: real tag of the official Qt macOS wheels (hence the ARM64 thinning step).
