@@ -806,6 +806,22 @@ def test_parse_wheel_filename() -> None:
     ) == ("build", "1.6.1")
 
 
+def test_zealfie_wheel_regex_accepts_stable_and_beta() -> None:
+    assert wheelhouse._ZEALFIE_WHEEL_RE.match("zealfie-0.1.2-py3-none-any.whl")
+    assert wheelhouse._ZEALFIE_WHEEL_RE.match("zealfie-0.1.3b1-py3-none-any.whl")
+
+
+def test_zealfie_wheel_regex_rejects_alpha_rc_malformed_beta() -> None:
+    for bad in (
+        "zealfie-0.1.3a1-py3-none-any.whl",        # alpha
+        "zealfie-0.1.3rc1-py3-none-any.whl",       # release candidate
+        "zealfie-0.1.3-beta.1-py3-none-any.whl",   # non-normalized beta
+        "zealfie-0.1.3b-py3-none-any.whl",         # beta without number
+        "zealfie-0.1.3b1-py3-none-win_amd64.whl",  # wrong platform tag
+    ):
+        assert not wheelhouse._ZEALFIE_WHEEL_RE.match(bad), bad
+
+
 # ---------------------------------------------------------------------------
 # Launcher — static contract
 # ---------------------------------------------------------------------------

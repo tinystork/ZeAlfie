@@ -269,6 +269,22 @@ def test_beta_channel_picks_beta_tags_only() -> None:
     assert plan.resolution.requested_ref == "v0.0.7-beta.2"
 
 
+def test_beta_tag_013_normalizes_to_b1_and_is_selected() -> None:
+    """v0.1.3-beta.1 normalizes to the PEP 440 prerelease 0.1.3b1 and is the
+    beta channel's only candidate, excluding alpha/rc/stable."""
+    resolver = _resolver(SHA_A)
+    res = resolve_available_update(
+        _identity(version="0.1.2"),
+        channel="beta",
+        resolver=resolver,
+        tags_lister=_tags(
+            ["v0.1.2", "v0.1.3-alpha.1", "v0.1.3-beta.1", "v0.1.3-rc.1"]
+        ),
+    )
+    assert res.available_version == "0.1.3b1"
+    assert res.requested_ref == "v0.1.3-beta.1"
+
+
 # ---------------------------------------------------------------------------
 # 4. corrupt artifact rejected
 # ---------------------------------------------------------------------------

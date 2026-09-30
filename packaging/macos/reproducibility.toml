@@ -22,8 +22,11 @@
 # ZeAlfie version/revision whose wheel this record bootstraps.
 # Version is the product version — never bumped by packaging.
 version = "0.1.3b1"
-# Baseline commit this packaging work was branched from (origin/main).
-revision = "fec7015596a3a92ebbb2bdccdfd397297af65981"
+# Immutable ZeAlfie beta payload commit (the version/packaging bump commit
+# 9117d08 immediately preceding this provenance-only closure commit).  The
+# final CI artifact provenance is the workflow's actual GITHUB_SHA at build
+# time, not this value.
+revision = "9117d08093ff852a4ead31f0607c9c87e9f5650d"
 
 [cpython]
 # Exact pinned private runtime interpreter: python-build-standalone
