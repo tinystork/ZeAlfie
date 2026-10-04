@@ -59,6 +59,11 @@ from zealfie.selfupdate.verify import SelfUpdateStagingError
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 
+# Canonical synthetic installed/target pair for apply-path tests: the staged
+# target is 0.0.7 (see ``_write_valid_marker``).  Make the installed version
+# explicit and older so the downgrade guard never trips on a newer runtime.
+INSTALLED_VERSION = "0.0.6"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -376,7 +381,9 @@ def test_apply_failed_pip_preserves_marker(monkeypatch, tmp_path) -> None:
         activator_mod, "_run_pip_install", lambda wp: _Proc(1, stderr="boom")
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.FAILED
     assert "left untouched" in result.message
@@ -400,7 +407,9 @@ def test_apply_success_clears_marker(monkeypatch, tmp_path) -> None:
     # the marker is cleared (ZA-M1-4.1).  Mock the fresh-subprocess check.
     monkeypatch.setattr(activator_mod, "_verify_installed_version", lambda tv: None)
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.APPLIED
     assert calls == [wheel]
@@ -612,7 +621,9 @@ def test_apply_refuses_while_mutation_lease_held(monkeypatch, tmp_path) -> None:
     _write_valid_marker(layout, tmp_path)
     monkeypatch.setattr(activator_mod, "RuntimeMutationLock", _FakeBusyLock)
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.BUSY
     assert "another ZeAlfie mutation" in result.message
@@ -632,7 +643,9 @@ def test_apply_reverifies_sha256_before_install(monkeypatch, tmp_path) -> None:
         lambda wp: (calls.append(Path(wp)) or _Proc(0)),
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.FAILED
     assert "SHA-256 mismatch" in result.message
@@ -650,7 +663,9 @@ def test_apply_reverifies_size_before_install(monkeypatch, tmp_path) -> None:
         activator_mod, "_run_pip_install", lambda wp: _Proc(0)
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.FAILED
     assert "size mismatch" in result.message
@@ -680,7 +695,9 @@ def test_apply_not_supported_on_non_linux(monkeypatch, tmp_path) -> None:
     _write_valid_marker(layout, tmp_path)
     monkeypatch.setattr(activator_mod.sys, "platform", "darwin")
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.NOT_SUPPORTED_ON_PLATFORM
 
@@ -824,7 +841,9 @@ def test_apply_missing_wheel_fails_closed(monkeypatch, tmp_path) -> None:
         lambda wp: (pip_called.append(Path(wp)) or _Proc(0)),
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.FAILED
     assert "missing" in result.message
@@ -893,7 +912,9 @@ def test_apply_keeps_marker_when_version_verification_fails(
         ),
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.FAILED
     assert "version verification failed" in result.message
@@ -978,7 +999,9 @@ def test_no_secret_in_diagnostics(monkeypatch, tmp_path) -> None:
         activator_mod, "spawn_windows_helper", lambda **kwargs: True
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.HANDOFF_STARTED
     _assert_no_secret(result.message)
@@ -988,7 +1011,9 @@ def test_no_secret_in_diagnostics(monkeypatch, tmp_path) -> None:
         activator_mod, "spawn_windows_helper", lambda **kwargs: False
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.FAILED
     _assert_no_secret(result.message)
@@ -1026,7 +1051,9 @@ def test_apply_win32_handoff_spawns_helper(monkeypatch, tmp_path) -> None:
     )
 
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.HANDOFF_STARTED
     assert "handoff started" in result.message
@@ -1047,7 +1074,9 @@ def test_apply_win32_spawn_failure_returns_failed(monkeypatch, tmp_path) -> None
         activator_mod, "spawn_windows_helper", lambda **kwargs: False
     )
     result = apply_pending_update(
-        layout=layout, runtime_root=tmp_path / "rtroot"
+        layout=layout,
+        runtime_root=tmp_path / "rtroot",
+        installed_version=INSTALLED_VERSION,
     )
     assert result.status is ApplyStatus.FAILED
     assert "failed to spawn" in result.message
