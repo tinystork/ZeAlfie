@@ -613,3 +613,109 @@ def test_zecalibrator_launch_prep_resolves_gui_script(
     plan = service.prepare_launch_plan("zecalibrator")
     assert plan.component_id == "zecalibrator"
     assert plan.executable == script.resolve()
+
+
+# ---------------------------------------------------------------------------
+# 5. ZeMosaic — two-channel managed product (ZA-ZM-BETA-CHANNEL)
+#    stable→main, beta→beta via the REAL generic channel/policy pipeline;
+#    no product-specific path, no new engine/UI architecture.
+# ---------------------------------------------------------------------------
+
+
+def test_zemosaic_channels_stable_and_beta(tmp_path: Path) -> None:
+    """ZeMosaic exposes stable→main and beta→beta via the generic
+    per-product channel authority (same shape as zeanalyser/zeseestarstacker)."""
+    service = _service(tmp_path, default_catalog())
+    assert service.available_product_channels("zemosaic") == (
+        ("stable", "main"),
+        ("beta", "beta"),
+    )
+
+
+def test_zemosaic_default_policy_stable_follow(tmp_path: Path) -> None:
+    """Factory default policy for ZeMosaic is stable/follow — no existing
+    install silently switches to beta."""
+    service = _service(tmp_path, default_catalog())
+    policy = service.product_policy("zemosaic")
+    assert policy.channel == "stable"
+    assert policy.policy == "follow"
+
+
+def test_zemosaic_set_channel_beta_persists(tmp_path: Path) -> None:
+    """set_product_channel('zemosaic', 'beta') persists through the
+    generic policy store."""
+    service = _service(tmp_path, default_catalog())
+    policy = service.set_product_channel("zemosaic", "beta")
+    assert policy.channel == "beta"
+    assert policy.policy == "follow"
+    assert service.product_policy("zemosaic") == policy
+
+
+def test_zemosaic_undeclared_channel_raises(tmp_path: Path) -> None:
+    """An undeclared channel (development) is rejected fail-closed."""
+    service = _service(tmp_path, default_catalog())
+    with pytest.raises(ProductChannelUnavailableError):
+        service.set_product_channel("zemosaic", "development")
+
+
+def test_zemosaic_install_resolves_declared_source(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Install preparation resolves ZeMosaic's declared remote source
+    (tinystork/zemosaic/main) through the generic follow/stable path."""
+    service = _service(tmp_path, default_catalog())
+    resolve_calls: list[tuple[str, str, str]] = []
+
+    def _fake_prepare_from_resolved(desc, resolved, *, fetcher, work_root,
+                                    progress_callback=None):
+        return _fake_ppa(desc.product_id)
+
+    monkeypatch.setattr(
+        service, "_prepare_product_artifact_from_resolved",
+        _fake_prepare_from_resolved,
+    )
+
+    def _recording_resolver(owner, repo, ref):
+        resolve_calls.append((owner, repo, ref))
+        return OTHER_SHA
+
+    service._prepare_target_product_artifact(
+        "zemosaic",
+        service.product_policy("zemosaic"),
+        resolver=_recording_resolver,
+        fetcher=lambda o, r, sha: b"",
+        work_root=tmp_path / "work",
+    )
+    assert resolve_calls == [("tinystork", "zemosaic", "main")]
+
+
+def test_zemosaic_install_resolves_beta_after_channel_switch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """After selecting beta, install preparation resolves the beta ref
+    (never main)."""
+    service = _service(tmp_path, default_catalog())
+    service.set_product_channel("zemosaic", "beta")
+    resolve_calls: list[tuple[str, str, str]] = []
+
+    def _fake_prepare_from_resolved(desc, resolved, *, fetcher, work_root,
+                                    progress_callback=None):
+        return _fake_ppa(desc.product_id)
+
+    monkeypatch.setattr(
+        service, "_prepare_product_artifact_from_resolved",
+        _fake_prepare_from_resolved,
+    )
+
+    def _recording_resolver(owner, repo, ref):
+        resolve_calls.append((owner, repo, ref))
+        return OTHER_SHA
+
+    service._prepare_target_product_artifact(
+        "zemosaic",
+        service.product_policy("zemosaic"),
+        resolver=_recording_resolver,
+        fetcher=lambda o, r, sha: b"",
+        work_root=tmp_path / "work",
+    )
+    assert resolve_calls == [("tinystork", "zemosaic", "beta")]

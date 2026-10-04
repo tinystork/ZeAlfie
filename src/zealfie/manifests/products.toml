@@ -30,8 +30,12 @@ owner = "tinystork"
 repo = "zemosaic"
 ref = "main"
 
+# ZeMosaic is a two-channel managed product: ``stable`` follows ``main``
+# and ``beta`` tracks the ``beta`` branch (same ecosystem convention as
+# zeanalyser / zeseestarstacker).
 [products.channels]
 stable = "main"
+beta = "beta"
 
 # ZA-M1-2J.2 Phase F: accelerated contract declared by ZeMosaic itself,
 # with the FULL CUDA runtime closure (sandbox-proven on the real MX150,
