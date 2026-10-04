@@ -1717,12 +1717,30 @@ def test_zesolver_defaults_to_stable_main_channel():
     assert desc.channel_ref("beta") is None
 
 
-def test_zemosaic_defaults_to_stable_main_channel():
-    """ZeMosaic exposes exactly ``stable -> main``."""
+def test_zemosaic_channels_map_stable_and_beta():
+    """ZeMosaic exposes exactly ``stable -> main`` AND ``beta -> beta``
+    (ZA-ZM-BETA-CHANNEL: two-channel managed product — stable follows main,
+    beta tracks the beta branch)."""
     catalog = default_catalog()
     desc = catalog.get("zemosaic")
-    assert desc.channel_refs == (("stable", "main"),)
-    assert desc.channel_ref_map == {"stable": "main"}
+    assert desc.channel_refs == (("stable", "main"), ("beta", "beta"))
+    assert desc.channel_ref_map == {"stable": "main", "beta": "beta"}
+    assert desc.available_channels == ("stable", "beta")
+    assert desc.channel_ref("stable") == "main"
+    assert desc.channel_ref("beta") == "beta"
+
+
+def test_zemosaic_default_follow_stable_resolves_main():
+    """The factory default policy for ZeMosaic (follow, channel=stable)
+    resolves to ``main`` — no existing install silently switches to beta."""
+    from zealfie.products.policy import default_product_policy, effective_ref
+
+    catalog = default_catalog()
+    desc = catalog.get("zemosaic")
+    policy = default_product_policy("zemosaic")
+    assert policy.policy == "follow"
+    assert policy.channel == "stable"
+    assert effective_ref(policy, channel_refs=desc.channel_ref_map) == "main"
 
 
 def test_zeanalyser_beta_channel_maps_to_beta():
