@@ -37,10 +37,10 @@
 [metadata]
 zealfie_version = "0.1.3"
 # Source commit of the zealfie wheel payload: the immutable stable payload
-# commit 19e7684 (version/packaging bump) immediately preceding this
+# commit 9f80d22 (accepted catalog feature merge) immediately preceding this
 # provenance-only closure commit.  Final CI artifact provenance is the
 # workflow's actual GITHUB_SHA at build time, not this value.
-source_commit = "19e7684f3867e184680700e23a584abe3d52d3c2"
+source_commit = "9f80d2228e8c1074c9ee3d3b605de3a0f2816ba3"
 platform_tag = "macosx_13_0_universal2"
 python_tag = "cp313"
 abi_tag = "cp313"
@@ -62,7 +62,7 @@ pip_command = "pip download --dest <dir> --only-binary=:all: --platform macosx_1
 name = "zealfie"
 version = "0.1.3"
 wheel_filename = "zealfie-0.1.3-py3-none-any.whl"
-source_commit = "19e7684f3867e184680700e23a584abe3d52d3c2"
+source_commit = "9f80d2228e8c1074c9ee3d3b605de3a0f2816ba3"
 source = "local-build"
 
 # --- pinned downloadable wheels (one table per exact filename) -------------
