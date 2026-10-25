@@ -175,7 +175,10 @@ def _smoke_native_payload_architecture(install_root: Path, record) -> None:
     result = payload_arch_audit.audit_payload(install_root, record.pe_machine)
     _log(
         f"[smoke] native payload PE audit PASS: expected={record.pe_machine} "
-        f"images={result['images_checked']} counts={result['machine_counts']} "
+        f"images={result['images_checked']} "
+        f"runtime={result['runtime_images_checked']} "
+        f"allowed_non_native={result['allowed_count']} "
+        f"arm64ec={result['arm64ec_count']} counts={result['machine_counts']} "
         "(Inno Setup loader explicitly out of scope)"
     )
 

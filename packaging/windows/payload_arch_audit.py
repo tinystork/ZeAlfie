@@ -1,11 +1,24 @@
 """Fail-closed PE architecture audit for the installed ZeAlfie payload.
 
 The Inno Setup bootstrap/uninstaller is deliberately outside this audit: Inno
-Setup 6.7.3's Setup program is x86 and runs under Windows ARM emulation.  The
-claim proven here is narrower and useful: the installed private CPython,
-application venv and Qt/PySide native payload are all the architecture selected
-by the committed reproducibility profile, with no opposite-architecture PE
-residue in those two trees.
+Setup 6.7.3's Setup program is x86 and runs under Windows ARM emulation.
+
+Claim proven here (three tiers, fail-closed):
+
+1. HARD requirement — every RUNTIME-CRITICAL image (the private CPython
+   executables/DLL and the Qt/PySide native libraries ZeAlfie actually loads)
+   must match the selected architecture exactly. ``IMAGE_FILE_MACHINE_ARM64EC``
+   (0x01C4, ARM64-compatible hybrid) is accepted ONLY when the expected target
+   is ARM64, is counted separately, and is never accepted for AMD64.
+2. EXPLICIT allowlist — a narrow, evidence-documented set of NON-runtime
+   multi-architecture images ships inside universal wheels or the immutable
+   python-build-standalone pin: pip's vendored distlib launcher stubs,
+   setuptools' launcher stubs and the upstream x64 ``vcruntime140_1.dll``. Each
+   allowed image is reported in ``allowed_non_native`` with its path, machine
+   and reason, and counted. There are no tree-wide wildcards and site-packages
+   is never blanket-ignored.
+3. Anything else that is not native remains a hard failure with the same
+   precise diagnostic style.
 """
 
 from __future__ import annotations
@@ -20,9 +33,68 @@ _MACHINE_NAMES = {
     0x014C: "I386",
     0x8664: "AMD64",
     0xAA64: "ARM64",
+    0x01C4: "ARM64EC",
 }
 _EXPECTED = {"AMD64": 0x8664, "ARM64": 0xAA64}
 _PE_SUFFIXES = frozenset({".exe", ".dll", ".pyd"})
+
+#: Hybrid ARM64EC images run natively on ARM64 only.
+_ARM64_COMPATIBLE = frozenset({"ARM64", "ARM64EC"})
+
+#: Tier 1: images whose architecture is a hard, unconditional requirement.
+_RUNTIME_IMAGES = (
+    "python/python.exe",
+    "python/pythonw.exe",
+    "python/python313.dll",
+    "appenv/Scripts/python.exe",
+    "appenv/Scripts/pythonw.exe",
+    "appenv/Lib/site-packages/PySide6/Qt6Core.dll",
+    "appenv/Lib/site-packages/PySide6/Qt6Gui.dll",
+    "appenv/Lib/site-packages/PySide6/Qt6Widgets.dll",
+    "appenv/Lib/site-packages/PySide6/pyside6.abi3.dll",
+    "appenv/Lib/site-packages/shiboken6/Shiboken.pyd",
+)
+_RUNTIME_SET = frozenset(_RUNTIME_IMAGES)
+
+#: Tier 2: exact-path allowances. The machine must be in the listed set.
+_ALLOW_EXACT = {
+    "python/vcruntime140_1.dll": (
+        frozenset({"AMD64"}),
+        "upstream python-build-standalone x64 exception-handling runtime; "
+        "immutable hash-verified substrate pin, not loaded by ARM64 CPython",
+    ),
+}
+
+#: Tier 2: exact directories + exact launcher filenames (no tree wildcards).
+_DISTLIB_STUBS = frozenset(
+    {"t32.exe", "t64.exe", "t64-arm.exe", "w32.exe", "w64.exe", "w64-arm.exe"}
+)
+_SETUPTOOLS_STUBS = frozenset(
+    {
+        "cli.exe",
+        "cli-32.exe",
+        "cli-64.exe",
+        "cli-arm64.exe",
+        "gui.exe",
+        "gui-32.exe",
+        "gui-64.exe",
+        "gui-arm64.exe",
+    }
+)
+_DISTLIB_REASON = (
+    "pip vendored distlib multi-architecture console/window launcher stub; "
+    "shipped inside the universal pip wheel and never imported by ZeAlfie"
+)
+_SETUPTOOLS_REASON = (
+    "setuptools multi-architecture CLI/GUI launcher stub; shipped inside the "
+    "universal setuptools wheel and never imported by ZeAlfie"
+)
+_ALLOW_STUB_DIRS = {
+    "python/Lib/site-packages/pip/_vendor/distlib": (_DISTLIB_STUBS, _DISTLIB_REASON),
+    "appenv/Lib/site-packages/pip/_vendor/distlib": (_DISTLIB_STUBS, _DISTLIB_REASON),
+    "python/Lib/site-packages/setuptools": (_SETUPTOOLS_STUBS, _SETUPTOOLS_REASON),
+    "appenv/Lib/site-packages/setuptools": (_SETUPTOOLS_STUBS, _SETUPTOOLS_REASON),
+}
 
 
 class PeAuditError(RuntimeError):
@@ -61,8 +133,35 @@ def iter_payload_images(install_root: Path):
                 yield path
 
 
+def _is_native(machine_name: str, expected_name: str) -> bool:
+    """True when *machine_name* satisfies the *expected_name* native claim."""
+    if machine_name == expected_name:
+        return True
+    return expected_name == "ARM64" and machine_name in _ARM64_COMPATIBLE
+
+
+def _allowance(relative_path: str, machine_name: str) -> str | None:
+    """Return the documented reason when this image is explicitly allowed."""
+    exact = _ALLOW_EXACT.get(relative_path)
+    if exact is not None:
+        machines, reason = exact
+        return reason if machine_name in machines else None
+    parent, _, filename = relative_path.rpartition("/")
+    rule = _ALLOW_STUB_DIRS.get(parent)
+    if rule is not None:
+        filenames, reason = rule
+        if filename in filenames:
+            return reason
+    return None
+
+
 def audit_payload(install_root: Path, expected_machine: str) -> dict:
-    """Require every audited image to match AMD64 or ARM64 exactly."""
+    """Audit the installed payload against the selected native architecture.
+
+    Raises :class:`PeAuditError` for A cross-architecture runtime-critical image,
+    a cross-architecture image outside the explicit allowlist, an allowlisted
+    image with an unreadable/unknown machine, or any missing required image.
+    """
     expected_name = str(expected_machine).strip().upper()
     expected_value = _EXPECTED.get(expected_name)
     if expected_value is None:
@@ -71,41 +170,70 @@ def audit_payload(install_root: Path, expected_machine: str) -> dict:
             f"expected one of {sorted(_EXPECTED)}"
         )
     root = Path(install_root).resolve()
-    required = (
-        root / "python" / "python.exe",
-        root / "python" / "pythonw.exe",
-        root / "appenv" / "Scripts" / "python.exe",
-        root / "appenv" / "Scripts" / "pythonw.exe",
-    )
+    required = tuple(root / relative for relative in _RUNTIME_IMAGES)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise PeAuditError("required native payload image(s) missing: " + ", ".join(missing))
 
     counts: dict[str, int] = {}
+    runtime_checked: list[str] = []
+    runtime_mismatches: list[dict] = []
+    allowed: list[dict] = []
     mismatches: list[dict] = []
     images = list(iter_payload_images(root))
     if not images:
         raise PeAuditError("no PE images found in installed Python/appenv payload")
     for path in images:
+        relative = path.relative_to(root).as_posix()
         machine = pe_machine(path)
         name = _MACHINE_NAMES.get(machine, f"UNKNOWN_0x{machine:04X}")
         counts[name] = counts.get(name, 0) + 1
-        if machine != expected_value:
-            mismatches.append({
-                "path": str(path.relative_to(root)),
-                "machine": name,
-                "machine_value": f"0x{machine:04X}",
-            })
+        record = {
+            "path": relative,
+            "machine": name,
+            "machine_value": f"0x{machine:04X}",
+        }
+        if relative in _RUNTIME_SET:
+            runtime_checked.append(relative)
+            if not _is_native(name, expected_name):
+                runtime_mismatches.append(record)
+            continue
+        if _is_native(name, expected_name):
+            continue
+        reason = _allowance(relative, name)
+        if reason is not None and not name.startswith("UNKNOWN_"):
+            record["reason"] = reason
+            allowed.append(record)
+            continue
+        mismatches.append(record)
+
     result = {
-        "schema": "zealfie-windows-native-payload-audit-v1",
+        "schema": "zealfie-windows-native-payload-audit-v2",
         "scope": ["python", "appenv"],
         "inno_setup_loader_in_scope": False,
         "expected_machine": expected_name,
+        "arm64ec_is_native_compatible": expected_name == "ARM64",
         "images_checked": len(images),
+        "runtime_images_checked": len(runtime_checked),
+        "runtime_images": sorted(runtime_checked),
         "machine_counts": counts,
+        "arm64ec_count": counts.get("ARM64EC", 0),
+        "allowed_non_native": allowed,
+        "allowed_count": len(allowed),
+        "runtime_mismatches": runtime_mismatches,
         "mismatches": mismatches,
-        "status": "PASS" if not mismatches else "FAIL",
+        "status": (
+            "PASS" if not runtime_mismatches and not mismatches else "FAIL"
+        ),
     }
+    if runtime_mismatches:
+        sample = "; ".join(
+            f"{item['path']}={item['machine']}" for item in runtime_mismatches[:12]
+        )
+        raise PeAuditError(
+            f"runtime-critical native payload image(s) are not {expected_name}: "
+            f"{sample}"
+        )
     if mismatches:
         sample = "; ".join(
             f"{item['path']}={item['machine']}" for item in mismatches[:12]

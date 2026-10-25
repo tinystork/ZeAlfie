@@ -46,6 +46,9 @@ def _payload(root: Path, machine: int) -> None:
         "appenv/Scripts/python.exe",
         "appenv/Scripts/pythonw.exe",
         "appenv/Lib/site-packages/PySide6/Qt6Core.dll",
+        "appenv/Lib/site-packages/PySide6/Qt6Gui.dll",
+        "appenv/Lib/site-packages/PySide6/Qt6Widgets.dll",
+        "appenv/Lib/site-packages/PySide6/pyside6.abi3.dll",
         "appenv/Lib/site-packages/shiboken6/Shiboken.pyd",
     ):
         _write_pe(root / relative, machine)
@@ -56,8 +59,12 @@ def test_payload_pe_audit_accepts_exact_native_tree(tmp_path: Path, machine: int
     _payload(tmp_path, machine)
     result = pe.audit_payload(tmp_path, name)
     assert result["status"] == "PASS"
-    assert result["images_checked"] == 7
-    assert result["machine_counts"] == {name: 7}
+    assert result["images_checked"] == 10
+    assert result["runtime_images_checked"] == 10
+    assert result["machine_counts"] == {name: 10}
+    assert result["allowed_non_native"] == []
+    assert result["allowed_count"] == 0
+    assert result["arm64ec_count"] == 0
     assert result["inno_setup_loader_in_scope"] is False
 
 
@@ -74,6 +81,78 @@ def test_payload_pe_audit_rejects_invalid_pe(tmp_path: Path) -> None:
     bad.write_bytes(b"not pe")
     with pytest.raises(pe.PeAuditError, match="missing MZ"):
         pe.audit_payload(tmp_path, "AMD64")
+
+
+def test_arm64ec_is_accepted_for_arm64_and_rejected_for_amd64(tmp_path: Path) -> None:
+    """IMAGE_FILE_MACHINE_ARM64EC is ARM64-compatible only."""
+    rel = "appenv/Lib/site-packages/PySide6/vccorlib140.dll"
+    _payload(tmp_path / "arm", 0xAA64)
+    _write_pe(tmp_path / "arm" / rel, 0x01C4)
+    result = pe.audit_payload(tmp_path / "arm", "ARM64")
+    assert result["status"] == "PASS"
+    assert result["arm64ec_count"] == 1
+    assert result["machine_counts"] == {"ARM64": 10, "ARM64EC": 1}
+    assert result["arm64ec_is_native_compatible"] is True
+
+    _payload(tmp_path / "x64", 0x8664)
+    _write_pe(tmp_path / "x64" / rel, 0x01C4)
+    with pytest.raises(pe.PeAuditError, match="non-AMD64"):
+        pe.audit_payload(tmp_path / "x64", "AMD64")
+
+
+def test_allowlisted_distlib_stub_is_accepted_and_reported(tmp_path: Path) -> None:
+    _payload(tmp_path, 0xAA64)
+    stub = "python/Lib/site-packages/pip/_vendor/distlib/t32.exe"
+    _write_pe(tmp_path / stub, 0x014C)
+    result = pe.audit_payload(tmp_path, "ARM64")
+    assert result["status"] == "PASS"
+    assert result["allowed_count"] == 1
+    assert result["allowed_non_native"] == [
+        {
+            "path": stub,
+            "machine": "I386",
+            "machine_value": "0x014C",
+            "reason": pe._DISTLIB_REASON,
+        }
+    ]
+    assert result["machine_counts"] == {"ARM64": 10, "I386": 1}
+
+
+def test_cross_arch_runtime_image_fails_even_with_allowlist(tmp_path: Path) -> None:
+    _payload(tmp_path, 0xAA64)
+    # An otherwise-allowlistable stub is present, but a RUNTIME image is wrong.
+    _write_pe(
+        tmp_path / "appenv/Lib/site-packages/pip/_vendor/distlib/t64.exe", 0x8664
+    )
+    _write_pe(tmp_path / "python/python313.dll", 0x8664)
+    with pytest.raises(pe.PeAuditError, match="runtime-critical"):
+        pe.audit_payload(tmp_path, "ARM64")
+
+
+def test_unknown_cross_arch_image_outside_runtime_and_allowlist_fails(
+    tmp_path: Path,
+) -> None:
+    _payload(tmp_path, 0xAA64)
+    _write_pe(
+        tmp_path / "appenv/Lib/site-packages/vendor_unknown/helper.dll", 0x8664
+    )
+    with pytest.raises(pe.PeAuditError, match="non-ARM64"):
+        pe.audit_payload(tmp_path, "ARM64")
+
+
+def test_x64_lane_accepts_arm64_launcher_stubs_via_allowlist(tmp_path: Path) -> None:
+    _payload(tmp_path, 0x8664)
+    distlib = "appenv/Lib/site-packages/pip/_vendor/distlib/t64-arm.exe"
+    setuptools = "appenv/Lib/site-packages/setuptools/cli-arm64.exe"
+    _write_pe(tmp_path / distlib, 0xAA64)
+    _write_pe(tmp_path / setuptools, 0xAA64)
+    result = pe.audit_payload(tmp_path, "AMD64")
+    assert result["status"] == "PASS"
+    assert result["allowed_count"] == 2
+    allowed_paths = {item["path"] for item in result["allowed_non_native"]}
+    assert allowed_paths == {distlib, setuptools}
+    assert all(item["machine"] == "ARM64" for item in result["allowed_non_native"])
+    assert all(item["reason"] for item in result["allowed_non_native"])
 
 
 def test_dual_arch_workflow_is_manual_and_has_two_native_lanes() -> None:

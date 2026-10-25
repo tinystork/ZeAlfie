@@ -20,7 +20,7 @@ The profiles are never selected from an arbitrary user-provided architecture. Th
 
 ## Native claim and Inno exception
 
-The installed payload under `{app}\python` and `{app}\appenv` is native to the selected target. `payload_arch_audit.py` recursively inspects every `.exe`, `.dll` and `.pyd` in those trees and requires `IMAGE_FILE_MACHINE_AMD64` or `IMAGE_FILE_MACHINE_ARM64` exactly.
+The installed payload under `{app}\python` and `{app}\appenv` is native to the selected target. `payload_arch_audit.py` recursively inspects every `.exe`, `.dll` and `.pyd` in those trees. Runtime-critical images (private CPython, `python313.dll`, appenv launchers, Qt6 Core/Gui/Widgets, `pyside6.abi3.dll`, `Shiboken.pyd`) must match `IMAGE_FILE_MACHINE_AMD64` or `IMAGE_FILE_MACHINE_ARM64` exactly; `IMAGE_FILE_MACHINE_ARM64EC` (0x01C4) is accepted only for the ARM64 target, counted separately and never for AMD64. A narrow, explicit allowlist covers only non-runtime multi-architecture launcher stubs shipped inside universal pip/setuptools wheels and the upstream python-build-standalone `vcruntime140_1.dll`; each allowed image is listed with its reason in `allowed_non_native`. Any other cross-architecture image still fails the audit.
 
 Inno Setup 6.7.3's Setup program itself remains a 32-bit x86 binary. On Windows ARM it runs under Microsoft's emulation. It is deliberately excluded from the native-payload claim; the provenance artifact records `inno_setup_loader_native_arm64=false`.
 
