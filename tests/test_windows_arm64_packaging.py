@@ -279,6 +279,12 @@ def test_release_publish_workflow_is_manual_and_fail_closed() -> None:
     assert 'if data.get("workflowName") != expected_workflow' not in text
     assert "run_workflow_id != expected_id" in text
     assert "expected_id = wf.get(\"id\")" in text
+    # A failed live lookup (or an empty metadata file) must abort BEFORE any
+    # download with an explicit error, never fall through to a guess.
+    assert "could not resolve the build workflow identity" in text
+    assert "build workflow identity lookup returned no data" in text
+    assert "could not read metadata for build run" in text
+    assert "build run metadata lookup returned no data" in text
     # F2: only an explicit HTTP 404 may mean "tag absent".
     assert "gh api --include" in text
     assert "could not determine tag state" in text

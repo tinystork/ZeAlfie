@@ -76,11 +76,25 @@ jobs:
           # registered at creation time (this repo: "windows installer build"),
           # so a display name is NOT a stable identity and must never gate a
           # publication.
-          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/windows-installer-build.yml" \
-            > workflow-meta.json
-          gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --json workflowDatabaseId,workflowName,status,conclusion,headBranch,headSha \
-            > run-meta.json
+          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/windows-installer-build.yml" \
+              > workflow-meta.json; then
+            echo "::error::could not resolve the build workflow identity from ${GITHUB_REPOSITORY}/.github/workflows/windows-installer-build.yml; refusing to guess"
+            exit 1
+          fi
+          test -s workflow-meta.json || {
+            echo "::error::build workflow identity lookup returned no data; refusing to guess"
+            exit 1
+          }
+          if ! gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --json workflowDatabaseId,workflowName,status,conclusion,headBranch,headSha \
+              > run-meta.json; then
+            echo "::error::could not read metadata for build run ${RUN_ID}; refusing to guess"
+            exit 1
+          fi
+          test -s run-meta.json || {
+            echo "::error::build run metadata lookup returned no data; refusing to guess"
+            exit 1
+          }
           python3 - run-meta.json workflow-meta.json <<'PY'
           import json
           import os
