@@ -609,6 +609,49 @@ def test_iss_bootstrap_argv_orders_witness_root_before_make_appenv() -> None:
     assert "make-appenv --witness-root" not in iss
 
 
+def test_iss_bootstrap_passes_installed_selected_record_before_make_appenv() -> None:
+    """Real-run regression 40213278012: the installed tree carries ONLY the
+    selected profile, renamed to reproducibility.toml.  The bootstrap MUST pass
+    that installed record explicitly as a GLOBAL --record option before the
+    make-appenv subcommand; the source-tree reproducibility.<arch>.toml files
+    do not exist inside {app}\assets\bootstrap."""
+    iss = _iss_text()
+    # Use the LAST occurrences: the header comment also mentions the
+    # subcommand/options; the ACTUAL argv is the last one.
+    make = iss.rfind("make-appenv")
+    witness = iss.rfind("--witness-root", 0, make)
+    record = iss.rfind("--record", 0, make)
+    assert witness != -1 and record != -1 and make != -1
+    assert witness < record < make, (
+        "global --witness-root and --record must both precede make-appenv"
+    )
+    # The record path is the INSTALLED selected profile, not a source-tree name.
+    bootstrap = iss[witness:make]
+    assert "assets\\bootstrap\\reproducibility.toml" in bootstrap
+    assert "reproducibility.x64.toml" not in bootstrap
+    assert "reproducibility.arm64.toml" not in bootstrap
+    assert "make-appenv --record" not in iss
+    # The installed copy is the renamed selected profile.
+    assert 'DestName: "reproducibility.toml"' in iss
+
+
+def test_workflow_silent_install_captures_rc_and_evidence_before_failing() -> None:
+    """Real-run regression 40213278012: `set -e` must not swallow the installer
+    exit code; the step must capture rc, tail the setup log, then fail."""
+    text = (_REPO_ROOT / ".github" / "workflows"
+            / "windows-installer-build.yml").read_text(encoding="utf-8")
+    step = text.split("- id: silent-install", 1)[1].split(
+        "- id: installer-smoke", 1
+    )[0]
+    assert "set +e" in step
+    assert "rc=$?" in step
+    assert "set -e" in step
+    assert "tail -n 200" in step
+    assert "setup-install.log" in step
+    assert "setup-install.log ABSENT" in step
+    assert 'exit 1' in step
+
+
 def test_iss_code_checks_child_exit_codes() -> None:
     """Regression (rework-5, defect 2): the bootstrap must observe every
     child exit code via Exec + ewWaitUntilTerminated + ResultCode; the

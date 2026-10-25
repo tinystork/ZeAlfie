@@ -322,12 +322,17 @@ begin
 
     // 2) Build the appenv from THAT private python, installing ZeAlfie from
     //    the bundled wheelhouse ONLY (--no-index --find-links): offline.
-    //    NOTE: --witness-root is a global option and MUST precede the
-    //    make-appenv subcommand (argparse rejects it afterwards).
+    //    NOTE: --witness-root and --record are GLOBAL options and MUST
+    //    precede the make-appenv subcommand (argparse rejects them after).
+    //    The installed tree intentionally carries only the SELECTED profile,
+    //    renamed to reproducibility.toml — never the source-tree
+    //    reproducibility.x64.toml/arm64.toml — so the record is passed
+    //    explicitly.
     if not RunCheckedZero(
          AppDir + '\python\python.exe',
          '"' + AppDir + '\assets\bootstrap\provision_windows.py"' +
          ' --witness-root "' + AppDir + '"' +
+         ' --record "' + AppDir + '\assets\bootstrap\reproducibility.toml"' +
          ' make-appenv --offline-wheelhouse "' + AppDir + '\assets\wheelhouse"',
          AppDir + '\assets\bootstrap') then
       FailBootstrap('The offline appenv bootstrap exited non-zero (see ' + AppDir + '\logs\appenv-pip-install.log). Installation aborted (fail closed).');

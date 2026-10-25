@@ -257,13 +257,27 @@ jobs:
         shell: bash
         timeout-minutes: 30
         run: |
-          set -euo pipefail
+          set -uo pipefail
           export MSYS2_ARG_CONV_EXCL="*"
+          # `set -e` must NOT swallow the installer exit code: disable it for
+          # the invocation, capture rc, then fail explicitly with evidence.
+          set +e
           "$SETUP" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="$ZEALFIE_STAGE/logs/setup-install.log"
           rc=$?
+          set -e
           echo "setup.exe exit code: $rc"
           if [ "$rc" -ne 0 ]; then
             echo "FATAL: silent install did not run to completion (exit code $rc)"
+            echo "=== setup-install.log (tail) ==="
+            if [ -f "$ZEALFIE_STAGE/logs/setup-install.log" ]; then
+              tail -n 200 "$ZEALFIE_STAGE/logs/setup-install.log" || true
+            else
+              echo "setup-install.log ABSENT"
+            fi
+            echo "=== staging logs (outside {app}) ==="
+            ls -la "$ZEALFIE_STAGE/logs" || true
+            echo "=== installed bootstrap assets ==="
+            ls -la "$ZEALFIE_INSTALL_ROOT/assets/bootstrap" 2>/dev/null || true
             exit 1
           fi
           echo "=== installed layout (top level) ==="
