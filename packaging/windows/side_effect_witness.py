@@ -203,9 +203,36 @@ def _real_env(name: str) -> str | None:
 
 
 def _real_shortcut_target(path: str) -> str | None:
-    """Resolve a .lnk target via the WScript.Shell COM object (Windows)."""
+    """Resolve a .lnk target via the WScript.Shell COM object (Windows).
+
+    Kept as a thin compatibility wrapper; :func:`_probe_shortcut_target_com`
+    carries the diagnostics used by the witness snapshot.
+    """
+    target, _diag = _probe_shortcut_target_com(path)
+    return target
+
+
+def _probe_shortcut_target_com(path: str) -> tuple[str | None, dict]:
+    """Secondary resolver: WScript.Shell COM via powershell.exe.
+
+    Never the primary method: the deterministic ``.lnk`` parser runs first and
+    a silent COM failure can no longer make a valid shortcut look unresolvable.
+    Returns ``(target, diagnostics)``; diagnostics are always JSON-safe.
+    """
+    diag = {
+        "com_rc": None,
+        "com_stderr_tail": None,
+        "powershell_found": False,
+        "com_error": None,
+    }
     if sys.platform != "win32":
-        return None
+        diag["com_error"] = "not running on Windows"
+        return None, diag
+    powershell = shutil.which("powershell.exe")
+    diag["powershell_found"] = bool(powershell)
+    if not powershell:
+        diag["com_error"] = "powershell.exe not found"
+        return None, diag
     escaped = str(path).replace("'", "''")
     ps = (
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('"
@@ -213,16 +240,179 @@ def _real_shortcut_target(path: str) -> str | None:
     )
     try:
         proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps],
+            [powershell, "-NoProfile", "-Command", ps],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=30,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        diag["com_error"] = f"{type(exc).__name__}: {exc}"
+        return None, diag
+    diag["com_rc"] = int(proc.returncode)
     if proc.returncode != 0:
-        return None
+        diag["com_stderr_tail"] = (proc.stderr or "").strip()[-400:]
+        return None, diag
     target = proc.stdout.strip()
+    return (target or None), diag
+
+
+# ---------------------------------------------------------------------------
+# Deterministic MS-SHLLINK reader (stdlib only, hermetic, no COM)
+# ---------------------------------------------------------------------------
+
+_SHELL_LINK_HEADER_SIZE = 0x4C
+_SHELL_LINK_CLSID = bytes.fromhex("0114020000000000c000000000000046")
+_HAS_LINK_TARGET_ID_LIST = 0x00000001
+_HAS_LINK_INFO = 0x00000002
+_VOLUME_ID_AND_LOCAL_BASE_PATH = 0x00000001
+
+
+class ShellLinkError(ValueError):
+    """The bytes are not a well-formed MS-SHLLINK structure."""
+
+
+def _u16(data: bytes, offset: int, label: str) -> int:
+    if offset < 0 or offset + 2 > len(data):
+        raise ShellLinkError(f"truncated {label} at 0x{offset:X}")
+    return int.from_bytes(data[offset:offset + 2], "little")
+
+
+def _u32(data: bytes, offset: int, label: str) -> int:
+    if offset < 0 or offset + 4 > len(data):
+        raise ShellLinkError(f"truncated {label} at 0x{offset:X}")
+    return int.from_bytes(data[offset:offset + 4], "little")
+
+
+def _ansi_string(data: bytes, offset: int, label: str) -> str:
+    if offset <= 0 or offset >= len(data):
+        raise ShellLinkError(f"invalid {label} offset 0x{offset:X}")
+    end = data.find(b"\x00", offset)
+    if end < 0:
+        raise ShellLinkError(f"unterminated {label} at 0x{offset:X}")
+    # LocalBasePath is ANSI; latin-1 is byte-preserving and deterministic.
+    return data[offset:end].decode("latin-1")
+
+
+def _unicode_string(data: bytes, offset: int, label: str) -> str:
+    if offset <= 0 or offset >= len(data) or offset % 2:
+        raise ShellLinkError(f"invalid {label} offset 0x{offset:X}")
+    end = offset
+    while True:
+        if end + 2 > len(data):
+            raise ShellLinkError(f"unterminated {label} at 0x{offset:X}")
+        if data[end:end + 2] == b"\x00\x00":
+            break
+        end += 2
+    return data[offset:end].decode("utf-16-le")
+
+
+def parse_shllink_target(data: bytes) -> str | None:
+    """Return the local target path of a real ``.lnk`` (or ``None``).
+
+    Deterministic, stdlib-only MS-SHLLINK parser: header + optional
+    ``LinkTargetIDList`` + ``LinkInfo`` with ANSI ``LocalBasePath`` /
+    ``CommonPathSuffix`` and the Unicode variants. Returns ``None`` when the
+    link carries no LOCAL target (no LinkInfo, or no local base path) so the
+    caller may fall back to COM. Malformed/truncated input raises
+    :class:`ShellLinkError` — it is never guessed.
+    """
+    if len(data) < _SHELL_LINK_HEADER_SIZE:
+        raise ShellLinkError("truncated shell link header")
+    if _u32(data, 0, "HeaderSize") != _SHELL_LINK_HEADER_SIZE:
+        raise ShellLinkError("unexpected shell link HeaderSize")
+    if data[4:20] != _SHELL_LINK_CLSID:
+        raise ShellLinkError("unexpected shell link CLSID")
+    flags = _u32(data, 0x14, "LinkFlags")
+    pos = _SHELL_LINK_HEADER_SIZE
+    if flags & _HAS_LINK_TARGET_ID_LIST:
+        id_list_size = _u16(data, pos, "LinkTargetIDList size")
+        pos += 2
+        if id_list_size < 2:
+            raise ShellLinkError("empty LinkTargetIDList")
+        if pos + id_list_size > len(data):
+            raise ShellLinkError("truncated LinkTargetIDList")
+        pos += id_list_size
+    if not flags & _HAS_LINK_INFO:
+        return None
+    link_info_size = _u32(data, pos, "LinkInfoSize")
+    if link_info_size < 0x1C:
+        raise ShellLinkError("LinkInfo smaller than its fixed header")
+    if pos + link_info_size > len(data):
+        raise ShellLinkError("truncated LinkInfo")
+    info = data[pos:pos + link_info_size]
+    header_size = _u32(info, 4, "LinkInfoHeaderSize")
+    if header_size < 0x1C or header_size > link_info_size:
+        raise ShellLinkError("invalid LinkInfoHeaderSize")
+    info_flags = _u32(info, 8, "LinkInfoFlags")
+    if not info_flags & _VOLUME_ID_AND_LOCAL_BASE_PATH:
+        return None
+    local_ansi = _u32(info, 16, "LocalBasePathOffset")
+    suffix_ansi = _u32(info, 24, "CommonPathSuffixOffset")
+    if header_size >= 0x24:
+        local_unicode = _u32(info, 28, "LocalBasePathOffsetUnicode")
+        suffix_unicode = _u32(info, 32, "CommonPathSuffixOffsetUnicode")
+        if local_unicode:
+            base = _unicode_string(info, local_unicode, "LocalBasePathUnicode")
+            suffix = (
+                _unicode_string(
+                    info, suffix_unicode, "CommonPathSuffixUnicode"
+                )
+                if suffix_unicode
+                else ""
+            )
+            target = base + suffix
+            return target or None
+    if not local_ansi:
+        return None
+    base = _ansi_string(info, local_ansi, "LocalBasePath")
+    suffix = (
+        _ansi_string(info, suffix_ansi, "CommonPathSuffix")
+        if suffix_ansi
+        else ""
+    )
+    target = base + suffix
     return target or None
+
+
+def _resolve_shortcut_target(
+    path: str,
+    *,
+    _parser=parse_shllink_target,
+    _com_probe=_probe_shortcut_target_com,
+) -> tuple[str | None, dict]:
+    """Resolve a ``.lnk`` target deterministically, then by COM as fallback.
+
+    Returns ``(target, diagnostics)``. Diagnostics always contain
+    ``method_used`` (``shllink_parser`` / ``powershell_com`` / ``none``),
+    ``shllink_error``, ``com_rc``, ``com_stderr_tail`` and
+    ``powershell_found`` so a failure can never be silent.
+    """
+    diag = {
+        "method_used": None,
+        "shllink_error": None,
+        "com_rc": None,
+        "com_stderr_tail": None,
+        "powershell_found": None,
+        "com_error": None,
+    }
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        target = _parser(raw)
+        if target:
+            diag["method_used"] = "shllink_parser"
+            return target, diag
+        diag["shllink_error"] = "no local target path in .lnk"
+    except ShellLinkError as exc:
+        diag["shllink_error"] = str(exc)
+    except OSError as exc:
+        diag["shllink_error"] = f"cannot read .lnk: {exc}"
+    target, com_diag = _com_probe(path)
+    diag.update(com_diag)
+    if target:
+        diag["method_used"] = "powershell_com"
+        return target, diag
+    diag["method_used"] = "none"
+    return None, diag
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +476,16 @@ def capture_snapshot(
     _isfile=_real_isfile,
     _exists=_real_exists,
     _env=_real_env,
-    _shortcut_target=_real_shortcut_target,
+    _shortcut_target=None,
+    _shortcut_resolver=None,
 ) -> dict:
-    """Capture the machine-scope footprint relevant to the installer."""
+    """Capture the machine-scope footprint relevant to the installer.
+
+    ``_shortcut_target`` (legacy seam) takes a path and returns a target;
+    ``_shortcut_resolver`` takes a path and returns ``(target, diagnostics)``.
+    The default resolver parses the ``.lnk`` deterministically first and only
+    then falls back to the PowerShell COM probe.
+    """
     hkcu_env = _registry("HKCU", ENV_HKCU_SUBKEY) or {}
     hklm_env = _registry("HKLM", ENV_HKLM_SUBKEY) or {}
     py_assoc = _registry("HKCU", ASSOC_PY_SUBKEY) or {}
@@ -300,6 +497,33 @@ def capture_snapshot(
     appdata_root = os.path.join(local, ZEALFIE_APPDATA_REL) if local else None
     runtime = os.path.join(appdata_root, "runtime") if appdata_root else None
     py_launcher_path = _which("py.exe")
+
+    lnk_exists = bool(lnk and _isfile(lnk))
+    shortcut_target = None
+    if lnk_exists:
+        if _shortcut_resolver is not None:
+            shortcut_target, shortcut_probe = _shortcut_resolver(lnk)
+        elif _shortcut_target is not None:
+            shortcut_target = _shortcut_target(lnk)
+            shortcut_probe = {
+                "method_used": "injected_shortcut_target",
+                "shllink_error": None,
+                "com_rc": None,
+                "com_stderr_tail": None,
+                "powershell_found": None,
+                "com_error": None,
+            }
+        else:
+            shortcut_target, shortcut_probe = _resolve_shortcut_target(lnk)
+    else:
+        shortcut_probe = {
+            "method_used": "no_shortcut",
+            "shllink_error": None,
+            "com_rc": None,
+            "com_stderr_tail": None,
+            "powershell_found": None,
+            "com_error": None,
+        }
 
     return {
         "schema": 1,
@@ -313,10 +537,9 @@ def capture_snapshot(
         "uninstall_hkcu": _uninstall_scan(_registry, _registry_subkeys, "HKCU"),
         "uninstall_hklm": _uninstall_scan(_registry, _registry_subkeys, "HKLM"),
         "start_menu_shortcut": lnk,
-        "start_menu_shortcut_exists": bool(lnk and _isfile(lnk)),
-        "start_menu_shortcut_target": (
-            _shortcut_target(lnk) if lnk and _isfile(lnk) else None
-        ),
+        "start_menu_shortcut_exists": lnk_exists,
+        "start_menu_shortcut_target": shortcut_target,
+        "shortcut_target_probe": shortcut_probe,
         "runtime_exists": bool(runtime and _exists(runtime)),
         "zealfie_appdata_exists": bool(appdata_root and _exists(appdata_root)),
     }
@@ -419,13 +642,20 @@ def verify_install_findings(
     # B. EXPECTED ZeAlfie shell
     if not snapshot.get("start_menu_shortcut_exists"):
         findings.append("expected ZeAlfie Start Menu shortcut is missing")
+    elif not snapshot.get("start_menu_shortcut_target"):
+        probe = json.dumps(snapshot.get("shortcut_target_probe"), sort_keys=True)
+        findings.append(
+            "Start Menu shortcut target could not be resolved "
+            f"(expected {appenv_gui!r}); probe={probe}"
+        )
     elif _win_norm(snapshot.get("start_menu_shortcut_target")) != _win_norm(
         appenv_gui
     ):
+        probe = json.dumps(snapshot.get("shortcut_target_probe"), sort_keys=True)
         findings.append(
             "Start Menu shortcut target is not the installed windowed "
             f"launcher: {snapshot.get('start_menu_shortcut_target')!r} != "
-            f"{appenv_gui!r}"
+            f"{appenv_gui!r}; probe={probe}"
         )
     hkcu_zealfie = _zealfie_entries(snapshot.get("uninstall_hkcu", {}))
     if not hkcu_zealfie:

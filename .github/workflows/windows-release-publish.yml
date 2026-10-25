@@ -1,0 +1,208 @@
+name: Windows release publish (dual-arch RC)
+
+# MANUAL, PUBLICATION-ONLY workflow. It never builds, never touches source, and
+# never signs anything. It downloads the two artifacts produced by a SUCCESSFUL
+# windows-installer-build run, verifies every SHA-256 against the downloaded
+# EXE, refuses to move an existing tag, and then creates the tag + GitHub
+# Release. The build workflow keeps `contents: read`; only this workflow has
+# `contents: write`.
+#
+# workflow_dispatch ONLY — no push, pull_request, schedule or tag trigger.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Successful windows-installer-build run id (dual-arch)"
+        required: true
+        type: string
+      tag:
+        description: "Release tag (created only if absent; never moved)"
+        required: true
+        default: "v0.1.4-rc1"
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify artifacts and publish ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::run_id must be numeric, got '$RUN_ID'"
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]]; then
+            echo "::error::tag '$TAG' is not an allowed release tag"
+            exit 1
+          fi
+
+      - name: Refuse to move an existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::tag ${TAG} already exists — refusing to move it"
+            exit 1
+          fi
+          echo "tag ${TAG} does not exist yet: OK to create"
+
+      - name: Download both architecture artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir -p dist/x64 dist/arm64
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "zealfie-setup-0.1.4-rc1-windows-x64" --dir dist/x64
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "zealfie-setup-0.1.4-rc1-windows-arm64" --dir dist/arm64
+
+      - name: Verify assets and SHA-256 checksums (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import sys
+
+          lanes = {
+              "x64": "ZeAlfie-Setup-0.1.4-rc1-windows-x64.exe",
+              "arm64": "ZeAlfie-Setup-0.1.4-rc1-windows-arm64.exe",
+          }
+          failures = []
+          for lane, exe_name in lanes.items():
+              root = pathlib.Path("dist") / lane
+              exe = root / exe_name
+              sha = root / (exe_name + ".sha256")
+              if not exe.is_file():
+                  failures.append(f"{lane}: missing EXE {exe}")
+                  continue
+              if not sha.is_file():
+                  failures.append(f"{lane}: missing checksum {sha}")
+                  continue
+              lines = [line.strip() for line in sha.read_text(encoding="utf-8").splitlines() if line.strip()]
+              if len(lines) != 1:
+                  failures.append(f"{lane}: checksum file must contain exactly one line")
+                  continue
+              match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?(\S+)", lines[0])
+              if not match:
+                  failures.append(f"{lane}: malformed checksum line {lines[0]!r}")
+                  continue
+              expected, declared_name = match.group(1).lower(), match.group(2)
+              if pathlib.PurePath(declared_name).name != exe_name:
+                  failures.append(
+                      f"{lane}: checksum names {declared_name!r}, expected {exe_name!r}"
+                  )
+                  continue
+              actual = hashlib.sha256(exe.read_bytes()).hexdigest()
+              if actual != expected:
+                  failures.append(
+                      f"{lane}: checksum mismatch for {exe_name}: {actual} != {expected}"
+                  )
+                  continue
+              print(f"[verify] {lane}: {exe_name} sha256={actual}")
+              for name in ("provenance.json", "native-payload-audit.json"):
+                  if not (root / name).is_file():
+                      failures.append(f"{lane}: missing {name}")
+                      continue
+                  data = json.loads((root / name).read_text(encoding="utf-8"))
+                  if name == "native-payload-audit.json" and data.get("status") != "PASS":
+                      failures.append(
+                          f"{lane}: native-payload-audit.json status is {data.get('status')!r}, expected 'PASS'"
+                      )
+          if failures:
+              for failure in failures:
+                  print(f"::error::{failure}")
+              sys.exit(1)
+          print("[verify] both lanes verified; no missing asset, no checksum mismatch")
+          PY
+
+      - name: Resolve build head SHA and stage release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_SHA=$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)
+          if ! [[ "$BUILD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve the build run head SHA (got '$BUILD_SHA')"
+            exit 1
+          fi
+          echo "BUILD_SHA=$BUILD_SHA" >> "$GITHUB_ENV"
+          rm -rf release-assets && mkdir -p release-assets
+          cp dist/x64/*.exe dist/x64/*.sha256 release-assets/
+          cp dist/arm64/*.exe dist/arm64/*.sha256 release-assets/
+          cp dist/x64/provenance.json release-assets/provenance-x64.json
+          cp dist/arm64/provenance.json release-assets/provenance-arm64.json
+          cp dist/x64/native-payload-audit.json release-assets/native-payload-audit-x64.json
+          cp dist/arm64/native-payload-audit.json release-assets/native-payload-audit-arm64.json
+          ls -l release-assets
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          ZeAlfie Windows 0.1.4-rc1 — dual-architecture release candidate.
+
+          **UNSIGNED BINARIES.** These installers are not code-signed. Windows
+          SmartScreen will show a warning; verify the attached `.sha256` files
+          before running them.
+
+          | Lane | Status |
+          | --- | --- |
+          | Windows x64 | CI-validated end to end (install, installer smoke, native PE audit, side-effect audit, uninstall witness). |
+          | Windows ARM64 | RELEASE CANDIDATE — CI-validated install/smoke/PE audit/uninstall, but still pending external end-to-end human validation on real ARM64 hardware. |
+
+          Assets per lane: the Setup `.exe`, its `.sha256`, `provenance-<lane>.json`
+          and `native-payload-audit-<lane>.json`.
+
+          No code signing, no source changes, no forced tag move.
+          EOF
+
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FLAGS=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            FLAGS+=(--prerelease)
+          fi
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$BUILD_SHA" \
+            --title "ZeAlfie $TAG — Windows RC (x64 + ARM64)" \
+            --notes-file release-notes.md \
+            "${FLAGS[@]}"

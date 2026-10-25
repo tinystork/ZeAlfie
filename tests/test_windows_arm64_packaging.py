@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "packaging" / "windows"
 WORKFLOW = ROOT / ".github" / "workflows" / "windows-installer-build.yml"
+PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "windows-release-publish.yml"
 ISS = PKG / "installer" / "zealfie.iss"
 
 
@@ -228,3 +229,44 @@ def test_provenance_payload_commit_is_sourced_not_hardcoded() -> None:
         "- id: upload-artifacts", 1
     )[0]
     assert "e466698" not in prov
+
+
+def test_release_publish_workflow_is_manual_and_fail_closed() -> None:
+    """Publication-only workflow: dispatch-only, checksum first, no force."""
+    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in text
+    # No automatic trigger and no build trigger anywhere in the `on:` block.
+    on_block = text.split("on:", 1)[1].split("permissions:", 1)[0]
+    for forbidden in ("push:", "pull_request:", "schedule:", "tags:"):
+        assert forbidden not in on_block
+    assert "permissions:" in text
+    permissions_block = text.split("permissions:", 1)[1].split("concurrency:", 1)[0]
+    assert "contents: write" in permissions_block
+
+    # Required inputs + both architecture artifact names.
+    for token in ("run_id", "tag", "prerelease"):
+        assert token in on_block
+    assert "zealfie-setup-0.1.4-rc1-windows-x64" in text
+    assert "zealfie-setup-0.1.4-rc1-windows-arm64" in text
+    assert "ZeAlfie-Setup-0.1.4-rc1-windows-x64.exe" in text
+    assert "ZeAlfie-Setup-0.1.4-rc1-windows-arm64.exe" in text
+
+    # Checksums are verified BEFORE the release is created.
+    assert "sha256" in text.lower()
+    assert text.index("Verify assets and SHA-256 checksums") < text.index(
+        "gh release create"
+    )
+    assert "refusing to move it" in text
+    assert "git/ref/tags/" in text
+    assert "provenance.json" in text and "native-payload-audit.json" in text
+    assert "--notes-file" in text and "--target" in text
+    assert "--prerelease" in text
+
+    # Never signs, never pushes commits, never force-moves a tag.
+    lowered = text.lower()
+    for forbidden in ("signtool", "osslsigncode", "git push", "--force",
+                      "--clobber", "cosign"):
+        assert forbidden not in lowered
+    assert "not code-signed" in lowered
+    assert "pending external end-to-end human validation" in lowered
+    assert "ci-validated" in lowered
