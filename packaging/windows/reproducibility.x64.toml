@@ -28,7 +28,7 @@ version = "0.1.4rc1"
 # preceding this provenance-only closure commit.
 # The final CI artifact provenance is the workflow's actual GITHUB_SHA at
 # build time, not this value.
-revision = "e46669870266bbc5c41639feaaedf5f63b2380a6"
+revision = "58988cdf9d5fa81bd8e29c312e01fa77d2ec6f77"
 
 [cpython]
 # Exact pinned private runtime interpreter: python-build-standalone

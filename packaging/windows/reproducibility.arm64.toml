@@ -28,7 +28,7 @@ version = "0.1.4rc1"
 # preceding this provenance-only closure commit.
 # The final CI artifact provenance is the workflow's actual GITHUB_SHA at
 # build time, not this value.
-revision = "e46669870266bbc5c41639feaaedf5f63b2380a6"
+revision = "58988cdf9d5fa81bd8e29c312e01fa77d2ec6f77"
 
 [cpython]
 # Exact pinned private runtime interpreter: python-build-standalone
@@ -47,7 +47,7 @@ windows_arch = "arm64"
 pe_machine = "ARM64"
 installer_filename = "cpython-3.13.15+20260901-aarch64-pc-windows-msvc-install_only.tar.gz"
 installer_url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-pc-windows-msvc-install_only.tar.gz"
-# sha256 of the tarball above (47 042 104 bytes) computed on a Linux host
+# sha256 of the tarball above (43 801 216 bytes) computed on a Linux host
 # on 2026-09-03 from the official GitHub release asset; verified by
 # provisioning and by the CI acquire step BEFORE extraction.
 sha256 = "ce87247378f43f88e0202a0fa6d3cdb5f5fb246a3bc61b2fb604bd49b7862508"
