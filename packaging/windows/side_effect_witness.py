@@ -282,8 +282,8 @@ def _u32(data: bytes, offset: int, label: str) -> int:
     return int.from_bytes(data[offset:offset + 4], "little")
 
 
-def _ansi_string(data: bytes, offset: int, label: str) -> str:
-    if offset <= 0 or offset >= len(data):
+def _ansi_string(data: bytes, offset: int, label: str, *, allow_zero: bool = False) -> str:
+    if offset < 0 or (offset == 0 and not allow_zero) or offset >= len(data):
         raise ShellLinkError(f"invalid {label} offset 0x{offset:X}")
     end = data.find(b"\x00", offset)
     if end < 0:
@@ -292,8 +292,8 @@ def _ansi_string(data: bytes, offset: int, label: str) -> str:
     return data[offset:end].decode("latin-1")
 
 
-def _unicode_string(data: bytes, offset: int, label: str) -> str:
-    if offset <= 0 or offset >= len(data) or offset % 2:
+def _unicode_string(data: bytes, offset: int, label: str, *, allow_zero: bool = False) -> str:
+    if offset < 0 or (offset == 0 and not allow_zero) or offset >= len(data) or offset % 2:
         raise ShellLinkError(f"invalid {label} offset 0x{offset:X}")
     end = offset
     while True:
@@ -305,15 +305,59 @@ def _unicode_string(data: bytes, offset: int, label: str) -> str:
     return data[offset:end].decode("utf-16-le")
 
 
-def parse_shllink_target(data: bytes) -> str | None:
-    """Return the local target path of a real ``.lnk`` (or ``None``).
+def _decode_idlist_item_name(item_data: bytes) -> str | None:
+    """Decode the NAME of a file-system ItemID (0x30-0x3F), else ``None``.
 
-    Deterministic, stdlib-only MS-SHLLINK parser: header + optional
-    ``LinkTargetIDList`` + ``LinkInfo`` with ANSI ``LocalBasePath`` /
-    ``CommonPathSuffix`` and the Unicode variants. Returns ``None`` when the
-    link carries no LOCAL target (no LinkInfo, or no local base path) so the
-    caller may fall back to COM. Malformed/truncated input raises
-    :class:`ShellLinkError` — it is never guessed.
+    Layout (MS-SHLLINK / libfwsi file entry): ClassTypeIndicator (1),
+    Unknown (1), FileSize (4), DOS timestamp (4), FileAttributeFlags (2),
+    PrimaryName (ANSI or UTF-16LE when the 0x04 bit is set), NUL-terminated.
+    """
+    if not item_data:
+        raise ShellLinkError("empty ItemID")
+    indicator = item_data[0]
+    if not 0x30 <= indicator <= 0x3F:
+        return None  # root/volume/network/URI/control-panel: safely ignored
+    if len(item_data) < 12:
+        raise ShellLinkError("truncated file entry ItemID")
+    name_data = item_data[12:]
+    if not name_data:
+        raise ShellLinkError("truncated file entry ItemID")
+    if indicator & 0x04:
+        name = _unicode_string(name_data, 0, "IDList unicode name", allow_zero=True)
+    else:
+        name = _ansi_string(name_data, 0, "IDList ANSI name", allow_zero=True)
+    return name or None
+
+
+def _walk_idlist(idlist: bytes) -> list[str]:
+    """Return the file-system NAME segments of a LinkTargetIDList."""
+    segments: list[str] = []
+    offset = 0
+    while True:
+        if offset + 2 > len(idlist):
+            raise ShellLinkError("missing LinkTargetIDList terminator")
+        size = _u16(idlist, offset, "ItemID size")
+        if size == 0:
+            return segments
+        if size < 2:
+            raise ShellLinkError(f"invalid ItemID size {size}")
+        if offset + size > len(idlist):
+            raise ShellLinkError("ItemID overruns LinkTargetIDList")
+        item_data = idlist[offset + 2:offset + size]
+        offset += size
+        name = _decode_idlist_item_name(item_data)
+        if name:
+            segments.append(name)
+
+
+def parse_shllink(data: bytes) -> tuple[str | None, list[str]]:
+    """Parse a ``.lnk`` into ``(link_info_target, idlist_segments)``.
+
+    ``link_info_target`` is the authoritative local target carried by LinkInfo
+    (ANSI or Unicode). ``idlist_segments`` is the best-effort sequence of
+    file-system names decoded from LinkTargetIDList (POSITIVE evidence only:
+    the caller must match its trailing segments against the expected target).
+    Malformed/truncated input raises :class:`ShellLinkError`.
     """
     if len(data) < _SHELL_LINK_HEADER_SIZE:
         raise ShellLinkError("truncated shell link header")
@@ -323,6 +367,7 @@ def parse_shllink_target(data: bytes) -> str | None:
         raise ShellLinkError("unexpected shell link CLSID")
     flags = _u32(data, 0x14, "LinkFlags")
     pos = _SHELL_LINK_HEADER_SIZE
+    idlist_segments: list[str] = []
     if flags & _HAS_LINK_TARGET_ID_LIST:
         id_list_size = _u16(data, pos, "LinkTargetIDList size")
         pos += 2
@@ -330,9 +375,10 @@ def parse_shllink_target(data: bytes) -> str | None:
             raise ShellLinkError("empty LinkTargetIDList")
         if pos + id_list_size > len(data):
             raise ShellLinkError("truncated LinkTargetIDList")
+        idlist_segments = _walk_idlist(data[pos:pos + id_list_size])
         pos += id_list_size
     if not flags & _HAS_LINK_INFO:
-        return None
+        return None, idlist_segments
     link_info_size = _u32(data, pos, "LinkInfoSize")
     if link_info_size < 0x1C:
         raise ShellLinkError("LinkInfo smaller than its fixed header")
@@ -344,7 +390,7 @@ def parse_shllink_target(data: bytes) -> str | None:
         raise ShellLinkError("invalid LinkInfoHeaderSize")
     info_flags = _u32(info, 8, "LinkInfoFlags")
     if not info_flags & _VOLUME_ID_AND_LOCAL_BASE_PATH:
-        return None
+        return None, idlist_segments
     local_ansi = _u32(info, 16, "LocalBasePathOffset")
     suffix_ansi = _u32(info, 24, "CommonPathSuffixOffset")
     if header_size >= 0x24:
@@ -360,9 +406,9 @@ def parse_shllink_target(data: bytes) -> str | None:
                 else ""
             )
             target = base + suffix
-            return target or None
+            return (target or None), idlist_segments
     if not local_ansi:
-        return None
+        return None, idlist_segments
     base = _ansi_string(info, local_ansi, "LocalBasePath")
     suffix = (
         _ansi_string(info, suffix_ansi, "CommonPathSuffix")
@@ -370,21 +416,58 @@ def parse_shllink_target(data: bytes) -> str | None:
         else ""
     )
     target = base + suffix
-    return target or None
+    return (target or None), idlist_segments
+
+
+def parse_shllink_target(data: bytes) -> str | None:
+    """Return the authoritative LinkInfo target path of a real ``.lnk``.
+
+    Compatibility wrapper around :func:`parse_shllink`; IDList-only links have
+    no authoritative target and return ``None`` here.
+    """
+    return parse_shllink(data)[0]
+
+
+#: Trailing segments that MUST match for IDList-derived positive evidence.
+_IDLIST_LAUNCHER_TAIL = ("appenv", "scripts", "zealfie-gui.exe")
+
+
+def _segments_match_launcher(segments: list[str], expected_target: str | None) -> bool:
+    """True only when IDList segments END WITH the expected launcher path."""
+    if not expected_target or len(segments) < len(_IDLIST_LAUNCHER_TAIL):
+        return False
+    expected = [
+        part for part in ntpath.normpath(str(expected_target)).split("\\") if part
+    ]
+    if len(expected) < len(_IDLIST_LAUNCHER_TAIL):
+        return False
+    expected_tail = [ntpath.normcase(p) for p in expected[-len(_IDLIST_LAUNCHER_TAIL):]]
+    if expected_tail != list(_IDLIST_LAUNCHER_TAIL):
+        return False
+    observed_tail = [
+        ntpath.normcase(s) for s in segments[-len(_IDLIST_LAUNCHER_TAIL):]
+    ]
+    return observed_tail == expected_tail
 
 
 def _resolve_shortcut_target(
     path: str,
     *,
-    _parser=parse_shllink_target,
+    expected_target: str | None = None,
+    _parser=parse_shllink,
     _com_probe=_probe_shortcut_target_com,
 ) -> tuple[str | None, dict]:
     """Resolve a ``.lnk`` target deterministically, then by COM as fallback.
 
+    Order: (1) authoritative ``LinkInfo`` target, (2) ``LinkTargetIDList``
+    POSITIVE evidence when its trailing segments match *expected_target*,
+    (3) PowerShell COM, (4) fail closed.
+
     Returns ``(target, diagnostics)``. Diagnostics always contain
-    ``method_used`` (``shllink_parser`` / ``powershell_com`` / ``none``),
-    ``shllink_error``, ``com_rc``, ``com_stderr_tail`` and
-    ``powershell_found`` so a failure can never be silent.
+    ``method_used`` (``shllink_parser`` / ``shllink_idlist`` /
+    ``powershell_com`` / ``none``), ``shllink_error``, ``com_rc``,
+    ``com_stderr_tail``, ``powershell_found`` and ``idlist_segments`` so a
+    failure can never be silent.
     """
     diag = {
         "method_used": None,
@@ -393,15 +476,22 @@ def _resolve_shortcut_target(
         "com_stderr_tail": None,
         "powershell_found": None,
         "com_error": None,
+        "idlist_segments": None,
     }
     try:
         with open(path, "rb") as fh:
             raw = fh.read()
-        target = _parser(raw)
+        target, idlist_segments = _parser(raw)
+        diag["idlist_segments"] = list(idlist_segments)
         if target:
             diag["method_used"] = "shllink_parser"
             return target, diag
         diag["shllink_error"] = "no local target path in .lnk"
+        if _segments_match_launcher(idlist_segments, expected_target):
+            # POSITIVE IDList evidence, not an authoritative resolved path.
+            diag["method_used"] = "shllink_idlist"
+            diag["idlist_matched_expected"] = True
+            return str(expected_target), diag
     except ShellLinkError as exc:
         diag["shllink_error"] = str(exc)
     except OSError as exc:
@@ -469,6 +559,7 @@ def _start_menu_lnk(env) -> str | None:
 
 def capture_snapshot(
     *,
+    expected_shortcut_target: str | None = None,
     _registry=_real_registry,
     _registry_subkeys=_real_registry_subkeys,
     _which=_real_which,
@@ -483,8 +574,10 @@ def capture_snapshot(
 
     ``_shortcut_target`` (legacy seam) takes a path and returns a target;
     ``_shortcut_resolver`` takes a path and returns ``(target, diagnostics)``.
-    The default resolver parses the ``.lnk`` deterministically first and only
-    then falls back to the PowerShell COM probe.
+    The default resolver parses the ``.lnk`` deterministically first (LinkInfo,
+    then positive LinkTargetIDList evidence against
+    ``expected_shortcut_target``), and only then falls back to the PowerShell
+    COM probe.
     """
     hkcu_env = _registry("HKCU", ENV_HKCU_SUBKEY) or {}
     hklm_env = _registry("HKLM", ENV_HKLM_SUBKEY) or {}
@@ -512,9 +605,12 @@ def capture_snapshot(
                 "com_stderr_tail": None,
                 "powershell_found": None,
                 "com_error": None,
+                "idlist_segments": None,
             }
         else:
-            shortcut_target, shortcut_probe = _resolve_shortcut_target(lnk)
+            shortcut_target, shortcut_probe = _resolve_shortcut_target(
+                lnk, expected_target=expected_shortcut_target
+            )
     else:
         shortcut_probe = {
             "method_used": "no_shortcut",
@@ -523,6 +619,7 @@ def capture_snapshot(
             "com_stderr_tail": None,
             "powershell_found": None,
             "com_error": None,
+            "idlist_segments": None,
         }
 
     return {
@@ -743,6 +840,37 @@ def write_audit(out_path: str, audit: dict) -> None:
         fh.write(json.dumps(audit, indent=2) + "\n")
 
 
+def _preserve_shortcut_evidence(snapshot: dict, command: str) -> None:
+    """Best-effort copy of an UNRESOLVED ``.lnk`` and its probe for the artifact.
+
+    CLI-layer only (never part of the pure comparison core). A failure to copy
+    is swallowed so it can never mask the original finding.
+    """
+    stage = os.environ.get("ZEALFIE_STAGE")
+    if not stage:
+        return
+    if not snapshot.get("start_menu_shortcut_exists"):
+        return
+    if snapshot.get("start_menu_shortcut_target"):
+        return
+    lnk = snapshot.get("start_menu_shortcut")
+    try:
+        outdir = Path(stage) / "setup-output" / "shortcut-evidence"
+        outdir.mkdir(parents=True, exist_ok=True)
+        if lnk and os.path.isfile(lnk):
+            shutil.copy2(lnk, outdir / "ZeAlfie.lnk")
+        note = {
+            "command": command,
+            "shortcut": lnk,
+            "probe": snapshot.get("shortcut_target_probe"),
+        }
+        (outdir / "shortcut-probe.json").write_text(
+            json.dumps(note, indent=2) + "\n", encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001 — evidence capture must never mask findings
+        return
+
+
 def _emit(audit: dict, label: str) -> int:
     print(f"[side-effect] {label}: {audit['status']}")
     for finding in audit.get("findings", []):
@@ -792,8 +920,11 @@ def main(argv: list[str] | None = None) -> int:
 
     baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
     baseline_snap = baseline.get("snapshot", baseline)
-    snapshot = capture_snapshot()
     install_root = str(args.install_root)
+    appenv_gui = ntpath.join(
+        install_root, "appenv", "Scripts", "zealfie-gui.exe"
+    )
+    snapshot = capture_snapshot(expected_shortcut_target=appenv_gui)
     # Enrich the captured snapshot with installer-relative facts the
     # pure comparison needs (assets + preserved private python).
     owned_ico = ntpath.join(install_root, "assets", "zealfie.ico")
@@ -809,6 +940,8 @@ def main(argv: list[str] | None = None) -> int:
         findings = verify_install_findings(
             baseline_snap, snapshot, install_root
         )
+        if not snapshot.get("start_menu_shortcut_target"):
+            _preserve_shortcut_evidence(snapshot, "verify-install")
         audit = _audit({"command": "verify-install", "findings": findings,
                         "install_root": install_root, "snapshot": snapshot})
         write_audit(args.out, audit)

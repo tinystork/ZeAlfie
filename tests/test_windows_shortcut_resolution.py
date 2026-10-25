@@ -42,6 +42,7 @@ def build_lnk(
     unicode: bool = False,
     with_id_list: bool = False,
     no_link_info: bool = False,
+    idlist_items: list[bytes] | None = None,
 ) -> bytes:
     """Build a minimal but valid MS-SHLLINK byte string."""
     header = bytearray(0x4C)
@@ -82,9 +83,48 @@ def build_lnk(
 
     out = bytearray(header)
     if with_id_list:
-        out += struct.pack("<H", 2) + b"\x00\x00"
+        items = b"".join(idlist_items or []) + b"\x00\x00"
+        out += struct.pack("<H", len(items)) + items
     out += body
     return bytes(out)
+
+
+def _raw_item(data: bytes) -> bytes:
+    """One ItemID with arbitrary payload (used for unknown/root items)."""
+    return struct.pack("<H", len(data) + 2) + data
+
+
+def _fs_item(indicator: int, name: str) -> bytes:
+    """A file-system ItemID (0x30-0x3F) with the fixed 12-byte header."""
+    data = bytearray([indicator, 0x00])
+    data += struct.pack("<I", 1234)      # FileSize
+    data += struct.pack("<I", 0)         # DOS timestamp
+    data += struct.pack("<H", 0x20)      # FileAttributeFlags
+    if indicator & 0x04:
+        data += name.encode("utf-16-le") + b"\x00\x00"
+    else:
+        data += name.encode("latin-1") + b"\x00"
+    return _raw_item(bytes(data))
+
+
+def build_idlist_only(items: list[bytes]) -> bytes:
+    """A valid .lnk whose ONLY target carrier is LinkTargetIDList."""
+    header = bytearray(0x4C)
+    struct.pack_into("<I", header, 0, 0x4C)
+    header[4:20] = _CLSID
+    struct.pack_into("<I", header, 0x14, 0x1)  # HasLinkTargetIDList only
+    idlist = b"".join(items) + b"\x00\x00"
+    return bytes(header) + struct.pack("<H", len(idlist)) + idlist
+
+
+def _launcher_idlist(exe: str = "zealfie-gui.exe") -> list[bytes]:
+    return [
+        _raw_item(b"\x1f\x00"),
+        _raw_item(b"\x2f\x00C:\\\x00"),
+        _fs_item(0x35, "appenv"),
+        _fs_item(0x35, "Scripts"),
+        _fs_item(0x36, exe),
+    ]
 
 
 def _write_lnk(path: Path, data: bytes) -> Path:
@@ -125,6 +165,102 @@ def test_link_without_local_target_returns_none() -> None:
 def test_malformed_lnk_raises_shell_link_error(data: bytes) -> None:
     with pytest.raises(sew.ShellLinkError):
         sew.parse_shllink_target(data)
+
+
+# ---------------------------------------------------------------------------
+# LinkTargetIDList positive evidence
+# ---------------------------------------------------------------------------
+
+def test_idlist_only_launcher_segments_resolve_via_shllink_idlist(
+    tmp_path: Path,
+) -> None:
+    data = build_idlist_only(_launcher_idlist())
+    assert sew.parse_shllink(data) == (
+        None,
+        ["appenv", "Scripts", "zealfie-gui.exe"],
+    )
+    path = _write_lnk(tmp_path / "ZeAlfie.lnk", data)
+    target, diag = sew._resolve_shortcut_target(
+        path, expected_target=_GUI, _com_probe=_diag_fail
+    )
+    assert target == _GUI
+    assert diag["method_used"] == "shllink_idlist"
+    assert diag["idlist_matched_expected"] is True
+    assert diag["idlist_segments"] == ["appenv", "Scripts", "zealfie-gui.exe"]
+    assert diag["com_rc"] is None  # COM never consulted
+
+    snapshot = {
+        "start_menu_shortcut_exists": True,
+        "start_menu_shortcut_target": target,
+        "shortcut_target_probe": diag,
+        "uninstall_hkcu": {"zealfie 0.1.0": {"display_name": "ZeAlfie 0.1.0"}},
+        "uninstall_hklm": {},
+    }
+    install_root = r"C:\Users\u\AppData\Local\Programs\ZeAlfie"
+    assert sew.verify_install_findings({}, snapshot, install_root) == []
+
+
+def test_idlist_only_different_exe_fails_closed(tmp_path: Path) -> None:
+    data = build_idlist_only(_launcher_idlist("cmd.exe"))
+    path = _write_lnk(tmp_path / "ZeAlfie.lnk", data)
+    target, diag = sew._resolve_shortcut_target(
+        path, expected_target=_GUI, _com_probe=_diag_fail
+    )
+    assert target is None
+    assert diag["method_used"] == "none"
+    assert diag["idlist_segments"][-1] == "cmd.exe"
+    snapshot = {
+        "start_menu_shortcut_exists": True,
+        "start_menu_shortcut_target": None,
+        "shortcut_target_probe": diag,
+        "uninstall_hkcu": {"zealfie 0.1.0": {"display_name": "ZeAlfie 0.1.0"}},
+        "uninstall_hklm": {},
+    }
+    findings = sew.verify_install_findings({}, snapshot, _GUI.rsplit("\\", 3)[0])
+    assert any("could not be resolved" in f and "cmd.exe" in f for f in findings)
+
+
+def test_idlist_unknown_items_only_fails_closed(tmp_path: Path) -> None:
+    data = build_idlist_only([_raw_item(b"\x1f\x00"), _raw_item(b"\x20\x00")])
+    path = _write_lnk(tmp_path / "ZeAlfie.lnk", data)
+    assert sew.parse_shllink(data) == (None, [])
+    target, diag = sew._resolve_shortcut_target(
+        path, expected_target=_GUI, _com_probe=_diag_fail
+    )
+    assert target is None
+    assert diag["idlist_segments"] == []
+    assert diag["method_used"] == "none"
+
+
+def test_truncated_or_overrunning_itemid_is_explicit(tmp_path: Path) -> None:
+    overrun = build_idlist_only([struct.pack("<H", 100) + b"x"])
+    with pytest.raises(sew.ShellLinkError, match="overruns"):
+        sew.parse_shllink(overrun)
+    path = _write_lnk(tmp_path / "overrun.lnk", overrun)
+    target, diag = sew._resolve_shortcut_target(
+        path, expected_target=_GUI, _com_probe=_diag_fail
+    )
+    assert target is None
+    assert "overruns" in diag["shllink_error"]
+
+    truncated_name = build_idlist_only([
+        _raw_item(b"\x36\x00" + b"\x00" * 10)  # < 12-byte fixed header
+    ])
+    with pytest.raises(sew.ShellLinkError, match="truncated file entry"):
+        sew.parse_shllink(truncated_name)
+
+
+def test_linkinfo_target_stays_authoritative_over_idlist(tmp_path: Path) -> None:
+    data = build_lnk(
+        _GUI, with_id_list=True, idlist_items=[_fs_item(0x36, "cmd.exe")]
+    )
+    path = _write_lnk(tmp_path / "ZeAlfie.lnk", data)
+    target, diag = sew._resolve_shortcut_target(
+        path, expected_target=_GUI, _com_probe=_diag_fail
+    )
+    assert target == _GUI
+    assert diag["method_used"] == "shllink_parser"
+    assert diag["idlist_segments"] == ["cmd.exe"]
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +388,83 @@ def test_correct_target_without_probe_key_is_clean() -> None:
     assert sew.verify_install_findings(
         {}, snapshot, r"C:\Users\u\AppData\Local\Programs\ZeAlfie"
     ) == []
+
+
+# ---------------------------------------------------------------------------
+# CLI-layer evidence preservation (best effort, never masks the finding)
+# ---------------------------------------------------------------------------
+
+def _base_snapshot(lnk: Path, target, probe) -> dict:
+    return {
+        "schema": 1,
+        "user_path": [],
+        "machine_path": [],
+        "py_launcher_path": None,
+        "py_0p": None,
+        "py_association_progid": None,
+        "pythoncore_3_13_hkcu_install_path": None,
+        "pythoncore_3_13_hklm_install_path": None,
+        "uninstall_hkcu": {"zealfie 0.1.0": {"display_name": "ZeAlfie 0.1.0"}},
+        "uninstall_hklm": {},
+        "start_menu_shortcut": str(lnk),
+        "start_menu_shortcut_exists": True,
+        "start_menu_shortcut_target": target,
+        "shortcut_target_probe": probe,
+        "runtime_exists": False,
+        "zealfie_appdata_exists": False,
+    }
+
+
+def test_cli_preserves_unresolved_shortcut_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lnk = tmp_path / "ZeAlfie.lnk"
+    lnk.write_bytes(build_idlist_only(_launcher_idlist("cmd.exe")))
+    probe = {
+        "method_used": "none",
+        "shllink_error": "no local target path in .lnk",
+        "com_rc": 1,
+        "com_stderr_tail": "TimeoutExpired",
+        "powershell_found": True,
+        "com_error": "TimeoutExpired",
+        "idlist_segments": ["appenv", "Scripts", "cmd.exe"],
+    }
+    snap = _base_snapshot(lnk, None, probe)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"snapshot": snap}), encoding="utf-8")
+    monkeypatch.setenv("ZEALFIE_STAGE", str(tmp_path / "stage"))
+    monkeypatch.setattr(sew, "capture_snapshot", lambda **kw: dict(snap))
+
+    out = tmp_path / "audit.json"
+    rc = sew.main(
+        [
+            "verify-install",
+            "--baseline", str(baseline),
+            "--install-root", r"C:\Programs\ZeAlfie",
+            "--out", str(out),
+        ]
+    )
+    assert rc == 1
+    evidence = tmp_path / "stage" / "setup-output" / "shortcut-evidence"
+    assert (evidence / "ZeAlfie.lnk").read_bytes() == lnk.read_bytes()
+    note = json.loads((evidence / "shortcut-probe.json").read_text())
+    assert note["command"] == "verify-install"
+    assert note["probe"]["com_rc"] == 1
+    assert note["probe"]["idlist_segments"][-1] == "cmd.exe"
+
+
+def test_cli_evidence_copy_is_best_effort(tmp_path: Path, monkeypatch) -> None:
+    """A copy failure must not raise or change the audit outcome."""
+    snapshot = {
+        "start_menu_shortcut_exists": True,
+        "start_menu_shortcut_target": None,
+        "start_menu_shortcut": str(tmp_path / "does-not-exist.lnk"),
+        "shortcut_target_probe": {"method_used": "none"},
+    }
+    monkeypatch.setenv("ZEALFIE_STAGE", str(tmp_path / "stage"))
+    sew._preserve_shortcut_evidence(snapshot, "verify-install")
+    note = json.loads(
+        (tmp_path / "stage" / "setup-output" / "shortcut-evidence"
+         / "shortcut-probe.json").read_text()
+    )
+    assert note["probe"]["method_used"] == "none"
