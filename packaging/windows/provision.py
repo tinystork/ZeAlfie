@@ -152,6 +152,8 @@ class ReproducibilityRecord:
     upstream_repo: str
     release_tag: str
     target_triple: str
+    windows_arch: str
+    pe_machine: str
     installer_filename: str
     installer_url: str
     sha256: str
@@ -171,8 +173,8 @@ class ReproducibilityRecord:
 
 
 def default_record_path() -> Path:
-    """Path of ``reproducibility.toml`` next to this module."""
-    return Path(__file__).resolve().parent / "reproducibility.toml"
+    """Path of the backward-compatible default x64 reproducibility record."""
+    return Path(__file__).resolve().parent / "reproducibility.x64.toml"
 
 
 def load_record(path: str | os.PathLike[str] | None = None) -> ReproducibilityRecord:
@@ -255,6 +257,24 @@ def load_record(path: str | os.PathLike[str] | None = None) -> ReproducibilityRe
             "reproducibility record target_triple has an invalid shape: "
             f"{target_triple!r}"
         )
+    windows_arch = _text(cpython, "windows_arch")
+    pe_machine = _text(cpython, "pe_machine")
+    expected_target = {
+        "x64": ("x86_64-pc-windows-msvc", "AMD64"),
+        "arm64": ("aarch64-pc-windows-msvc", "ARM64"),
+    }.get(windows_arch)
+    if expected_target is None:
+        raise RecordError(
+            "reproducibility record windows_arch must be 'x64' or 'arm64', "
+            f"got {windows_arch!r}"
+        )
+    if (target_triple, pe_machine) != expected_target:
+        raise RecordError(
+            "reproducibility record architecture fields are inconsistent: "
+            f"windows_arch={windows_arch!r} requires target_triple="
+            f"{expected_target[0]!r} and pe_machine={expected_target[1]!r}, "
+            f"got {target_triple!r}/{pe_machine!r}"
+        )
 
     filename = _text(cpython, "installer_filename")
     if not _PBS_FILENAME_RE.match(filename):
@@ -323,6 +343,8 @@ def load_record(path: str | os.PathLike[str] | None = None) -> ReproducibilityRe
         upstream_repo=repo,
         release_tag=release_tag,
         target_triple=target_triple,
+        windows_arch=windows_arch,
+        pe_machine=pe_machine,
         installer_filename=filename,
         installer_url=url,
         sha256=sha256,

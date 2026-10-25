@@ -58,6 +58,7 @@ from pathlib import Path
 # sys.path[0] is this script's directory ({app}\assets\bootstrap when run
 # from the installed copy), so the pure provisioning module is importable.
 import provision  # type: ignore[import-not-found]  # same-directory module
+import payload_arch_audit  # type: ignore[import-not-found]  # same-directory module
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
@@ -165,6 +166,20 @@ def _smoke_appenv_complete(install_root: Path) -> None:
          "zealfie-gui.exe all present under appenv\\Scripts")
 
 
+def _smoke_native_payload_architecture(install_root: Path, record) -> None:
+    """Prove private Python + appenv are the committed native architecture.
+
+    The Inno Setup loader/uninstaller is intentionally not part of the claim:
+    Inno 6.7.3 itself is x86, including on Windows ARM64.
+    """
+    result = payload_arch_audit.audit_payload(install_root, record.pe_machine)
+    _log(
+        f"[smoke] native payload PE audit PASS: expected={record.pe_machine} "
+        f"images={result['images_checked']} counts={result['machine_counts']} "
+        "(Inno Setup loader explicitly out of scope)"
+    )
+
+
 def _smoke_self_provenance(install_root: Path, record) -> None:
     """Assert the RUNNING interpreter is the installed appenv on the
     installer's private CPython (``{app}\\python``)."""
@@ -235,6 +250,20 @@ def _smoke_cli(install_root: Path) -> None:
             )
         head = "\n".join(proc.stdout.splitlines()[:3]) or "(empty stdout)"
         _log(f"[smoke] zealfie.exe {label} PASS (rc=0): {head}")
+    # Bounded Windows self-update surface smoke.  A real replacement/restart
+    # cannot be exercised before an RC wheel exists remotely; this proves the
+    # installed architecture exposes the helper command without mutating it.
+    proc = _run(
+        [str(zealfie_exe), "self-update", "--help"],
+        env=_utf8_child_env(),
+        capture_output=True, text=True, encoding="utf-8", errors="strict",
+    )
+    if proc.returncode != 0:
+        raise SmokeError(
+            "installed Windows self-update command smoke failed "
+            f"rc={proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+        )
+    _log("[smoke] zealfie.exe self-update --help PASS (mutation-free surface)")
 
 
 def _smoke_gui(install_root: Path) -> None:
@@ -359,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _smoke_private_python(install_root, record)
         _smoke_appenv_complete(install_root)
+        _smoke_native_payload_architecture(install_root, record)
         _smoke_self_provenance(install_root, record)
         _smoke_import_location(install_root)
         _smoke_cli(install_root)

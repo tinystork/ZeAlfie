@@ -3,8 +3,8 @@
 ZeAlfie's native Windows installer (ZA-WIN-BOOT-02/03B) embeds a private
 CPython 3.13.15 runtime — the **python-build-standalone** (astral-sh)
 `install_only` tarball of the `20260901` release
-(`cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz`,
-SHA-256 pinned in `../reproducibility.toml`). Redistribution therefore
+(`cpython-3.13.15+20260901-{x86_64,aarch64}-pc-windows-msvc-install_only.tar.gz`,
+SHA-256 pinned in the selected `../reproducibility.<arch>.toml`). Redistribution therefore
 carries license material, which this directory stages under
 `{app}\assets\licenses` inside the installed application.
 
@@ -45,7 +45,7 @@ staging for:
   the redistributed runtime; it is not shipped inside the artifact.
 - Release provenance: date-tagged GitHub releases (`20260901`), each
   asset exposing a SHA-256 digest recorded in
-  `packaging/windows/reproducibility.toml`; the Setup is compiled only
+  the selected `packaging/windows/reproducibility.<arch>.toml`; Setup is compiled only
   after that digest is verified (fail closed) by the CI acquire step.
 
 For full upstream licensing details see:

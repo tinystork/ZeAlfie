@@ -101,11 +101,20 @@ class TemporaryVenv:
         if no_deps:
             args.append("--no-deps")
 
+        # The integration harness may itself be launched with PYTHONPATH=src
+        # to select an uninstalled candidate worktree.  Never leak that path
+        # into the child venv's pip: pip would mistake the source tree for an
+        # already-installed distribution and leave only metadata/no package in
+        # the isolated environment.
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+
         return subprocess.run(
             args,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
             **technical_subprocess_platform_kwargs(),
         )
 

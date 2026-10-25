@@ -1,0 +1,62 @@
+# ZeAlfie Windows standalone bootstrap — reproducibility record
+# (ZA-WIN-BOOT-01; substrate replaced in ZA-WIN-BOOT-03B).
+#
+# Substrate: python-build-standalone (astral-sh) "install_only" tarball —
+# a plain, relocatable CPython directory tree (python.exe + pythonw.exe +
+# full stdlib + bundled pip) with NO installer, NO Burn/MSI, NO registry
+# provider state.  It replaces the python.org python-3.13.15-amd64.exe
+# per-user installer, whose Burn MajorUpgrade semantics attached the
+# private CPython to the host's same-minor python.org install (human
+# witness, ZA-WIN-BOOT-03 — see docs/windows-python-substrate.md).
+#
+# Pinned at implementation time (2026-09-03).  The SHA-256 below is REAL:
+# it was computed on a Linux host from the official GitHub release asset
+# (https://github.com/astral-sh/python-build-standalone/releases/tag/20260901).
+# It is never fabricated and never guessed.
+#
+# Provisioning and the CI build FAIL CLOSED on any mismatch between this
+# record and the artifact actually downloaded: the archive is verified
+# (SHA-256) and extracted at CI BUILD time by the driver python (stdlib
+# tarfile); the END-USER Setup embeds the already-extracted plain files
+# under {app}\python.  The end-user machine never needs tar, PowerShell
+# archive extraction, 7-Zip, Python, or network access to install.
+
+[zealfie]
+# ZeAlfie version/revision whose wheel this record bootstraps.
+version = "0.1.4rc1"
+# Immutable ZeAlfie stable payload commit (the accepted catalog feature merge
+# commit 9f80d22 immediately preceding this provenance-only closure commit).
+# The final CI artifact provenance is the workflow's actual GITHUB_SHA at
+# build time, not this value.
+revision = "787226e8c06807f03c09806f2370500d3baa74bc"
+
+[cpython]
+# Exact pinned private runtime interpreter: python-build-standalone
+# (astral-sh) aarch64-pc-windows-msvc install_only tarball of CPython
+# 3.13.15 built from the 20260901 release (full normal CPython: python.exe
+# AND pythonw.exe, Lib/ stdlib, bundled pip — python.exe -m pip / venv
+# work out of the box; VC++ runtime DLLs vcruntime140.dll(+_1) are
+# bundled application-local, so NO machine/user-wide VC++ Redistributable
+# is required).
+version = "3.13.15"
+substrate = "python-build-standalone"
+upstream_repo = "astral-sh/python-build-standalone"
+release_tag = "20260901"
+target_triple = "aarch64-pc-windows-msvc"
+windows_arch = "arm64"
+pe_machine = "ARM64"
+installer_filename = "cpython-3.13.15+20260901-aarch64-pc-windows-msvc-install_only.tar.gz"
+installer_url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-pc-windows-msvc-install_only.tar.gz"
+# sha256 of the tarball above (47 042 104 bytes) computed on a Linux host
+# on 2026-09-03 from the official GitHub release asset; verified by
+# provisioning and by the CI acquire step BEFORE extraction.
+sha256 = "ce87247378f43f88e0202a0fa6d3cdb5f5fb246a3bc61b2fb604bd49b7862508"
+size = 43801216
+
+[install]
+# Per-user, silent, non-admin (Inno PrivilegesRequired=lowest).  There is
+# no per-installer option list anymore: the substrate is extracted plain
+# files — nothing to pass, nothing to register, no
+# PythonCore / Apps&Features / PATH / launcher / association state.
+per_user = true
+silent = true

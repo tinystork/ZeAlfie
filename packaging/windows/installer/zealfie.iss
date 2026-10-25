@@ -1,8 +1,8 @@
 ; ============================================================================
 ; ZeAlfie — native Windows installer (ZA-WIN-BOOT-02; substrate ZA-WIN-BOOT-03B)
 ;
-; Produces ZeAlfie-Setup-<version>-dev.exe: a per-user, non-admin, fully
-; OFFLINE installer that turns a normal Windows x64 machine into the proven
+; Produces an architecture-labelled ZeAlfie Windows installer: a per-user,
+; non-admin, fully OFFLINE installer that turns a compatible Windows machine into the proven
 ; ZA-WIN-BOOT-01 layout WITHOUT the user installing Python/venv/pip or
 ; touching a terminal:
 ;
@@ -31,7 +31,7 @@
 ; contacted on the user machine, and a repair/reinstall is offline too.
 ;
 ; Pin coupling: the substrate pin lives in
-; packaging/windows/reproducibility.toml (bundled verbatim under
+; the selected packaging/windows/reproducibility.<arch>.toml (bundled under
 ; {app}\assets\bootstrap) and is verified by the CI acquire step BEFORE the
 ; files are embedded; the Inno toolchain version MUST equal
 ; packaging/windows/installer/innosetup.toml — enforced by hermetic tests
@@ -82,11 +82,32 @@
 ; {app} + {localappdata}\zealfie is touched.
 ; ============================================================================
 
-#ifndef ZeAlfieVersion
-  ; Numeric marketing/bundle version.  Windows VersionInfoVersion/AppVersion
-  ; require a numeric X.Y.Z (see VersionInfoVersion={#ZeAlfieVersion}.0 below);
-  ; the wheel the installer embeds is the stable PEP 440 version ``0.1.3``.
-  #define ZeAlfieVersion "0.1.3"
+#ifndef ZeAlfieDisplayVersion
+  #define ZeAlfieDisplayVersion "0.1.4-rc1"
+#endif
+#ifndef ZeAlfieFileVersion
+  ; Windows file-version resources stay strictly numeric for the RC.
+  #define ZeAlfieFileVersion "0.1.4.0"
+#endif
+#ifndef InstallerArchitecture
+  ; Strict Inno architecture expression: x64os or arm64 only.
+  #define InstallerArchitecture "x64os"
+#endif
+#ifndef ArtifactArchitecture
+  ; Human/artifact spelling: x64 or arm64.
+  #define ArtifactArchitecture "x64"
+#endif
+#if (InstallerArchitecture != "x64os") && (InstallerArchitecture != "arm64")
+  #error "InstallerArchitecture must be x64os or arm64"
+#endif
+#if (ArtifactArchitecture != "x64") && (ArtifactArchitecture != "arm64")
+  #error "ArtifactArchitecture must be x64 or arm64"
+#endif
+#if (InstallerArchitecture == "x64os") && (ArtifactArchitecture != "x64")
+  #error "x64os installer must use ArtifactArchitecture=x64"
+#endif
+#if (InstallerArchitecture == "arm64") && (ArtifactArchitecture != "arm64")
+  #error "arm64 installer must use ArtifactArchitecture=arm64"
 #endif
 
 ; ---- Build inputs (absolute paths supplied by the CI workflow via /D=) ----
@@ -109,32 +130,36 @@
 #ifndef OutputDir
   #error "OutputDir not defined - pass /DOutputDir=<artifact dir> (see docs/windows-installer.md)"
 #endif
+#ifndef RecordFile
+  #error "RecordFile not defined - pass /DRecordFile=<selected reproducibility profile>"
+#endif
 
 [Setup]
 ; Stable AppId — a fixed GUID, NEVER regenerated (changing it would orphan
 ; the previous install's uninstall entry and Start Menu identity).
 AppId={{27D66916-4144-491B-AEC9-4573C8E81D07}
 AppName=ZeAlfie
-AppVersion={#ZeAlfieVersion}
-AppVerName=ZeAlfie {#ZeAlfieVersion}
+AppVersion={#ZeAlfieDisplayVersion}
+AppVerName=ZeAlfie {#ZeAlfieDisplayVersion}
 AppPublisher=ZeSoftware
-VersionInfoVersion={#ZeAlfieVersion}.0
+VersionInfoVersion={#ZeAlfieFileVersion}
 VersionInfoCompany=ZeSoftware
-VersionInfoDescription=ZeAlfie {#ZeAlfieVersion} (offline per-user install)
+VersionInfoDescription=ZeAlfie {#ZeAlfieDisplayVersion} (offline per-user install)
 VersionInfoProductName=ZeAlfie
-VersionInfoProductVersion={#ZeAlfieVersion}
+VersionInfoProductVersion={#ZeAlfieDisplayVersion}
 DefaultDirName={localappdata}\Programs\ZeAlfie
 DisableProgramGroupPage=yes
 ; Per-user, non-admin, always: no elevation, no /ALLUSERS override.
 PrivilegesRequired=lowest
-; Windows x64 ONLY (strict; x64os excludes ARM64 emulation hosts).
-ArchitecturesAllowed=x64os
-ArchitecturesInstallIn64BitMode=x64os
-OutputBaseFilename=ZeAlfie-Setup-{#ZeAlfieVersion}-dev
+; Strict payload architecture.  Inno Setup itself remains x86 and may run
+; under Windows ARM emulation; the installed Python/Qt payload is audited.
+ArchitecturesAllowed={#InstallerArchitecture}
+ArchitecturesInstallIn64BitMode={#InstallerArchitecture}
+OutputBaseFilename=ZeAlfie-Setup-{#ZeAlfieDisplayVersion}-windows-{#ArtifactArchitecture}
 OutputDir={#OutputDir}
 SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\assets\zealfie.ico
-UninstallDisplayName=ZeAlfie {#ZeAlfieVersion}
+UninstallDisplayName=ZeAlfie {#ZeAlfieDisplayVersion}
 ; The payload is dominated by already-compressed wheels; per-file deflate
 ; keeps compile time and memory sane without meaningful size loss.
 Compression=zip
@@ -164,7 +189,8 @@ Source: "{#BootstrapDir}\provision.py"; DestDir: "{app}\assets\bootstrap"; Flags
 Source: "{#BootstrapDir}\provision_windows.py"; DestDir: "{app}\assets\bootstrap"; Flags: ignoreversion
 Source: "{#BootstrapDir}\installer_smoke.py"; DestDir: "{app}\assets\bootstrap"; Flags: ignoreversion
 Source: "{#BootstrapDir}\gui_smoke_offscreen.py"; DestDir: "{app}\assets\bootstrap"; Flags: ignoreversion
-Source: "{#BootstrapDir}\reproducibility.toml"; DestDir: "{app}\assets\bootstrap"; Flags: ignoreversion
+Source: "{#BootstrapDir}\payload_arch_audit.py"; DestDir: "{app}\assets\bootstrap"; Flags: ignoreversion
+Source: "{#RecordFile}"; DestDir: "{app}\assets\bootstrap"; DestName: "reproducibility.toml"; Flags: ignoreversion
 ; Redistributed-runtime license material (PSF CPython license, verbatim
 ; from the verified archive, + provenance README).
 Source: "{#BootstrapDir}\licenses\*"; DestDir: "{app}\assets\licenses"; Flags: ignoreversion

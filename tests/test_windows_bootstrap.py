@@ -35,7 +35,8 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PROVISION_FILE = _REPO_ROOT / "packaging" / "windows" / "provision.py"
-_RECORD_FILE = _REPO_ROOT / "packaging" / "windows" / "reproducibility.toml"
+_RECORD_FILE = _REPO_ROOT / "packaging" / "windows" / "reproducibility.x64.toml"
+_ARM64_RECORD_FILE = _REPO_ROOT / "packaging" / "windows" / "reproducibility.arm64.toml"
 
 
 def _load_provision():
@@ -72,13 +73,15 @@ def test_record_file_exists_and_default_path_points_to_it() -> None:
 
 def test_record_loads_and_pins_the_documented_values() -> None:
     record = provision.load_record(_RECORD_FILE)
-    assert record.zealfie_version == "0.1.3"
-    assert record.zealfie_revision == "9f80d2228e8c1074c9ee3d3b605de3a0f2816ba3"
+    assert record.zealfie_version == "0.1.4rc1"
+    assert len(record.zealfie_revision) == 40
     assert record.cpython_version == "3.13.15"
     assert record.substrate == "python-build-standalone"
     assert record.upstream_repo == "astral-sh/python-build-standalone"
     assert record.release_tag == "20260901"
     assert record.target_triple == "x86_64-pc-windows-msvc"
+    assert record.windows_arch == "x64"
+    assert record.pe_machine == "AMD64"
     assert record.installer_filename == (
         "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-"
         "install_only.tar.gz"
@@ -98,6 +101,18 @@ def test_record_loads_and_pins_the_documented_values() -> None:
     assert record.silent is True
 
 
+def test_arm64_record_loads_and_is_architecture_consistent() -> None:
+    record = provision.load_record(_ARM64_RECORD_FILE)
+    assert record.zealfie_version == "0.1.4rc1"
+    assert record.target_triple == "aarch64-pc-windows-msvc"
+    assert record.windows_arch == "arm64"
+    assert record.pe_machine == "ARM64"
+    assert record.size == 43801216
+    assert record.sha256 == (
+        "ce87247378f43f88e0202a0fa6d3cdb5f5fb246a3bc61b2fb604bd49b7862508"
+    )
+
+
 def _write_record(tmp_path: Path, **overrides) -> Path:
     base = """
 [zealfie]
@@ -110,6 +125,8 @@ substrate = "python-build-standalone"
 upstream_repo = "astral-sh/python-build-standalone"
 release_tag = "20260901"
 target_triple = "x86_64-pc-windows-msvc"
+windows_arch = "x64"
+pe_machine = "AMD64"
 installer_filename = "cpython-3.13.15+20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
 installer_url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-pc-windows-msvc-install_only.tar.gz"
 sha256 = "9bcc038a0bf180612ed56dec93d4977d035e80b8d9320ef51a38c287baf134b7"
@@ -158,6 +175,16 @@ def test_record_rejects_bad_sha256(tmp_path) -> None:
 def test_record_rejects_short_sha256(tmp_path) -> None:
     path = _write_record(tmp_path, **{"cpython.sha256": "a" * 63})
     with pytest.raises(provision.RecordError, match="sha256"):
+        provision.load_record(path)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (("cpython.windows_arch", "arm64"), ("cpython.pe_machine", "ARM64")),
+)
+def test_record_rejects_cross_architecture_metadata(tmp_path, field, value) -> None:
+    path = _write_record(tmp_path, **{field: value})
+    with pytest.raises(provision.RecordError, match="architecture fields"):
         provision.load_record(path)
 
 

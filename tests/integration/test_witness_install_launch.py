@@ -103,7 +103,7 @@ def test_full_witness_cycle(
         ])
         assert r3.returncode == 0, f"importlib.metadata check failed:\n{r3.stderr}"
         lines = r3.stdout.strip().splitlines()
-        assert lines == ["0.0.1", "0.0.6"], f"Unexpected versions: {lines}"
+        assert lines == ["0.0.1", "0.1.4rc1"], f"Unexpected versions: {lines}"
 
         # 3b. Smoke-test a stdlib-only ZeAlfie import surface from the wheel
         #     installed with --no-deps.  Do not import component metadata/model
@@ -124,7 +124,7 @@ def test_full_witness_cycle(
         ], extra_env={"PYTHONPATH": ""})
         assert r3b.returncode == 0, f"ZeAlfie smoke import failed:\n{r3b.stderr}"
         smoke_lines = r3b.stdout.strip().splitlines()
-        assert smoke_lines[0:2] == ["0.0.6", "LaunchPlan"]
+        assert smoke_lines[0:2] == ["0.1.4rc1", "LaunchPlan"]
         assert Path(smoke_lines[2]).resolve().is_relative_to(
             Path(smoke_lines[3]).resolve()
         )

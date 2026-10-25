@@ -2,7 +2,7 @@
 
 Status: **IMPLEMENTED in ZA-WIN-BOOT-03B** (committed on
 `feature/windows-standalone-bootstrap`).  The python-build-standalone
-substrate below is the SHIPPED pin: `packaging/windows/reproducibility.toml`
+substrate below is the SHIPPED pin: `packaging/windows/reproducibility.x64.toml`
 now records it (filename/URL/SHA-256/size), `provision.py`/
 `provision_windows.py` verify + extract it at CI build time, the Inno
 installer embeds the extracted files under `{app}\python`, the side-effect
@@ -13,7 +13,7 @@ now implemented.  The proof of the isolation claim is the Windows CI
 witness (clean + hostile) that runs against the shipped installer.
 
 > Replaces the substrate conclusion previously recorded in
-> `packaging/windows/reproducibility.toml` ("official python.org full
+> `packaging/windows/reproducibility.x64.toml` ("official python.org full
 > installer — NOT the embeddable zip"). That conclusion is superseded by a
 > real human-witness isolation defect described below.
 
@@ -303,7 +303,7 @@ kept as the historical plan.
 
 **Changes expected:**
 
-- `packaging/windows/reproducibility.toml` — replace the `[cpython]`
+- `packaging/windows/reproducibility.x64.toml` — replace the `[cpython]`
   installer URL/`installer_filename`/SHA-256 with the pinned
   `install_only.tar.gz` (URL, filename, sha256, size); note the substrate
   type changed from "python.org installer" to "python-build-standalone".
@@ -359,7 +359,7 @@ catalog; managed child-runtime design; Inno toolchain pin.
 ## 14. Risks / open questions
 
 - **Exact pin:** SHIPPED — release tag `20260901` + asset SHA-256 recorded
-  in `packaging/windows/reproducibility.toml` and verified live on Linux
+  in `packaging/windows/reproducibility.x64.toml` and verified live on Linux
   (see the implementation record at the end of this document).
 - **pip bundling:** RESOLVED — the chosen `install_only` tarball bundles
   pip (`Lib/site-packages/pip` AND `ensurepip` with the `pip-26.2.1`
@@ -409,7 +409,7 @@ also meeting G5–G7 (full capability) without fragile hacks.
 
 The human approved the python-build-standalone substrate; ZA-WIN-BOOT-03B
 implemented it.  Exact shipped pin (also in
-`packaging/windows/reproducibility.toml`, verified LIVE on a Linux host on
+`packaging/windows/reproducibility.x64.toml`, verified LIVE on a Linux host on
 2026-09-03 from the official GitHub release asset):
 
 ```

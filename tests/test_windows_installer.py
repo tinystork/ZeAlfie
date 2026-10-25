@@ -73,8 +73,10 @@ def _load_modules():
 
 provision, wheelhouse = _load_modules()
 
-_RECORD_FILE = _WINDOWS_PKG / "reproducibility.toml"
-_LOCK_FILE = _WINDOWS_PKG / "wheelhouse.lock.toml"
+_RECORD_FILE = _WINDOWS_PKG / "reproducibility.x64.toml"
+_ARM64_RECORD_FILE = _WINDOWS_PKG / "reproducibility.arm64.toml"
+_LOCK_FILE = _WINDOWS_PKG / "wheelhouse.x64.lock.toml"
+_ARM64_LOCK_FILE = _WINDOWS_PKG / "wheelhouse.arm64.lock.toml"
 _ISS_FILE = _WINDOWS_PKG / "installer" / "zealfie.iss"
 _INNO_FILE = _WINDOWS_PKG / "installer" / "innosetup.toml"
 
@@ -180,12 +182,12 @@ def test_lock_file_exists_next_to_module() -> None:
 
 def test_real_lock_loads_and_metadata_is_consistent() -> None:
     lock = wheelhouse.load_lock(_LOCK_FILE)
-    assert lock.zealfie_version == "0.1.3"
+    assert lock.zealfie_version == "0.1.4rc1"
     assert lock.platform_tag == "win_amd64"
     assert lock.python_tag == "cp313"
     assert lock.cpython_version == "3.13.15"
     assert len(lock.cpython_installer_sha256) == 64
-    assert lock.zealfie_wheel.filename == "zealfie-0.1.3-py3-none-any.whl"
+    assert lock.zealfie_wheel.filename == "zealfie-0.1.4rc1-py3-none-any.whl"
     assert lock.zealfie_wheel.sha256 is None  # local-build, never pinned
     assert len(lock.wheels) >= 8
     names = {e.name for e in lock.wheels}
@@ -203,7 +205,33 @@ def test_real_lock_loads_and_metadata_is_consistent() -> None:
     assert lock.zealfie_wheel.filename in wheelhouse.expected_filenames(lock)
 
 
-def test_real_lock_cpython_metadata_decoupled_from_substrate_pin() -> None:
+def test_arm64_lock_is_separate_complete_and_native() -> None:
+    lock = wheelhouse.load_lock(_ARM64_LOCK_FILE)
+    record = provision.load_record(_ARM64_RECORD_FILE)
+    assert lock.zealfie_version == "0.1.4rc1"
+    assert lock.platform_tag == "win_arm64"
+    assert lock.zealfie_wheel.filename == "zealfie-0.1.4rc1-py3-none-any.whl"
+    assert lock.cpython_installer_sha256 == record.sha256
+    assert record.windows_arch == "arm64"
+    assert record.pe_machine == "ARM64"
+    native = [e for e in lock.wheels if wheelhouse.wheel_platform_tag(e.filename) != "any"]
+    assert {wheelhouse.wheel_platform_tag(e.filename) for e in native} == {"win_arm64"}
+    assert {e.name for e in native} == {
+        "PySide6", "PySide6-Addons", "PySide6-Essentials", "shiboken6",
+    }
+
+
+def test_lock_rejects_cross_architecture_native_wheel(tmp_path: Path) -> None:
+    path = _mini_lock(
+        tmp_path,
+        filename="native-1.0-cp313-cp313-win_arm64.whl",
+        name="native",
+    )
+    with pytest.raises(wheelhouse.LockError, match="does not match lock target"):
+        wheelhouse.load_lock(path)
+
+
+def test_real_lock_cpython_metadata_matches_substrate_pin() -> None:
     """(ZA-WIN-BOOT-03B) The wheelhouse lock's informational cpython fields
     describe the python.org-installer era in which the wheelhouse was
     resolved; reproducibility.toml now pins the python-build-standalone
@@ -213,9 +241,9 @@ def test_real_lock_cpython_metadata_decoupled_from_substrate_pin() -> None:
     lock = wheelhouse.load_lock(_LOCK_FILE)
     assert lock.cpython_version == record["cpython"]["version"]
     assert re.fullmatch(r"[0-9a-f]{64}", lock.cpython_installer_sha256)
-    assert lock.cpython_installer_sha256 == _CPYTHON_SHA  # frozen historical
+    assert lock.cpython_installer_sha256 == _PBS_SHA
     assert record["cpython"]["sha256"] == _PBS_SHA  # standalone archive pin
-    assert lock.cpython_installer_sha256 != record["cpython"]["sha256"]
+    assert lock.cpython_installer_sha256 == record["cpython"]["sha256"]
     # lock requirements mirror the zealfie wheel's runtime dependency list
     # (pyproject.toml [project].dependencies)
     assert set(lock.requirements) == {
@@ -293,15 +321,15 @@ def test_parse_wheel_filename_handles_dashed_distributions() -> None:
         wheelhouse.parse_wheel_filename("not-a-wheel.txt")
 
 
-def test_zealfie_wheel_regex_accepts_stable_and_beta() -> None:
+def test_zealfie_wheel_regex_accepts_stable_beta_and_rc() -> None:
     assert wheelhouse._ZEALFIE_WHEEL_RE.match("zealfie-0.1.2-py3-none-any.whl")
     assert wheelhouse._ZEALFIE_WHEEL_RE.match("zealfie-0.1.3b1-py3-none-any.whl")
+    assert wheelhouse._ZEALFIE_WHEEL_RE.match("zealfie-0.1.4rc1-py3-none-any.whl")
 
 
-def test_zealfie_wheel_regex_rejects_alpha_rc_malformed_beta() -> None:
+def test_zealfie_wheel_regex_rejects_alpha_and_malformed_prerelease() -> None:
     for bad in (
         "zealfie-0.1.3a1-py3-none-any.whl",        # alpha
-        "zealfie-0.1.3rc1-py3-none-any.whl",       # release candidate
         "zealfie-0.1.3-beta.1-py3-none-any.whl",   # non-normalized beta
         "zealfie-0.1.3b-py3-none-any.whl",         # beta without number
         "zealfie-0.1.3b1-py3-none-win_amd64.whl",  # wrong platform tag
@@ -508,8 +536,8 @@ def test_iss_posture_no_installer_properties_remain() -> None:
     assert "AssociateFiles" not in iss
     assert "Shortcuts=0" not in iss
     assert "PrivilegesRequired=lowest" in iss
-    assert "ArchitecturesAllowed=x64os" in iss
-    assert "ArchitecturesInstallIn64BitMode=x64os" in iss
+    assert "ArchitecturesAllowed={#InstallerArchitecture}" in iss
+    assert "ArchitecturesInstallIn64BitMode={#InstallerArchitecture}" in iss
     # default per-user dir
     assert "DefaultDirName={localappdata}\\Programs\\ZeAlfie" in iss
     # per-user only, no /ALLUSERS path
@@ -616,7 +644,7 @@ def test_iss_success_path_preserves_layout_and_gates() -> None:
                   "{app}\\appenv", "RequirePrivatePythonFiles",
                   "{app}\\python\\python.exe",
                   "RequireAppenvComplete", "PrivilegesRequired=lowest",
-                  "ArchitecturesAllowed=x64os", "zealfie.ico",
+                  "ArchitecturesAllowed={#InstallerArchitecture}", "zealfie.ico",
                   "{autoprograms}", "provision_windows.py", "licenses"):
         assert token in iss, f"installer contract token missing: {token}"
     for launcher in ("python.exe", "pythonw.exe", "zealfie.exe",
@@ -705,7 +733,8 @@ def test_iss_pythondir_define_is_a_plain_build_input() -> None:
         if line.lstrip().startswith("#define"):
             assert "{#" not in line, f"nested ISPP macro in: {line}"
     assert "#ifndef PythonDir" in iss
-    assert "#define ZeAlfieVersion" in iss
+    assert "#define ZeAlfieDisplayVersion" in iss
+    assert "#define ZeAlfieFileVersion" in iss
     assert "CpythonInstallerName" not in iss
     assert "ZeAlfieCpythonVersion" not in iss
     assert "CpythonExeName" not in iss

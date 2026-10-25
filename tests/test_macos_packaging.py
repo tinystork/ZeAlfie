@@ -1090,14 +1090,22 @@ def test_build_app_refuses_on_non_darwin() -> None:
     assert "must run on macOS" in proc.stderr
 
 
-def test_windows_packaging_untouched() -> None:
-    """The mission must not alter the Windows packaging surface."""
-    proc = subprocess.run(
-        ["git", "status", "--porcelain", "--", "packaging/windows"],
-        cwd=_REPO_ROOT, capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 0
-    assert proc.stdout.strip() == ""
+def test_macos_packaging_does_not_import_windows_packaging() -> None:
+    """Timeless isolation invariant between the two packaging engines.
+
+    The historical test asserted that ``packaging/windows`` had no git diff,
+    which was a one-mission scope guard and made every later authorised Windows
+    packaging change fail the full product suite.  Keep the actual invariant:
+    macOS packaging must not import or execute the Windows implementation.
+    """
+    for path in (
+        _MACOS_PKG / "macpack.py",
+        _MACOS_PKG / "build_app.py",
+        _MACOS_PKG / "wheelhouse.py",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert "packaging.windows" not in text
+        assert "provision_windows" not in text
 
 
 # ---------------------------------------------------------------------------

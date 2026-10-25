@@ -8,7 +8,7 @@ preinstalled Python after provisioning.
 
 | | |
 | --- | --- |
-| Reproducibility record | `packaging/windows/reproducibility.toml` |
+| Reproducibility record | `packaging/windows/reproducibility.x64.toml` |
 | Pure provisioning logic | `packaging/windows/provision.py` |
 | Windows entrypoint | `packaging/windows/provision_windows.py` |
 | Runtime witness (runs in appenv) | `packaging/windows/witness_runtime.py` |
@@ -194,3 +194,10 @@ change was required for ZA-WIN-BOOT-01.
 > shortcut, uninstaller and CI witness now exist — see
 > [`docs/windows-installer.md`](windows-installer.md). The BOOT-01 witness
 > above remains the accepted architecture proof; BOOT-02 wraps it.
+
+## Dual-architecture RC note
+
+The default bootstrap profile remains x64 for backward compatibility. The 0.1.4-rc1
+installer workflow selects an explicit x64 or ARM64 record and lock; see
+[`windows-arm64-rc.md`](windows-arm64-rc.md). No architecture is inferred from untrusted
+input and no x64 wheel may enter the ARM64 wheelhouse.

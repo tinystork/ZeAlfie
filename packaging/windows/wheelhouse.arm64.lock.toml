@@ -1,6 +1,6 @@
 # ZeAlfie Windows installer — EXACT offline wheelhouse dependency lock (ZA-WIN-BOOT-02).
 #
-# This lock pins the concrete Windows x64 / CPython 3.13 wheel set that the
+# This lock pins the concrete Windows ARM64 / CPython 3.13 wheel set that the
 # ZeAlfie installer bundles into {app}\assets\wheelhouse.  The installer's
 # pip runs FULLY OFFLINE: `pip install --no-index --find-links <wheelhouse>
 # <zealfie wheel>` — PyPI is never contacted on the user machine, so this
@@ -12,7 +12,7 @@
 # on Linux, downloading the actual Windows wheels:
 #
 #   pip download --dest <dir> --only-binary=:all: \
-#       --platform win_amd64 --python-version 3.13 \
+#       --platform win_arm64 --python-version 3.13 \
 #       --implementation cp --abi cp313 \
 #       packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45
 #
@@ -21,7 +21,7 @@
 # it would omit `colorama` (a dependency of `build`, marked os_name == "nt"
 # — the ONLY platform-marker runtime dep in this closure; setuptools'
 # marker deps are test/check/type extras only, never installed by default).
-# colorama==0.4.6 was therefore downloaded explicitly (same win_amd64/cp313
+# colorama==0.4.6 was therefore downloaded explicitly (same win_arm64/cp313
 # flags) and pinned below.  The CI `offline-closure-preflight` step
 # (windows-installer-build.yml, after acquire-wheelhouse) is the
 # AUTHORITATIVE Windows closure check: `pip install --no-index --find-links
@@ -43,20 +43,20 @@
 
 [metadata]
 # ZeAlfie version whose wheel this lock bootstraps.
-zealfie_version = "0.1.3"
+zealfie_version = "0.1.4rc1"
 # Source commit of the zealfie wheel payload: the immutable stable payload
 # commit 9f80d22 (accepted catalog feature merge) immediately preceding this
 # provenance-only closure commit.  Final CI artifact provenance is the
 # workflow's actual GITHUB_SHA at build time, not this value.
-source_commit = "9f80d2228e8c1074c9ee3d3b605de3a0f2816ba3"
+source_commit = "787226e8c06807f03c09806f2370500d3baa74bc"
 # pip download target tags (resolution flags; the PySide6 family ships
 # cp310-abi3 wheels which satisfy the cp313 request via the stable ABI).
-platform_tag = "win_amd64"
+platform_tag = "win_arm64"
 python_tag = "cp313"
 abi_tag = "cp313"
 generated = "2026-09-03"
 cpython_version = "3.13.15"
-cpython_installer_sha256 = "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403"
+cpython_installer_sha256 = "ce87247378f43f88e0202a0fa6d3cdb5f5fb246a3bc61b2fb604bd49b7862508"
 # The exact resolution requirement list (top-level, matching pyproject.toml
 # [project].dependencies of zealfie) ...
 requirements = [
@@ -66,16 +66,16 @@ requirements = [
   "setuptools>=77",
   "wheel>=0.45",
 ]
-pip_command = "pip download --dest <dir> --only-binary=:all: --platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45 ; plus colorama==0.4.6 downloaded explicitly with the same flags (Windows-only os_name=='nt' dep of build; Linux pip does not evaluate that marker). CI offline-closure-preflight (--dry-run --ignore-installed --no-index --find-links on the Windows runner) is the authoritative closure check."
+pip_command = "pip download --dest <dir> --only-binary=:all: --platform win_arm64 --python-version 3.13 --implementation cp --abi cp313 packaging>=24 PySide6>=6 build>=1.2 setuptools>=77 wheel>=0.45 ; plus colorama==0.4.6 downloaded explicitly with the same flags (Windows-only os_name=='nt' dep of build; Linux pip does not evaluate that marker). CI offline-closure-preflight (--dry-run --ignore-installed --no-index --find-links on the Windows runner) is the authoritative closure check."
 
 [zealfie]
 # The freshly-built zealfie wheel is ADDED to the wheelhouse by the
 # acquisition step (it can never be downloaded), so it deliberately has no
 # sha256 here — only filename/version/source metadata.
 name = "zealfie"
-version = "0.1.3"
-wheel_filename = "zealfie-0.1.3-py3-none-any.whl"
-source_commit = "9f80d2228e8c1074c9ee3d3b605de3a0f2816ba3"
+version = "0.1.4rc1"
+wheel_filename = "zealfie-0.1.4rc1-py3-none-any.whl"
+source_commit = "787226e8c06807f03c09806f2370500d3baa74bc"
 source = "local-build"
 
 # One table per pinned downloadable wheel, keyed by exact filename.
@@ -106,23 +106,23 @@ version = "1.2.0"
 sha256 = "9e5c6bfa8dcc30091c74b0cf803c81fdd29d94f01992a7707bc97babb1141913"
 size = 10216
 
-[wheel."pyside6-6.11.2-cp310-abi3-win_amd64.whl"]
+[wheel."pyside6-6.11.2-cp310-abi3-win_arm64.whl"]
 name = "PySide6"
 version = "6.11.2"
-sha256 = "3201d67e3c10be2eaedd3910ff0f02351eca7e88c95a291cde5e7f2f55ef207f"
-size = 578382
+sha256 = "0444ac71d0791a19bded35f6d9a94515941f23a6eb7098ca45a1b64a338be697"
+size = 561768
 
-[wheel."pyside6_addons-6.11.2-cp310-abi3-win_amd64.whl"]
+[wheel."pyside6_addons-6.11.2-cp310-abi3-win_arm64.whl"]
 name = "PySide6-Addons"
 version = "6.11.2"
-sha256 = "f449ea4431da20e7b86752cca8d166f93434516fe417f981c27e5f8e1b554407"
-size = 168208836
+sha256 = "d5606af369484b862b4d5741cfc179e19d2b8819c3e04d210b8188e0c9f85988"
+size = 35807245
 
-[wheel."pyside6_essentials-6.11.2-cp310-abi3-win_amd64.whl"]
+[wheel."pyside6_essentials-6.11.2-cp310-abi3-win_arm64.whl"]
 name = "PySide6-Essentials"
 version = "6.11.2"
-sha256 = "c8a29def77032773a30879f7f24415b5395ad08592d147c170824ef4c735dfc1"
-size = 76913043
+sha256 = "fadd75c5c20800d64dd0a586ea8cb337c5e630aa2246df0e5105738afa46e02c"
+size = 58125520
 
 [wheel."setuptools-84.0.0-py3-none-any.whl"]
 name = "setuptools"
@@ -130,11 +130,11 @@ version = "84.0.0"
 sha256 = "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
 size = 818216
 
-[wheel."shiboken6-6.11.2-cp310-abi3-win_amd64.whl"]
+[wheel."shiboken6-6.11.2-cp310-abi3-win_arm64.whl"]
 name = "shiboken6"
 version = "6.11.2"
-sha256 = "6ab0eba1c904455df621f9a6df3ca2bb896bab8670572d2bc4e37804ae91f19a"
-size = 1226578
+sha256 = "97c49432488df958f0308736f3d15b6915d8826fc380af17bb4b9ec5c4a5e81b"
+size = 1784669
 
 [wheel."wheel-0.48.0-py3-none-any.whl"]
 name = "wheel"

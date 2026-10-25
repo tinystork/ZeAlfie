@@ -35,9 +35,9 @@ audit) tracks the machine-scope footprint (see below).
 | --- | --- |
 | Inno script | `packaging/windows/installer/zealfie.iss` |
 | Inno toolchain pin | `packaging/windows/installer/innosetup.toml` |
-| Substrate pin | `packaging/windows/reproducibility.toml` (python-build-standalone archive) |
+| Substrate pin | `packaging/windows/reproducibility.x64.toml` (python-build-standalone archive) |
 | Redist. licenses | `packaging/windows/licenses/` → `{app}\assets\licenses` |
-| Offline wheelhouse lock | `packaging/windows/wheelhouse.lock.toml` |
+| Offline wheelhouse lock | `packaging/windows/wheelhouse.x64.lock.toml` |
 | Wheelhouse acquisition | `packaging/windows/acquire_wheelhouse.py` |
 | Installer smoke | `packaging/windows/installer_smoke.py` |
 | Side-effect witness | `packaging/windows/side_effect_witness.py` |
@@ -138,7 +138,7 @@ constructs (`Exec`, `SW_HIDE`, `ewWaitUntilTerminated`,
 
 ## Offline wheelhouse contract
 
-`packaging/windows/wheelhouse.lock.toml` pins the EXACT Windows x64 /
+`packaging/windows/wheelhouse.x64.lock.toml` pins the EXACT Windows x64 /
 CPython 3.13 wheel set bundled into `{app}\assets\wheelhouse`:
 
 * the zealfie wheel metadata (version 0.1.0, source commit, local-build);
@@ -368,3 +368,11 @@ pinned-payload SHA-256 provenance model in r1–r2), and the 9-wheel lock
   hostile same-minor collision witness (`docs/windows-python-substrate.md`
   §7) on a machine with an existing python.org Python 3.13 — the decisive
   isolation gate for ZA-WIN-BOOT-03B.
+
+## Windows ARM64 release-candidate profile (0.1.4-rc1)
+
+The x64-only historical contract above remains the baseline. ZeAlfie 0.1.4-rc1 adds an
+independent ARM64 profile without weakening or mixing that baseline. The current dual-arch
+contract, runner matrix, native PE audit and Inno x86-loader exception are documented in
+[`windows-arm64-rc.md`](windows-arm64-rc.md). The committed profile pairs are
+`reproducibility.{x64,arm64}.toml` and `wheelhouse.{x64,arm64}.lock.toml`.

@@ -63,9 +63,14 @@ __all__ = [
 ]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-#: Canonical zealfie wheel filename for a pinned version (stable
-#: ``zealfie-X.Y.Z-py3-none-any.whl`` or beta ``zealfie-X.Y.ZbN-py3-none-any.whl``).
-_ZEALFIE_WHEEL_RE = re.compile(r"^zealfie-\d+\.\d+\.\d+(?:b\d+)?-py3-none-any\.whl$")
+#: Canonical ZeAlfie wheel filename for a pinned PEP 440 release.  Packaging
+#: profiles accept stable, beta and release-candidate wheels; source/tag display
+#: spelling is deliberately kept outside the wheel identity.
+_ZEALFIE_WHEEL_RE = re.compile(
+    r"^zealfie-\d+\.\d+\.\d+(?:(?:b|rc)\d+)?-py3-none-any\.whl$"
+)
+
+_WINDOWS_PLATFORM_TAGS = frozenset({"win_amd64", "win_arm64"})
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +136,8 @@ class WheelhouseLock:
 
 
 def default_lock_path() -> Path:
-    """Path of ``wheelhouse.lock.toml`` next to this module."""
-    return Path(__file__).resolve().parent / "wheelhouse.lock.toml"
+    """Path of the backward-compatible default x64 wheelhouse lock."""
+    return Path(__file__).resolve().parent / "wheelhouse.x64.lock.toml"
 
 
 def parse_wheel_filename(filename: str) -> tuple[str, str]:
@@ -171,6 +176,16 @@ def parse_wheel_filename(filename: str) -> tuple[str, str]:
         ):
             return dist, version
     raise LockError(f"cannot parse distribution/version: {dist_version!r}")
+
+
+def wheel_platform_tag(filename: str) -> str:
+    """Return the platform tag from a syntactically valid wheel filename."""
+    if not filename.endswith(".whl"):
+        raise LockError(f"not a wheel filename: {filename!r}")
+    parts = filename[: -len(".whl")].rsplit("-", 3)
+    if len(parts) != 4 or not parts[-1]:
+        raise LockError(f"cannot parse wheel platform tag: {filename!r}")
+    return parts[-1]
 
 
 def zealfie_wheel_filename(version: str) -> str:
@@ -222,6 +237,11 @@ def load_lock(path: str | os.PathLike[str] | None = None) -> WheelhouseLock:
             f"commit SHA: {source_commit!r}"
         )
     platform_tag = _expect(metadata, "platform_tag", "platform tag")
+    if platform_tag not in _WINDOWS_PLATFORM_TAGS:
+        raise LockError(
+            "wheelhouse lock metadata.platform_tag must be one of "
+            f"{sorted(_WINDOWS_PLATFORM_TAGS)!r}, got {platform_tag!r}"
+        )
     python_tag = _expect(metadata, "python_tag", "python tag")
     abi_tag = _expect(metadata, "abi_tag", "abi tag")
     generated = _expect(metadata, "generated", "generation date")
@@ -246,6 +266,11 @@ def load_lock(path: str | os.PathLike[str] | None = None) -> WheelhouseLock:
         )
 
     zealfie_filename = _expect(zealfie, "wheel_filename", "zealfie wheel filename")
+    if not _ZEALFIE_WHEEL_RE.fullmatch(zealfie_filename):
+        raise LockError(
+            "wheelhouse lock zealfie wheel filename is not a supported "
+            f"stable/beta/RC py3-none-any wheel: {zealfie_filename!r}"
+        )
     expected_filename = zealfie_wheel_filename(zealfie_version)
     if zealfie_filename != expected_filename:
         raise LockError(
@@ -300,6 +325,13 @@ def load_lock(path: str | os.PathLike[str] | None = None) -> WheelhouseLock:
         if not isinstance(size, int) or size <= 0:
             raise LockError(f"wheelhouse lock wheel {filename} size invalid: {size!r}")
         parsed_name, parsed_version = parse_wheel_filename(filename)
+        wheel_platform = wheel_platform_tag(filename)
+        if wheel_platform not in ("any", platform_tag):
+            raise LockError(
+                f"wheelhouse lock wheel {filename}: platform "
+                f"{wheel_platform!r} does not match lock target "
+                f"{platform_tag!r} (only universal 'any' is portable)"
+            )
         if parsed_name.lower().replace("_", "-") != name.lower().replace("_", "-"):
             raise LockError(
                 f"wheelhouse lock wheel {filename}: entry name {name!r} does "

@@ -43,19 +43,21 @@ import wheelhouse_lock  # type: ignore[import-not-found]  # same-directory modul
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
-#: Resolution flags that MUST match the lock generation flags (win_amd64,
-#: CPython 3.13).  The lock's own metadata is validated against these.
-_DOWNLOAD_FLAGS = [    "--only-binary=:all:",
-    "--platform",
-    "win_amd64",
-    "--python-version",
-    "3.13",
-    "--implementation",
-    "cp",
-    "--abi",
-    "cp313",
-    "--disable-pip-version-check",
-]
+def _download_flags(lock: wheelhouse_lock.WheelhouseLock) -> list[str]:
+    """Exact pip target flags derived from a validated committed lock.
+
+    The caller cannot provide an arbitrary architecture: ``load_lock`` accepts
+    only the two Windows profiles and every native wheel must match the lock's
+    platform tag.
+    """
+    return [
+        "--only-binary=:all:",
+        "--platform", lock.platform_tag,
+        "--python-version", "3.13",
+        "--implementation", "cp",
+        "--abi", lock.abi_tag,
+        "--disable-pip-version-check",
+    ]
 
 
 class AcquireError(RuntimeError):
@@ -92,7 +94,7 @@ def step_download(lock: wheelhouse_lock.WheelhouseLock, staging: Path) -> None:
     for spec in specs:
         argv = [
             pip, "-m", "pip", "download", "--dest", str(staging),
-            *_DOWNLOAD_FLAGS, "--no-deps", spec,
+            *_download_flags(lock), "--no-deps", spec,
         ]
         _log(f"[acquire]   pip download --no-deps {spec}")
         proc = _run(argv, capture_output=True, text=True, encoding="utf-8",

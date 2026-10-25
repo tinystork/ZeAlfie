@@ -11,7 +11,7 @@
 #   checkout
 #     -> build the zealfie wheel (driver python — build concern only)
 #     -> download the pinned python-build-standalone archive
-#     -> verify its SHA-256 against packaging/windows/reproducibility.toml
+#     -> verify its SHA-256 against packaging/windows/reproducibility.x64.toml
 #        (fail closed — never extract an unverified payload)
 #     -> extract it into <witness-root>\python (stdlib tarfile, plain
 #        files — no installer, no Burn/MSI, no provider state)
@@ -163,7 +163,7 @@ jobs:
           OUT_CLI: "${{ steps.smoke-cli.outcome }}"
           OUT_GUI: "${{ steps.smoke-gui.outcome }}"
         run: |
-          PINNED_CPYTHON="$(python -c 'import tomllib; d=tomllib.load(open("packaging/windows/reproducibility.toml","rb")); print(d["cpython"]["version"])' 2>/dev/null || true)"
+          PINNED_CPYTHON="$(python -c 'import tomllib; d=tomllib.load(open("packaging/windows/reproducibility.x64.toml","rb")); print(d["cpython"]["version"])' 2>/dev/null || true)"
           PINNED_CPYTHON="${PINNED_CPYTHON:-see reproducibility.toml}"
           {
             echo "## ZeAlfie Windows standalone bootstrap — witness"
