@@ -263,15 +263,22 @@ def test_release_publish_workflow_is_manual_and_fail_closed() -> None:
     assert gate in text and download in text
     assert text.index(gate) < text.index(download)
     for token in (
-        "workflowName",
+        "workflowDatabaseId",
+        "actions/workflows/windows-installer-build.yml",
         "conclusion",
         "completed",
         "success",
         "headBranch",
-        "Windows dual-architecture installer RC",
         "release/0.1.4-rc1-windows-dual-arch",
     ):
         assert token in text, token
+    # The gate keys on the workflow DATABASE ID resolved live from the workflow
+    # file, never on the display name: GitHub keeps the name registered at
+    # creation time ("windows installer build"), so a label gate would refuse
+    # to publish a perfectly green run.
+    assert 'if data.get("workflowName") != expected_workflow' not in text
+    assert "run_workflow_id != expected_id" in text
+    assert "expected_id = wf.get(\"id\")" in text
     # F2: only an explicit HTTP 404 may mean "tag absent".
     assert "gh api --include" in text
     assert "could not determine tag state" in text

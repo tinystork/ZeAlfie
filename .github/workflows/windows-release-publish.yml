@@ -29,6 +29,11 @@ on:
 
 permissions:
   contents: write
+  # `gh run view` / `gh run download` and the workflow-identity lookup all hit
+  # the Actions API.  Specifying any `permissions:` key sets every unlisted
+  # scope to none, so `actions: read` must be declared explicitly or the gate
+  # would fail closed on a green run.
+  actions: read
 
 concurrency:
   group: windows-release-publish-${{ inputs.tag }}
@@ -65,22 +70,47 @@ jobs:
           # The build workflow uploads artifacts with `if: always()`, so a FAILED
           # run still exposes checksum-valid EXEs. This gate is the only thing
           # that prevents publishing a red run.
+          #
+          # Workflow IDENTITY is resolved live from the workflow file and
+          # compared by database id.  GitHub keeps the workflow name that was
+          # registered at creation time (this repo: "windows installer build"),
+          # so a display name is NOT a stable identity and must never gate a
+          # publication.
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/windows-installer-build.yml" \
+            > workflow-meta.json
           gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --json workflowName,status,conclusion,headBranch,headSha \
+            --json workflowDatabaseId,workflowName,status,conclusion,headBranch,headSha \
             > run-meta.json
-          python3 - run-meta.json <<'PY'
+          python3 - run-meta.json workflow-meta.json <<'PY'
           import json
           import os
           import re
           import sys
 
-          expected_workflow = "Windows dual-architecture installer RC"
           expected_branch = "release/0.1.4-rc1-windows-dual-arch"
+          expected_path = ".github/workflows/windows-installer-build.yml"
           data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          wf = json.loads(open(sys.argv[2], encoding="utf-8").read())
           problems = []
-          if data.get("workflowName") != expected_workflow:
+          if wf.get("path") != expected_path:
               problems.append(
-                  f"workflowName is {data.get('workflowName')!r}, expected {expected_workflow!r}"
+                  f"build workflow path is {wf.get('path')!r}, expected {expected_path!r}"
+              )
+          expected_id = wf.get("id")
+          if not isinstance(expected_id, int):
+              problems.append(
+                  f"build workflow id is not an integer: {expected_id!r}"
+              )
+          run_workflow_id = data.get("workflowDatabaseId")
+          if not isinstance(run_workflow_id, int):
+              problems.append(
+                  f"run workflowDatabaseId is not an integer: {run_workflow_id!r}"
+              )
+          elif isinstance(expected_id, int) and run_workflow_id != expected_id:
+              problems.append(
+                  "run belongs to workflowDatabaseId "
+                  f"{run_workflow_id!r}, expected the build workflow "
+                  f"{expected_id!r} (run workflowName: {data.get('workflowName')!r})"
               )
           if data.get("status") != "completed":
               problems.append(f"status is {data.get('status')!r}, expected 'completed'")
