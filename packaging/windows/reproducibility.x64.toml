@@ -24,11 +24,11 @@
 [zealfie]
 # ZeAlfie version/revision whose wheel this record bootstraps.
 version = "0.1.4rc1"
-# Immutable ZeAlfie stable payload commit (the accepted catalog feature merge
-# commit 9f80d22 immediately preceding this provenance-only closure commit).
+# Immutable ZeAlfie 0.1.4rc1 dual-architecture payload commit immediately
+# preceding this provenance-only closure commit.
 # The final CI artifact provenance is the workflow's actual GITHUB_SHA at
 # build time, not this value.
-revision = "787226e8c06807f03c09806f2370500d3baa74bc"
+revision = "e46669870266bbc5c41639feaaedf5f63b2380a6"
 
 [cpython]
 # Exact pinned private runtime interpreter: python-build-standalone
