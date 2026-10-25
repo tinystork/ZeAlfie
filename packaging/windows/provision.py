@@ -63,6 +63,7 @@ __all__ = [
     "load_record",
     "sha256_file",
     "verify_archive_sha256",
+    "verify_archive_record",
     "private_python_dir",
     "private_python_exe",
     "private_pythonw_exe",
@@ -116,6 +117,10 @@ class RecordError(WindowsBootstrapError):
 
 class HashMismatchError(WindowsBootstrapError):
     """Downloaded archive SHA-256 does not match the pinned record."""
+
+
+class SizeMismatchError(WindowsBootstrapError):
+    """Downloaded archive byte size does not match the pinned record."""
 
 
 class ExtractionError(WindowsBootstrapError):
@@ -394,6 +399,30 @@ def verify_archive_sha256(
             f"computed {actual}"
         )
     return actual
+
+
+def verify_archive_record(
+    archive_path: str | os.PathLike[str],
+    record: ReproducibilityRecord,
+) -> str:
+    """Verify BOTH the pinned byte size and SHA-256 (fail closed).
+
+    The reproducibility record pins an immutable archive: a size mismatch means
+    the download is truncated/corrupt (or the record is wrong) and must fail
+    BEFORE extraction, with a precise diagnostic.  The SHA-256 is then verified
+    by :func:`verify_archive_sha256`; returns the computed digest.
+    """
+    if record is None:
+        raise RecordError(
+            "verify_archive_record requires a reproducibility record"
+        )
+    actual_size = int(os.path.getsize(archive_path))
+    if actual_size != int(record.size):
+        raise SizeMismatchError(
+            "archive size mismatch: expected "
+            f"{int(record.size)} bytes, got {actual_size}"
+        )
+    return verify_archive_sha256(archive_path, record=record)
 
 
 # ---------------------------------------------------------------------------

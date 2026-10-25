@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import struct
 import sys
 from pathlib import Path
@@ -105,3 +106,46 @@ def test_inno_script_is_strictly_parameterized_and_honest_about_loader() -> None
     assert "windows-{#ArtifactArchitecture}" in text
     assert "VersionInfoVersion={#ZeAlfieFileVersion}" in text
     assert 'DestName: "reproducibility.toml"' in text
+
+
+def test_inno_product_version_is_numeric_and_text_keeps_rc() -> None:
+    """Inno VS_FIXEDFILEINFO requires a NUMERIC product version."""
+    text = ISS.read_text(encoding="utf-8")
+    assert "VersionInfoProductVersion={#ZeAlfieFileVersion}" in text
+    assert "VersionInfoProductTextVersion={#ZeAlfieDisplayVersion}" in text
+    assert "VersionInfoProductVersion={#ZeAlfieDisplayVersion}" not in text
+    file_version = re.search(
+        r'#define ZeAlfieFileVersion "([^"]+)"', text
+    ).group(1)
+    display = re.search(
+        r'#define ZeAlfieDisplayVersion "([^"]+)"', text
+    ).group(1)
+    # Up to four dot-separated numbers: 0.1.4.0 is valid, 0.1.4-rc1 is NOT.
+    assert re.fullmatch(r"\d+(?:\.\d+){1,3}", file_version), file_version
+    assert file_version == "0.1.4.0"
+    assert display == "0.1.4-rc1"
+
+
+def test_workflow_header_does_not_claim_a_push_trigger() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    header = text.split("on:", 1)[0]
+    assert "workflow_dispatch ONLY" in header
+    assert "workflow_dispatch AND push" not in header
+    assert "push:" not in text.split("permissions:", 1)[0]
+
+
+def test_arm64_reproducibility_size_comment_matches_pin() -> None:
+    text = (PKG / "reproducibility.arm64.toml").read_text(encoding="utf-8")
+    assert "size = 43801216" in text
+    assert "43 801 216 bytes" in text
+    assert "47 042 104 bytes" not in text
+
+
+def test_provenance_payload_commit_is_sourced_not_hardcoded() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert 'payload_commit = str(wheel["source_commit"])' in text
+    assert '"payload_commit": payload_commit' in text
+    prov = text.split("- id: provenance", 1)[1].split(
+        "- id: upload-artifacts", 1
+    )[0]
+    assert "e466698" not in prov

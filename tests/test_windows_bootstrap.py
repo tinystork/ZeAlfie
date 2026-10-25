@@ -681,3 +681,32 @@ def test_entrypoint_requires_a_subcommand() -> None:
         timeout=120,
     )
     assert proc.returncode != 0
+
+
+def test_verify_archive_record_enforces_pinned_size(tmp_path) -> None:
+    """A correct SHA-256 with a wrong pinned size must fail closed."""
+    payload = b"fake-archive-bytes"
+    archive = tmp_path / "archive.tar.gz"
+    archive.write_bytes(payload)
+    sha = hashlib.sha256(payload).hexdigest()
+
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    good = provision.load_record(
+        _write_record(
+            good_dir,
+            **{"cpython.sha256": sha, "cpython.size": len(payload)},
+        )
+    )
+    assert provision.verify_archive_record(archive, good) == sha
+
+    bad_dir = tmp_path / "bad"
+    bad_dir.mkdir()
+    bad = provision.load_record(
+        _write_record(
+            bad_dir,
+            **{"cpython.sha256": sha, "cpython.size": len(payload) + 1},
+        )
+    )
+    with pytest.raises(provision.SizeMismatchError, match="size mismatch"):
+        provision.verify_archive_record(archive, bad)

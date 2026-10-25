@@ -139,9 +139,9 @@ def step_provision_python(record, witness_root: Path, installer: Path | None) ->
         else:
             print(f"[provision-python] reusing cached archive {installer}")
 
-    # Fail closed on hash mismatch — never extract an unverified payload.
-    actual = provision.verify_archive_sha256(installer, record=record)
-    print(f"[provision-python] sha256 verified: {actual}")
+    # Fail closed on size OR hash mismatch — never extract an unverified payload.
+    actual = provision.verify_archive_record(installer, record=record)
+    print(f"[provision-python] size+sha256 verified: {actual}")
 
     # Record the extraction evidence for diagnostics.
     extract_log = logs / "python-extract.log"

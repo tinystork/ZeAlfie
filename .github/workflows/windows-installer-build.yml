@@ -15,8 +15,8 @@
 # files under {app}\python, so the end-user Setup needs no tar/PowerShell
 # archive/7-Zip/Python/network.
 #
-# Triggers: workflow_dispatch AND push on the feature branch (a push
-# trigger is part of the design — not an afterthought bootstrap).
+# Trigger: workflow_dispatch ONLY (manual). There is deliberately NO push,
+# tag or release trigger: dispatching this workflow is the only way it runs.
 #
 # Sequence (every step must succeed on its own; fail closed):
 #   checkout
@@ -418,6 +418,10 @@ jobs:
                                  "acquire-provenance.json"),
                     encoding="utf-8") as fh:
               wheel = json.load(fh)
+          # The payload commit comes from the architecture-specific VALIDATED
+          # wheelhouse acquisition provenance (itself derived from the pinned
+          # lock) — never a duplicated/hard-coded SHA in this workflow.
+          payload_commit = str(wheel["source_commit"])
           # The substrate pin is the authoritative record (already verified
           # fail-closed by the acquire-standalone-python step).
           with open(f"packaging/windows/reproducibility.{os.environ['TARGET_PROFILE']}.toml", "rb") as fh:
@@ -426,6 +430,7 @@ jobs:
               "artifact": "ZeAlfie-Setup-0.1.4-rc1-windows-${{ matrix.artifact_arch }}.exe",
               "zealfie_version": "0.1.4rc1",
               "source_commit": os.environ.get("GITHUB_SHA", ""),
+              "payload_commit": payload_commit,
               "target_profile": os.environ["TARGET_PROFILE"],
               "native_payload_machine": "${{ matrix.pe_machine }}",
               "inno_setup_loader_native_arm64": False,

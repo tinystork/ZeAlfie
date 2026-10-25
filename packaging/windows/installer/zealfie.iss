@@ -146,7 +146,8 @@ VersionInfoVersion={#ZeAlfieFileVersion}
 VersionInfoCompany=ZeSoftware
 VersionInfoDescription=ZeAlfie {#ZeAlfieDisplayVersion} (offline per-user install)
 VersionInfoProductName=ZeAlfie
-VersionInfoProductVersion={#ZeAlfieDisplayVersion}
+VersionInfoProductVersion={#ZeAlfieFileVersion}
+VersionInfoProductTextVersion={#ZeAlfieDisplayVersion}
 DefaultDirName={localappdata}\Programs\ZeAlfie
 DisableProgramGroupPage=yes
 ; Per-user, non-admin, always: no elevation, no /ALLUSERS override.
