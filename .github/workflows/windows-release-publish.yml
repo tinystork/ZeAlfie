@@ -1,9 +1,9 @@
 name: Windows release publish (dual-arch RC)
 
 # MANUAL, PUBLICATION-ONLY workflow. It never builds, never touches source, and
-# never signs anything. It downloads the two artifacts produced by a SUCCESSFUL
-# windows-installer-build run, verifies every SHA-256 against the downloaded
-# EXE, refuses to move an existing tag, and then creates the tag + GitHub
+# never signs anything. It validates the referenced build run, verifies every
+# SHA-256 against the downloaded EXE, binds provenance/audit to the lane and the
+# build SHA, refuses to move an existing tag, and then creates the tag + GitHub
 # Release. The build workflow keeps `contents: read`; only this workflow has
 # `contents: write`.
 #
@@ -55,18 +55,78 @@ jobs:
             exit 1
           fi
 
-      - name: Refuse to move an existing tag
+      - name: Verify the referenced build run succeeded (before any download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The build workflow uploads artifacts with `if: always()`, so a FAILED
+          # run still exposes checksum-valid EXEs. This gate is the only thing
+          # that prevents publishing a red run.
+          gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json workflowName,status,conclusion,headBranch,headSha \
+            > run-meta.json
+          python3 - run-meta.json <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          expected_workflow = "Windows dual-architecture installer RC"
+          expected_branch = "release/0.1.4-rc1-windows-dual-arch"
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          problems = []
+          if data.get("workflowName") != expected_workflow:
+              problems.append(
+                  f"workflowName is {data.get('workflowName')!r}, expected {expected_workflow!r}"
+              )
+          if data.get("status") != "completed":
+              problems.append(f"status is {data.get('status')!r}, expected 'completed'")
+          if data.get("conclusion") != "success":
+              problems.append(
+                  f"conclusion is {data.get('conclusion')!r}, expected 'success'"
+              )
+          if data.get("headBranch") != expected_branch:
+              problems.append(
+                  f"headBranch is {data.get('headBranch')!r}, expected {expected_branch!r}"
+              )
+          head_sha = str(data.get("headSha") or "")
+          if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+              problems.append(f"headSha is not a full commit SHA: {head_sha!r}")
+          if problems:
+              for problem in problems:
+                  print(f"::error::refusing to publish run {os.environ.get('RUN_ID')}: {problem}")
+              raise SystemExit(1)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"BUILD_SHA={head_sha}\n")
+          print(f"build run {os.environ.get('RUN_ID')} OK: completed/success on {expected_branch} at {head_sha}")
+          PY
+
+      - name: Refuse to move an existing tag (404 means absent; anything else fails)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+          set +e
+          OUT=$(gh api --include "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" 2>&1)
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
             echo "::error::tag ${TAG} already exists — refusing to move it"
             exit 1
           fi
-          echo "tag ${TAG} does not exist yet: OK to create"
+          # ONLY an explicit HTTP 404 means "absent". 401/403/5xx/rate-limit or a
+          # network failure must never be treated as "tag absent".
+          if printf '%s\n' "$OUT" | grep -Eq 'HTTP/[0-9.]+ 404|\(HTTP 404\)'; then
+            echo "tag ${TAG} is absent (HTTP 404): OK to create"
+            exit 0
+          fi
+          echo "::error::could not determine tag state for ${TAG} (gh rc=${RC}); refusing to guess: ${OUT}"
+          exit 1
 
       - name: Download both architecture artifacts
         env:
@@ -81,23 +141,28 @@ jobs:
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name "zealfie-setup-0.1.4-rc1-windows-arm64" --dir dist/arm64
 
-      - name: Verify assets and SHA-256 checksums (fail closed)
+      - name: Verify assets, checksums, lane/SHA provenance (fail closed)
+        env:
+          BUILD_SHA: ${{ env.BUILD_SHA }}
         shell: bash
         run: |
           set -euo pipefail
+          test -n "${BUILD_SHA:-}" || { echo "::error::BUILD_SHA missing (run gate did not run)"; exit 1; }
           python3 - <<'PY'
           import hashlib
           import json
+          import os
           import pathlib
           import re
           import sys
 
+          build_sha = os.environ["BUILD_SHA"]
           lanes = {
-              "x64": "ZeAlfie-Setup-0.1.4-rc1-windows-x64.exe",
-              "arm64": "ZeAlfie-Setup-0.1.4-rc1-windows-arm64.exe",
+              "x64": ("ZeAlfie-Setup-0.1.4-rc1-windows-x64.exe", "AMD64"),
+              "arm64": ("ZeAlfie-Setup-0.1.4-rc1-windows-arm64.exe", "ARM64"),
           }
           failures = []
-          for lane, exe_name in lanes.items():
+          for lane, (exe_name, machine) in lanes.items():
               root = pathlib.Path("dist") / lane
               exe = root / exe_name
               sha = root / (exe_name + ".sha256")
@@ -117,46 +182,58 @@ jobs:
                   continue
               expected, declared_name = match.group(1).lower(), match.group(2)
               if pathlib.PurePath(declared_name).name != exe_name:
-                  failures.append(
-                      f"{lane}: checksum names {declared_name!r}, expected {exe_name!r}"
-                  )
+                  failures.append(f"{lane}: checksum names {declared_name!r}, expected {exe_name!r}")
                   continue
               actual = hashlib.sha256(exe.read_bytes()).hexdigest()
               if actual != expected:
-                  failures.append(
-                      f"{lane}: checksum mismatch for {exe_name}: {actual} != {expected}"
-                  )
+                  failures.append(f"{lane}: checksum mismatch for {exe_name}: {actual} != {expected}")
                   continue
               print(f"[verify] {lane}: {exe_name} sha256={actual}")
-              for name in ("provenance.json", "native-payload-audit.json"):
-                  if not (root / name).is_file():
-                      failures.append(f"{lane}: missing {name}")
-                      continue
-                  data = json.loads((root / name).read_text(encoding="utf-8"))
-                  if name == "native-payload-audit.json" and data.get("status") != "PASS":
-                      failures.append(
-                          f"{lane}: native-payload-audit.json status is {data.get('status')!r}, expected 'PASS'"
-                      )
+
+              prov_path = root / "provenance.json"
+              audit_path = root / "native-payload-audit.json"
+              if not prov_path.is_file():
+                  failures.append(f"{lane}: missing provenance.json")
+                  prov = {}
+              else:
+                  prov = json.loads(prov_path.read_text(encoding="utf-8"))
+              if not audit_path.is_file():
+                  failures.append(f"{lane}: missing native-payload-audit.json")
+                  audit = {}
+              else:
+                  audit = json.loads(audit_path.read_text(encoding="utf-8"))
+
+              if prov.get("source_commit") != build_sha:
+                  failures.append(
+                      f"{lane}: provenance.source_commit {prov.get('source_commit')!r} != build SHA {build_sha!r}"
+                  )
+              if prov.get("target_profile") != lane:
+                  failures.append(
+                      f"{lane}: provenance.target_profile {prov.get('target_profile')!r} != {lane!r}"
+                  )
+              if prov.get("native_payload_machine") != machine:
+                  failures.append(
+                      f"{lane}: provenance.native_payload_machine {prov.get('native_payload_machine')!r} != {machine!r}"
+                  )
+              if audit.get("status") != "PASS":
+                  failures.append(
+                      f"{lane}: native-payload-audit.json status is {audit.get('status')!r}, expected 'PASS'"
+                  )
+              if audit.get("expected_machine") != machine:
+                  failures.append(
+                      f"{lane}: native-payload-audit expected_machine {audit.get('expected_machine')!r} != {machine!r}"
+                  )
           if failures:
               for failure in failures:
                   print(f"::error::{failure}")
               sys.exit(1)
-          print("[verify] both lanes verified; no missing asset, no checksum mismatch")
+          print(f"[verify] both lanes verified against build SHA {build_sha}; no missing asset, no checksum or provenance mismatch")
           PY
 
-      - name: Resolve build head SHA and stage release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ inputs.run_id }}
+      - name: Stage release assets
         shell: bash
         run: |
           set -euo pipefail
-          BUILD_SHA=$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)
-          if ! [[ "$BUILD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::could not resolve the build run head SHA (got '$BUILD_SHA')"
-            exit 1
-          fi
-          echo "BUILD_SHA=$BUILD_SHA" >> "$GITHUB_ENV"
           rm -rf release-assets && mkdir -p release-assets
           cp dist/x64/*.exe dist/x64/*.sha256 release-assets/
           cp dist/arm64/*.exe dist/arm64/*.sha256 release-assets/
@@ -196,6 +273,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -n "${BUILD_SHA:-}" || { echo "::error::BUILD_SHA missing"; exit 1; }
           FLAGS=()
           if [[ "$PRERELEASE" == "true" ]]; then
             FLAGS+=(--prerelease)

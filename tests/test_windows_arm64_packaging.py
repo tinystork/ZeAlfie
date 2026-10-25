@@ -253,9 +253,42 @@ def test_release_publish_workflow_is_manual_and_fail_closed() -> None:
 
     # Checksums are verified BEFORE the release is created.
     assert "sha256" in text.lower()
-    assert text.index("Verify assets and SHA-256 checksums") < text.index(
+    assert text.index("Verify assets, checksums") < text.index(
         "gh release create"
     )
+    # F1: the referenced run must be validated as a successful dual-arch build
+    # BEFORE any artifact download.
+    gate = "Verify the referenced build run succeeded"
+    download = "Download both architecture artifacts"
+    assert gate in text and download in text
+    assert text.index(gate) < text.index(download)
+    for token in (
+        "workflowName",
+        "conclusion",
+        "completed",
+        "success",
+        "headBranch",
+        "Windows dual-architecture installer RC",
+        "release/0.1.4-rc1-windows-dual-arch",
+    ):
+        assert token in text, token
+    # F2: only an explicit HTTP 404 may mean "tag absent".
+    assert "gh api --include" in text
+    assert "could not determine tag state" in text
+    assert "404" in text
+    assert 'if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then' not in text
+    # F3: provenance/audit are bound to the lane and the resolved build SHA.
+    assert "BUILD_SHA" in text
+    assert text.index(gate) < text.index("Verify assets, checksums, lane/SHA provenance")
+    for token in (
+        "source_commit",
+        "target_profile",
+        "native_payload_machine",
+        "expected_machine",
+        '"AMD64"',
+        '"ARM64"',
+    ):
+        assert token in text, token
     assert "refusing to move it" in text
     assert "git/ref/tags/" in text
     assert "provenance.json" in text and "native-payload-audit.json" in text
